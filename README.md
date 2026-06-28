@@ -89,6 +89,7 @@ Domyślny przepływ jest taki:
 - importer dalej dopisuje nowe interpretacje do `processed` JSONL jako lokalnego bufora roboczego,
 - `POST /api/rag/reindex` domyślnie buduje lokalny indeks SQLite,
 - `/api/chat` korzysta z lokalnego indeksu, a Supabase jest tylko opcjonalnym rozszerzeniem.
+- jeśli pliki źródłowe ustaw są nowsze niż lokalny SQLite, backend automatycznie odświeży indeks przy pierwszym zapytaniu.
 
 Zbudowanie albo odświeżenie indeksu:
 

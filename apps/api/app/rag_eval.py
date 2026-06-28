@@ -48,6 +48,23 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Write a durable JSON report after every evaluated case.",
     )
+    parser.add_argument(
+        "--tax-domain",
+        default=None,
+        help="Restrict retrieval to a single tax domain such as PIT, CIT, or VAT.",
+    )
+    parser.add_argument(
+        "--enforce-query-domain",
+        action="store_true",
+        help="Require retrieval to stay inside the requested tax domain.",
+    )
+    parser.add_argument(
+        "--source-type",
+        action="append",
+        choices=["interpretation", "statute", "judgment", "commentary"],
+        default=None,
+        help="Restrict retrieval to one or more source types. May be repeated.",
+    )
     return parser.parse_args()
 
 
@@ -135,6 +152,19 @@ def hit_within(rank: Optional[int], limit: int) -> bool:
     return rank is not None and rank <= limit
 
 
+def filter_expected_hits(
+    hits: list[dict[str, Any]], *, expected_document_ids: list[str], expected_signatures: list[str]
+) -> list[dict[str, Any]]:
+    expected_documents = {value for value in expected_document_ids if value}
+    expected_signature_values = {value for value in expected_signatures if value}
+    return [
+        hit
+        for hit in hits
+        if str(hit.get("document_id") or "") in expected_documents
+        or str(hit.get("signature") or "") in expected_signature_values
+    ]
+
+
 def expected_source_present(
     *, expected_document_ids: list[str], expected_signatures: list[str]
 ) -> bool:
@@ -157,14 +187,28 @@ def expected_source_present(
     return row is not None
 
 
-def evaluate_case(case: dict[str, Any], *, override_limit: Optional[int] = None) -> dict[str, Any]:
+def evaluate_case(
+    case: dict[str, Any],
+    *,
+    override_limit: Optional[int] = None,
+    tax_domain: Optional[str] = None,
+    enforce_query_domain: bool = False,
+    source_types: Optional[set[str]] = None,
+) -> dict[str, Any]:
     case_id = str(case.get("id") or "").strip() or "unnamed-case"
     question = str(case.get("question") or "").strip()
     if not question:
         raise ValueError(f"Case {case_id} is missing a non-empty question")
 
     limit = override_limit or int(case.get("limit") or 0) or None
-    inspection = inspect_search(question, limit=limit)
+    tax_domains = {tax_domain.upper()} if tax_domain else None
+    inspection = inspect_search(
+        question,
+        limit=limit,
+        source_types=source_types,
+        tax_domains=tax_domains,
+        enforce_query_domain=enforce_query_domain,
+    )
     chunks = inspection.chunks
     raw_candidate_pool = inspection.raw_candidate_pool
     top_document_ids = [chunk.document_id for chunk in chunks]
@@ -228,6 +272,16 @@ def evaluate_case(case: dict[str, Any], *, override_limit: Optional[int] = None)
         "citations": list_citations(chunks),
         "context_block": build_context_block(chunks),
         "top_hits": inspection.hits,
+        "expected_final_hits": filter_expected_hits(
+            inspection.hits,
+            expected_document_ids=expected_document_ids,
+            expected_signatures=expected_signatures,
+        ),
+        "expected_raw_candidates": filter_expected_hits(
+            raw_candidate_pool,
+            expected_document_ids=expected_document_ids,
+            expected_signatures=expected_signatures,
+        ),
         "raw_candidate_pool": raw_candidate_pool,
     }
 
@@ -242,7 +296,15 @@ def main() -> None:
     report_path = Path(args.report) if args.report else None
     results: list[dict[str, Any]] = []
     for case in cases:
-        results.append(evaluate_case(case, override_limit=args.limit))
+        results.append(
+            evaluate_case(
+                case,
+                override_limit=args.limit,
+                tax_domain=args.tax_domain,
+                enforce_query_domain=args.enforce_query_domain,
+                source_types=set(args.source_type) if args.source_type else None,
+            )
+        )
         if report_path:
             write_report(report_path, cases_path=cases_path, results=results, complete=False)
     summary = write_report(report_path, cases_path=cases_path, results=results, complete=True)

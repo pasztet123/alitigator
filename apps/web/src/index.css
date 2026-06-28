@@ -1,12 +1,12 @@
 :root {
-  --text: #4f6656;
-  --text-h: #163122;
-  --bg: #eef5ef;
-  --border: rgba(48, 88, 55, 0.16);
-  --accent: #1d6e44;
-  --accent-strong: #11452b;
-  --accent-bg: rgba(72, 135, 84, 0.14);
-  --shadow: rgba(16, 42, 23, 0.08) 0 20px 45px -20px;
+  --text: #58705d;
+  --text-h: #1f3527;
+  --bg: #edf2ea;
+  --border: rgba(35, 63, 43, 0.12);
+  --accent: #2f5b41;
+  --accent-strong: #183828;
+  --accent-bg: rgba(47, 91, 65, 0.12);
+  --shadow: rgba(18, 35, 24, 0.14) 0 18px 38px -24px;
   --sans: 'Avenir Next', 'Manrope', 'Segoe UI', sans-serif;
   --heading: 'Avenir Next', 'Manrope', 'Segoe UI', sans-serif;
   --mono: 'SFMono-Regular', 'IBM Plex Mono', monospace;
@@ -33,8 +33,8 @@ body {
   min-width: 320px;
   min-height: 100svh;
   background:
-    radial-gradient(circle at top left, rgba(135, 190, 120, 0.16), transparent 22%),
-    linear-gradient(180deg, #f5faf3 0%, #edf3ee 100%);
+    radial-gradient(circle at top left, rgba(105, 150, 104, 0.14), transparent 24%),
+    linear-gradient(180deg, #f5f8f2 0%, #e9efe8 100%);
 }
 
 #root {

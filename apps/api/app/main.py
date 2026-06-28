@@ -2,21 +2,26 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime, timezone
 from typing import Literal, Optional, Union
+from uuid import uuid4
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from postgrest.exceptions import APIError
 from pydantic import BaseModel, Field
 
 from app.eureka_ingest import DEFAULT_CONCURRENCY, DEFAULT_PAGE_SIZE, DEFAULT_SORT, FetchConfig, run_ingest
 from app.rag import (
+    RagChunk,
     build_context_block,
     inspect_search,
     index_exists,
     list_citations,
     reindex_corpus,
+    search_chat_chunks,
     search_chunks,
 )
 from app.supabase_rag import (
@@ -25,7 +30,7 @@ from app.supabase_rag import (
     reindex_corpus_to_supabase,
     search_chunks_supabase,
 )
-from app.supabase_client import is_supabase_configured
+from app.supabase_client import get_supabase_service_client, is_supabase_configured
 
 load_dotenv()
 
@@ -61,8 +66,9 @@ Zasady odpowiedzi:
 3. Jeśli nie masz zweryfikowanych źródeł, napisz to wprost.
 4. Struktura odpowiedzi ma mieć sekcje: Teza, Analiza, Źródła, Ryzyka i luki.
 5. Nie udawaj pewności. Gdy stan prawny lub orzecznictwo wymaga potwierdzenia, zaznacz to jednoznacznie.
-6. Jeżeli dostałeś fragmenty źródłowe z indeksu interpretacji, opieraj odpowiedź wyłącznie na nich i cytuj tylko te źródła.
-7. Jeśli dostarczone źródła nie wystarczają do stanowczej odpowiedzi, napisz to wprost.
+6. Zawsze rozróżniaj rodzaj źródła: ustawa jest treścią normy, interpretacja indywidualna przedstawia ocenę organu w konkretnej sprawie, interpretacja ogólna ma odrębny charakter, a wyrok jest wykładnią sądu.
+7. Nie przedstawiaj interpretacji ani komentarza jako obowiązującego przepisu. Nie przedstawiaj przepisu jako stanowiska organu.
+8. Jeśli dostarczone źródła nie wystarczają do stanowczej odpowiedzi, napisz to wprost.
 """.strip()
 
 REDACTION_PATTERNS = {
@@ -81,6 +87,7 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1, max_length=24)
     model: Optional[str] = None
+    chat_id: Optional[str] = Field(default=None, max_length=128)
 
 
 class ChatResponse(BaseModel):
@@ -88,11 +95,52 @@ class ChatResponse(BaseModel):
     mode: Literal["demo", "live"]
     model: str
     redactions: list[str]
+    chat_id: Optional[str] = None
 
 
 class ModelsResponse(BaseModel):
     default_model: str
     models: list[str]
+
+
+class ChatThreadSummary(BaseModel):
+    id: str
+    title: str
+    archived: bool
+    updated_at: str
+    created_at: str
+    last_message_preview: str
+
+
+class ChatThreadsResponse(BaseModel):
+    active: list[ChatThreadSummary]
+    archived: list[ChatThreadSummary]
+
+
+class ChatThreadCreateRequest(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=160)
+
+
+class ChatThreadUpdateRequest(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=160)
+    archived: Optional[bool] = None
+
+
+class PersistedChatMessage(BaseModel):
+    id: str
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: str
+
+
+class ChatThreadDetail(BaseModel):
+    id: str
+    title: str
+    archived: bool
+    updated_at: str
+    created_at: str
+    last_message_preview: str
+    messages: list[PersistedChatMessage]
 
 
 class EurekaImportRequest(BaseModel):
@@ -144,6 +192,7 @@ class RagReindexResponse(BaseModel):
 class RagSearchRequest(BaseModel):
     query: str = Field(min_length=3, max_length=4000)
     limit: Optional[int] = Field(default=None, ge=1, le=30)
+    source_types: Optional[list[Literal["interpretation", "statute", "judgment", "commentary"]]] = None
 
 
 class RagSearchHit(BaseModel):
@@ -157,6 +206,14 @@ class RagSearchHit(BaseModel):
     published_date: Optional[str]
     source_url: Optional[str]
     category: Optional[str]
+    source: str
+    source_type: str
+    source_subtype: Optional[str]
+    authority: Optional[str]
+    publication: Optional[str]
+    legal_state_date: Optional[str]
+    source_pages: list[int]
+    legal_provisions: list[str]
     chunk_chars: int
     preview: str
     selected_for_context: bool
@@ -198,18 +255,22 @@ def redact_text(text: str) -> tuple[str, list[str]]:
     return redacted, applied
 
 
-def build_demo_reply(user_prompt: str) -> str:
+def build_demo_reply(user_prompt: str, retrieved_chunks: list) -> str:
+    citations = list_citations(retrieved_chunks)
+    opening_quote = extract_opening_statute_quote(retrieved_chunks)
+    quote_block = f"Cytat z przepisu\n{opening_quote}\n\n" if opening_quote else ""
     return (
-        "Teza\n"
-        "To jest tryb demonstracyjny MVP. Backend działa poprawnie, ale klucz Anthropic nie został jeszcze podany w środowisku.\n\n"
+        quote_block
+        + "Teza\n"
+        "To jest tryb demonstracyjny MVP: nie generuję opinii prawnej bez modelu językowego.\n\n"
         "Analiza\n"
         "Odebrałem pytanie: \""
         f"{user_prompt[:900]}"
-        "\". Na tym etapie mogę już obsłużyć bezpieczny przepływ przez backend, przygotować historię rozmowy i maskować podstawowe dane wrażliwe.\n\n"
+        "\". Lokalny retrieval znalazł zweryfikowane źródła, ale tryb demo ich nie interpretuje.\n\n"
         "Źródła\n"
-        "Jeżeli indeks RAG nie został jeszcze zbudowany albo klucz modelu nie jest dostępny, nie podaję pozornych cytowań.\n\n"
+        f"{citations or 'Nie znaleziono trafnych fragmentów w lokalnym indeksie.'}\n\n"
         "Ryzyka i luki\n"
-        "Brakuje jeszcze uwierzytelniania, kredytów, retencji w Supabase i warstwy źródeł do researchu podatkowego."
+        "Do odpowiedzi merytorycznej potrzebny jest skonfigurowany model językowy; powyższe źródła są jednak dostępne w RAG."
     )
 
 
@@ -230,18 +291,184 @@ def resolve_model(requested_model: Optional[str]) -> str:
     return DEFAULT_MODEL if DEFAULT_MODEL in AVAILABLE_MODELS else AVAILABLE_MODELS[0]
 
 
-def build_chat_system_prompt(retrieved_context: str) -> str:
+def extract_opening_statute_quote(retrieved_chunks: list[RagChunk], *, max_chars: int = 420) -> Optional[str]:
+    for chunk in retrieved_chunks:
+        if chunk.source_type != "statute":
+            continue
+        text = re.sub(r"\s+", " ", chunk.chunk_text.strip())
+        article_match = re.search(r"Art\.\s*\d+[a-z]*\.?", text)
+        excerpt_start = article_match.start() if article_match else 0
+        excerpt = text[excerpt_start:].strip()
+        if len(excerpt) > max_chars:
+            excerpt = excerpt[: max_chars - 1].rstrip() + "…"
+        if excerpt:
+            return excerpt
+    return None
+
+
+def build_chat_system_prompt(retrieved_context: str, retrieved_chunks: list[RagChunk]) -> str:
     if not retrieved_context:
-        return SYSTEM_PROMPT + "\n\nNie znaleziono trafnych fragmentów w indeksie interpretacji. Nie twórz pozornych źródeł."
+        return SYSTEM_PROMPT + "\n\nNie znaleziono trafnych fragmentów w indeksie źródeł. Nie twórz pozornych źródeł."
+
+    opening_quote = extract_opening_statute_quote(retrieved_chunks)
+    opening_instruction = ""
+    if opening_quote:
+        opening_instruction = (
+            " Zacznij odpowiedź od krótkiego cytatu z przepisu ustawy, bez żadnego wstępu,"
+            " bez nagłówka i bez parafrazy przed cytatem. Pierwszy akapit ma być cytatem z ustawy,"
+            " najlepiej z najbardziej trafnego przepisu. Użyj tego fragmentu jako punktu wyjścia: \""
+            + opening_quote
+            + "\". Dopiero po cytacie przejdź do tezy i analizy."
+        )
 
     return (
         SYSTEM_PROMPT
-        + "\n\nPoniżej znajdują się zweryfikowane fragmenty z indeksu interpretacji indywidualnych."
+        + "\n\nPoniżej znajdują się zweryfikowane fragmenty z indeksu źródeł prawnych."
         + " Odpowiadaj wyłącznie na ich podstawie w części źródłowej, a własne wnioski oznaczaj jako wnioski."
         + " Nie traktuj powtarzających się fragmentów z tego samego dokumentu jako niezależnych źródeł."
         + " Jeśli źródła są niejednoznaczne albo częściowe, napisz to wprost zamiast domyślać stanowisko."
+        + opening_instruction
         + "\n\nKontekst źródłowy:\n"
         + retrieved_context
+    )
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def require_supabase_service_client():
+    client = get_supabase_service_client()
+    if client is None:
+        raise HTTPException(status_code=503, detail="Supabase is not configured on the backend")
+
+    return client
+
+
+def is_chat_storage_ready() -> bool:
+    client = get_supabase_service_client()
+    if client is None:
+        return False
+
+    try:
+        client.table("chat_threads").select("id").limit(1).execute()
+    except APIError as exc:
+        if exc.json().get("code") == "PGRST205":
+            return False
+        raise
+
+    return True
+
+
+def ensure_chat_storage_ready() -> None:
+    if not is_chat_storage_ready():
+        raise HTTPException(
+            status_code=503,
+            detail="Chat history schema is not available in Supabase yet. Apply the SQL migration first.",
+        )
+
+
+def normalize_thread_title(title: Optional[str], fallback: str = "Nowy wątek") -> str:
+    cleaned = (title or "").strip()
+    return cleaned[:160] if cleaned else fallback
+
+
+def build_thread_title_from_message(message: str) -> str:
+    compact = " ".join(message.split())
+    if not compact:
+        return "Nowy wątek"
+
+    return compact[:72].rstrip(" ,.;:-") or "Nowy wątek"
+
+
+def build_last_message_preview(message: str) -> str:
+    compact = " ".join(message.split())
+    return compact[:140]
+
+
+def map_thread_summary(row: dict) -> ChatThreadSummary:
+    return ChatThreadSummary(
+        id=row["id"],
+        title=normalize_thread_title(row.get("title")),
+        archived=bool(row.get("archived")),
+        updated_at=row.get("updated_at") or utc_now_iso(),
+        created_at=row.get("created_at") or utc_now_iso(),
+        last_message_preview=row.get("last_message_preview") or "",
+    )
+
+
+def fetch_thread_row(chat_id: str) -> dict:
+    client = require_supabase_service_client()
+    response = (
+        client.table("chat_threads")
+        .select("id,title,archived,updated_at,created_at,last_message_preview")
+        .eq("id", chat_id)
+        .limit(1)
+        .execute()
+    )
+    rows = response.data or []
+    if not rows:
+        raise HTTPException(status_code=404, detail="Chat thread not found")
+
+    return rows[0]
+
+
+def upsert_thread_metadata(chat_id: str, *, title: str, last_message_preview: str) -> None:
+    client = require_supabase_service_client()
+    payload = {
+        "id": chat_id,
+        "title": normalize_thread_title(title),
+        "last_message_preview": last_message_preview,
+        "updated_at": utc_now_iso(),
+    }
+    client.table("chat_threads").upsert(payload).execute()
+
+
+def persist_chat_exchange(chat_id: str, messages: list[dict[str, str]], reply: str) -> None:
+    client = require_supabase_service_client()
+    existing_response = (
+        client.table("chat_messages")
+        .select("id", count="exact")
+        .eq("chat_id", chat_id)
+        .execute()
+    )
+    existing_count = existing_response.count or 0
+
+    pending_messages = messages[existing_count:]
+    if pending_messages:
+        client.table("chat_messages").insert(
+            [
+                {
+                    "id": str(uuid4()),
+                    "chat_id": chat_id,
+                    "role": message["role"],
+                    "content": message["content"],
+                }
+                for message in pending_messages
+            ]
+        ).execute()
+
+    client.table("chat_messages").insert(
+        {
+            "id": str(uuid4()),
+            "chat_id": chat_id,
+            "role": "assistant",
+            "content": reply,
+        }
+    ).execute()
+
+    latest_user_message = next((message["content"] for message in reversed(messages) if message["role"] == "user"), "")
+    current_thread = fetch_thread_row(chat_id)
+    existing_title = normalize_thread_title(current_thread.get("title"))
+    thread_title = (
+        build_thread_title_from_message(latest_user_message)
+        if existing_title == "Nowy wątek" and latest_user_message
+        else existing_title
+    )
+    upsert_thread_metadata(
+        chat_id,
+        title=thread_title,
+        last_message_preview=build_last_message_preview(reply),
     )
 
 
@@ -263,6 +490,93 @@ def list_models() -> ModelsResponse:
     )
 
 
+@app.get("/api/chats", response_model=ChatThreadsResponse)
+def list_chat_threads() -> ChatThreadsResponse:
+    ensure_chat_storage_ready()
+    client = require_supabase_service_client()
+    response = (
+        client.table("chat_threads")
+        .select("id,title,archived,updated_at,created_at,last_message_preview")
+        .order("updated_at", desc=True)
+        .execute()
+    )
+    rows = response.data or []
+    active: list[ChatThreadSummary] = []
+    archived: list[ChatThreadSummary] = []
+
+    for row in rows:
+        thread = map_thread_summary(row)
+        if thread.archived:
+            archived.append(thread)
+        else:
+            active.append(thread)
+
+    return ChatThreadsResponse(active=active, archived=archived)
+
+
+@app.post("/api/chats", response_model=ChatThreadSummary)
+def create_chat_thread(request: ChatThreadCreateRequest) -> ChatThreadSummary:
+    ensure_chat_storage_ready()
+    client = require_supabase_service_client()
+    payload = {
+        "id": str(uuid4()),
+        "title": normalize_thread_title(request.title),
+        "archived": False,
+        "last_message_preview": "",
+    }
+    response = client.table("chat_threads").insert(payload).execute()
+    rows = response.data or []
+    if not rows:
+        raise HTTPException(status_code=500, detail="Failed to create chat thread")
+
+    return map_thread_summary(rows[0])
+
+
+@app.get("/api/chats/{chat_id}", response_model=ChatThreadDetail)
+def get_chat_thread(chat_id: str) -> ChatThreadDetail:
+    ensure_chat_storage_ready()
+    thread_row = fetch_thread_row(chat_id)
+    client = require_supabase_service_client()
+    response = (
+        client.table("chat_messages")
+        .select("id,role,content,created_at")
+        .eq("chat_id", chat_id)
+        .order("created_at")
+        .execute()
+    )
+    messages = [PersistedChatMessage(**row) for row in (response.data or [])]
+    thread = map_thread_summary(thread_row)
+
+    return ChatThreadDetail(
+        id=thread.id,
+        title=thread.title,
+        archived=thread.archived,
+        updated_at=thread.updated_at,
+        created_at=thread.created_at,
+        last_message_preview=thread.last_message_preview,
+        messages=messages,
+    )
+
+
+@app.patch("/api/chats/{chat_id}", response_model=ChatThreadSummary)
+def update_chat_thread(chat_id: str, request: ChatThreadUpdateRequest) -> ChatThreadSummary:
+    ensure_chat_storage_ready()
+    fetch_thread_row(chat_id)
+    update_payload: dict[str, object] = {"updated_at": utc_now_iso()}
+    if request.title is not None:
+        update_payload["title"] = normalize_thread_title(request.title)
+    if request.archived is not None:
+        update_payload["archived"] = request.archived
+
+    client = require_supabase_service_client()
+    response = client.table("chat_threads").update(update_payload).eq("id", chat_id).execute()
+    rows = response.data or []
+    if not rows:
+        raise HTTPException(status_code=500, detail="Failed to update chat thread")
+
+    return map_thread_summary(rows[0])
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
     redactions: list[str] = []
@@ -275,22 +589,34 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
     model = resolve_model(request.model)
+    chat_id = request.chat_id or str(uuid4())
+
+    if is_chat_storage_ready():
+        if request.chat_id:
+            fetch_thread_row(chat_id)
+        else:
+            upsert_thread_metadata(chat_id, title="Nowy wątek", last_message_preview="")
+
     latest_user_message = next(
         (message["content"] for message in reversed(sanitized_messages) if message["role"] == "user"),
         "",
     )
 
+    retrieved_chunks = search_chat_chunks(latest_user_message) or search_chunks_supabase(latest_user_message)
     if not api_key:
+        demo_reply = build_demo_reply(latest_user_message, retrieved_chunks)
+        if is_chat_storage_ready():
+            persist_chat_exchange(chat_id, sanitized_messages, demo_reply)
         return ChatResponse(
-            reply=build_demo_reply(latest_user_message),
+            reply=demo_reply,
             mode="demo",
             model=model,
             redactions=sorted(set(redactions)),
+            chat_id=chat_id if is_chat_storage_ready() else None,
         )
 
-    retrieved_chunks = search_chunks_supabase(latest_user_message) or search_chunks(latest_user_message)
     retrieved_context = build_context_block(retrieved_chunks)
-    system_prompt = build_chat_system_prompt(retrieved_context)
+    system_prompt = build_chat_system_prompt(retrieved_context, retrieved_chunks)
 
     payload = {
         "model": model,
@@ -325,18 +651,23 @@ async def chat(request: ChatRequest) -> ChatResponse:
     if retrieved_chunks:
         reply = f"{reply}\n\nŹródła użyte przez retrieval\n{list_citations(retrieved_chunks)}"
 
+    if is_chat_storage_ready():
+        persist_chat_exchange(chat_id, sanitized_messages, reply)
+
     return ChatResponse(
         reply=reply,
         mode="live",
         model=model,
         redactions=sorted(set(redactions)),
+        chat_id=chat_id if is_chat_storage_ready() else None,
     )
 
 
 @app.post("/api/rag/search", response_model=RagSearchResponse)
 def rag_search(request: RagSearchRequest) -> RagSearchResponse:
-    inspection = inspect_search(request.query, limit=request.limit)
-    chunks = search_chunks(request.query, limit=request.limit)
+    source_types = set(request.source_types or []) or None
+    inspection = inspect_search(request.query, limit=request.limit, source_types=source_types)
+    chunks = search_chunks(request.query, limit=request.limit, source_types=source_types)
     return RagSearchResponse(
         query=inspection.query,
         match_query=inspection.match_query,

@@ -128,6 +128,7 @@ class FetchConfig:
     pause_seconds: float = 0.0
     category: str | None = "Interpretacja indywidualna"
     law_tags: list[str] | None = None
+    published_dates: list[str] | None = None
     sort: str = DEFAULT_SORT
     raw_output_path: str | None = None
     output_path: str | None = None
@@ -272,6 +273,7 @@ def build_processed_row(summary: dict[str, Any], detail: dict[str, Any], *, quer
     return {
         "source": "eureka",
         "source_type": "interpretation",
+        "source_subtype": "general" if "ogóln" in str(summary.get("KATEGORIA_INFORMACJI") or "").lower() else "individual",
         "document_id": document_id,
         "index": document_id,
         "version_id": detail.get("versionId"),
@@ -336,7 +338,7 @@ async def request_json(
             )
             response.raise_for_status()
             return response.json()
-        except (TimeoutError, httpx.HTTPError, json.JSONDecodeError) as error:
+        except (asyncio.TimeoutError, TimeoutError, httpx.HTTPError, json.JSONDecodeError) as error:
             last_error = error
             if attempt >= retry_count:
                 break
@@ -348,8 +350,12 @@ async def request_json(
 
 
 async def search_page(client: httpx.AsyncClient, *, page_number: int, options: FetchConfig) -> dict[str, Any]:
+    filters: dict[str, Any] = {}
+    if options.published_dates:
+        filters["DT_WYD"] = options.published_dates
+
     payload = {
-        "filter": {},
+        "filter": filters,
         "columns": SEARCH_COLUMNS,
         "searchInFullPhrase": True,
         "searchInContent": False,
@@ -554,6 +560,7 @@ def parse_args() -> FetchConfig:
     parser.add_argument("--pause-seconds", type=float, default=0.0)
     parser.add_argument("--category", default="Interpretacja indywidualna")
     parser.add_argument("--law-tag", action="append", dest="law_tags", default=[])
+    parser.add_argument("--published-date", action="append", dest="published_dates", default=[])
     parser.add_argument("--sort", default=DEFAULT_SORT)
     parser.add_argument("--raw-output", default=str(DEFAULT_RAW_OUTPUT_PATH))
     parser.add_argument("--output-path", default=str(DEFAULT_PROCESSED_OUTPUT_PATH))
@@ -574,6 +581,7 @@ def parse_args() -> FetchConfig:
         pause_seconds=max(0.0, args.pause_seconds),
         category=category,
         law_tags=[tag for tag in args.law_tags if tag],
+        published_dates=[date for date in args.published_dates if date],
         sort=args.sort,
         raw_output_path=args.raw_output,
         output_path=args.output_path,

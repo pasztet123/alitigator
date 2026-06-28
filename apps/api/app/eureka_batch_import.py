@@ -61,6 +61,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--max-empty-batches", type=int, default=5)
+    parser.add_argument("--skip-error-batches", action="store_true")
+    parser.add_argument("--allow-failed-details", action="store_true")
     return parser.parse_args()
 
 
@@ -141,6 +143,15 @@ async def run_batches(args: argparse.Namespace) -> dict[str, Any]:
                 "page_end": batch_end,
                 "error": format_error(exc),
             }, ensure_ascii=False), flush=True)
+            if not args.skip_error_batches:
+                write_state(state_path, {
+                    "status": "stopped",
+                    "current_total": current_total,
+                    "next_start_page": page_start,
+                    "target_count": args.target_count,
+                    "last_error": format_error(exc),
+                })
+                raise
             write_state(state_path, {
                 "status": "running",
                 "current_total": current_total,
@@ -153,6 +164,24 @@ async def run_batches(args: argparse.Namespace) -> dict[str, Any]:
             continue
 
         added = int(result.get("count") or 0)
+        failed_ids = result.get("failed_ids", [])
+        if failed_ids and not args.allow_failed_details:
+            error = f"Detail fetch failed for {len(failed_ids)} document(s): {failed_ids[:10]}"
+            print(json.dumps({
+                "event": "batch_error",
+                "batch_index": batch_index,
+                "page_start": page_start,
+                "page_end": batch_end,
+                "error": error,
+            }, ensure_ascii=False), flush=True)
+            write_state(state_path, {
+                "status": "stopped",
+                "current_total": current_total,
+                "next_start_page": page_start,
+                "target_count": args.target_count,
+                "last_error": error,
+            })
+            raise RuntimeError(error)
         next_total = current_total + added
 
         print(json.dumps({
@@ -162,7 +191,7 @@ async def run_batches(args: argparse.Namespace) -> dict[str, Any]:
             "page_end": batch_end,
             "added": added,
             "current_total": next_total,
-            "failed_ids": len(result.get("failed_ids", [])),
+            "failed_ids": len(failed_ids),
         }, ensure_ascii=False), flush=True)
 
         if added <= 0:

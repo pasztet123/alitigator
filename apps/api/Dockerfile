@@ -8,8 +8,6 @@ ENV PYTHONPATH=/app
 ENV PORT=8000
 ENV ALITIGATOR_RAG_BACKEND=mysql
 ENV ALITIGATOR_RAG_CROSS_ENCODER_ENABLED=false
-ENV ALITIGATOR_ALLOWED_ORIGINS=*
-ENV ALITIGATOR_ALLOWED_ORIGIN_REGEX=
 
 COPY requirements.txt ./
 RUN grep -v '^sentence-transformers==' requirements.txt > requirements.runtime.txt \

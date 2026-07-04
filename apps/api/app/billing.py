@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import HTTPException
+from postgrest.exceptions import APIError
 
 from app.auth import AuthenticatedUser
 from app.supabase_client import get_supabase_service_client
@@ -134,6 +135,28 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _raise_supabase_http_error(exc: APIError) -> None:
+    message = str(getattr(exc, "message", "") or "")
+    code = str(getattr(exc, "code", "") or "")
+    details = str(getattr(exc, "details", "") or "")
+    hint = str(getattr(exc, "hint", "") or "")
+    combined = " ".join(part for part in [message, details, hint] if part).lower()
+
+    if code == "PGRST205" or "could not find the table" in combined:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Brakuje tabel billing/auth w Supabase. "
+                "Uruchom schema z apps/api/sql/auth_billing_schema.sql i odswiez cache API."
+            ),
+        ) from exc
+
+    raise HTTPException(
+        status_code=502,
+        detail="Supabase zwrocil blad podczas obslugi konta lub billingow.",
+    ) from exc
+
+
 def ensure_profile(user: AuthenticatedUser) -> dict[str, Any]:
     client = require_supabase_client()
     payload = {
@@ -141,12 +164,18 @@ def ensure_profile(user: AuthenticatedUser) -> dict[str, Any]:
         "email": user.email,
         "full_name": user.full_name,
     }
-    response = client.table("profiles").upsert(payload).execute()
+    try:
+        response = client.table("profiles").upsert(payload).execute()
+    except APIError as exc:
+        _raise_supabase_http_error(exc)
     rows = response.data or []
     if rows:
         return rows[0]
 
-    fallback = client.table("profiles").select("*").eq("id", user.id).limit(1).execute()
+    try:
+        fallback = client.table("profiles").select("*").eq("id", user.id).limit(1).execute()
+    except APIError as exc:
+        _raise_supabase_http_error(exc)
     fallback_rows = fallback.data or []
     if not fallback_rows:
         raise HTTPException(status_code=500, detail="Nie udalo sie przygotowac profilu uzytkownika.")
@@ -155,7 +184,10 @@ def ensure_profile(user: AuthenticatedUser) -> dict[str, Any]:
 
 def get_profile(user_id: str) -> dict[str, Any]:
     client = require_supabase_client()
-    response = client.table("profiles").select("*").eq("id", user_id).limit(1).execute()
+    try:
+        response = client.table("profiles").select("*").eq("id", user_id).limit(1).execute()
+    except APIError as exc:
+        _raise_supabase_http_error(exc)
     rows = response.data or []
     if not rows:
         raise HTTPException(status_code=404, detail="Profil uzytkownika nie istnieje.")
@@ -169,7 +201,10 @@ def update_profile(user_id: str, *, full_name: Optional[str], law_firm: Optional
         "full_name": (full_name or "").strip() or None,
         "law_firm": (law_firm or "").strip() or None,
     }
-    response = client.table("profiles").update(payload).eq("id", user_id).execute()
+    try:
+        response = client.table("profiles").update(payload).eq("id", user_id).execute()
+    except APIError as exc:
+        _raise_supabase_http_error(exc)
     rows = response.data or []
     if not rows:
         raise HTTPException(status_code=500, detail="Nie udalo sie zapisac profilu.")
@@ -178,7 +213,10 @@ def update_profile(user_id: str, *, full_name: Optional[str], law_firm: Optional
 
 def get_token_balance(user_id: str) -> int:
     client = require_supabase_client()
-    response = client.table("credit_ledger").select("amount").eq("user_id", user_id).execute()
+    try:
+        response = client.table("credit_ledger").select("amount").eq("user_id", user_id).execute()
+    except APIError as exc:
+        _raise_supabase_http_error(exc)
     rows = response.data or []
     return sum(int(row.get("amount") or 0) for row in rows)
 

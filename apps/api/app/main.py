@@ -62,15 +62,6 @@ AVAILABLE_MODELS = [
     ).split(",")
     if model.strip()
 ]
-ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv(
-        "ALITIGATOR_ALLOWED_ORIGINS",
-        "*",
-    ).split(",")
-    if origin.strip()
-]
-ALLOWED_ORIGIN_REGEX = os.getenv("ALITIGATOR_ALLOWED_ORIGIN_REGEX") or None
 HINTS_MODEL = os.getenv("ANTHROPIC_HINTS_MODEL", "claude-haiku-4-5-20251001")
 CHAT_MAX_TOKENS = max(1024, int(os.getenv("ANTHROPIC_CHAT_MAX_TOKENS", "6000")))
 ANTHROPIC_CHAT_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ANTHROPIC_CHAT_TIMEOUT_SECONDS", "180")))
@@ -380,8 +371,7 @@ class RagSearchResponse(BaseModel):
 app = FastAPI(title="aLitigator API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_origin_regex=ALLOWED_ORIGIN_REGEX,
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],

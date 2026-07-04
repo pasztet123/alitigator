@@ -7,14 +7,15 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 ENV PORT=8000
 ENV ALITIGATOR_RAG_BACKEND=mysql
+ENV ALITIGATOR_RAG_CROSS_ENCODER_ENABLED=false
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN grep -v '^sentence-transformers==' requirements.txt > requirements.runtime.txt \
+    && pip install --no-cache-dir -r requirements.runtime.txt
 
 COPY app ./app
 COPY scripts ./scripts
 COPY sql ./sql
-COPY data ./data
 
 EXPOSE 8000
 

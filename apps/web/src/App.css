@@ -4,6 +4,8 @@
   gap: 16px;
   min-height: 100svh;
   padding: 16px;
+  width: 100%;
+  overflow-x: clip;
 }
 
 .setup-shell,
@@ -85,6 +87,38 @@
   color: rgba(240, 246, 240, 0.94);
 }
 
+.sidebar,
+.chat-panel,
+.chat-header,
+.chat-heading,
+.chat-heading-copy,
+.status-tray,
+.status-chip,
+.status-chip span,
+.sidebar-account,
+.billing-card,
+.billing-pack,
+.billing-pack span,
+.composer-shell,
+.composer,
+.composer-toolbar,
+.model-select-shell,
+.model-select-wrap,
+.retrieval-scope-shell,
+.retrieval-scope-options,
+.retrieval-scope-option,
+.prompt-hints-panel,
+.prompt-hints-header,
+.prompt-hint-card,
+.prompt-hints-list,
+.message-list,
+.message,
+.assistant-message-body,
+.assistant-sections,
+.assistant-section-panel {
+  min-width: 0;
+}
+
 .sidebar-topbar,
 .sidebar-account,
 .auth-form,
@@ -135,6 +169,7 @@
 .brand-meta {
   display: grid;
   gap: 4px;
+  min-width: 0;
 }
 
 .brand-meta strong {
@@ -147,6 +182,11 @@
 .hero-copy p,
 .setup-card p {
   color: #496253;
+}
+
+.brand-meta strong,
+.brand-meta p {
+  overflow-wrap: anywhere;
 }
 
 .hero-copy {
@@ -382,11 +422,19 @@
 
 .status-chip span:last-child {
   display: grid;
+  min-width: 0;
 }
 
 .status-chip strong,
 .billing-pack strong {
   color: #163825;
+}
+
+.status-chip strong,
+.status-chip small,
+.billing-pack strong,
+.billing-pack small {
+  overflow-wrap: anywhere;
 }
 
 .status-chip small,
@@ -511,6 +559,7 @@ select {
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
+  min-width: 0;
 }
 
 .chat-heading,
@@ -536,6 +585,7 @@ select {
   flex-wrap: wrap;
   gap: 10px;
   justify-content: flex-end;
+  min-width: 0;
 }
 
 .message-list {
@@ -648,6 +698,13 @@ select {
   cursor: pointer;
   display: grid;
   gap: 6px;
+  overflow: hidden;
+}
+
+.retrieval-scope-option strong,
+.retrieval-scope-option span,
+.prompt-hint-question {
+  overflow-wrap: anywhere;
 }
 
 .retrieval-scope-option-active {
@@ -658,6 +715,7 @@ select {
 textarea {
   min-height: 160px;
   resize: vertical;
+  min-width: 0;
 }
 
 .prompt-hints-panel {
@@ -782,5 +840,9 @@ textarea {
 
   .billing-pack {
     flex-direction: column;
+  }
+
+  .app-shell {
+    padding: 12px;
   }
 }

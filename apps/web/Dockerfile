@@ -1,11 +1,11 @@
 FROM node:20-alpine AS build
 
-WORKDIR /app
+WORKDIR /app/apps/web
 
-COPY package*.json ./
+COPY apps/web/package*.json ./
 RUN npm ci
 
-COPY . .
+COPY apps/web ./
 RUN npm run build
 
 FROM node:20-alpine AS runtime
@@ -17,7 +17,7 @@ ENV PORT=5173
 
 RUN npm install -g serve
 
-COPY --from=build /app/dist ./dist
+COPY --from=build /app/apps/web/dist ./dist
 
 EXPOSE 5173
 

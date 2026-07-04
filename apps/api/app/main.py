@@ -66,14 +66,11 @@ ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
         "ALITIGATOR_ALLOWED_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173",
+        "*",
     ).split(",")
     if origin.strip()
 ]
-ALLOWED_ORIGIN_REGEX = os.getenv(
-    "ALITIGATOR_ALLOWED_ORIGIN_REGEX",
-    r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
-)
+ALLOWED_ORIGIN_REGEX = os.getenv("ALITIGATOR_ALLOWED_ORIGIN_REGEX") or None
 HINTS_MODEL = os.getenv("ANTHROPIC_HINTS_MODEL", "claude-haiku-4-5-20251001")
 CHAT_MAX_TOKENS = max(1024, int(os.getenv("ANTHROPIC_CHAT_MAX_TOKENS", "6000")))
 ANTHROPIC_CHAT_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ANTHROPIC_CHAT_TIMEOUT_SECONDS", "180")))

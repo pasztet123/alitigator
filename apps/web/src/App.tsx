@@ -1,16 +1,31 @@
 import { useEffect, useState } from 'react'
-import type { FormEvent } from 'react'
+import type { FormEvent, ReactNode } from 'react'
+import type { Session } from '@supabase/supabase-js'
 import './App.css'
 import logoUrl from './assets/alitigator-logo.png'
+import { isSupabaseConfigured, supabaseBrowserClient } from './lib/supabase'
 
 type Role = 'user' | 'assistant'
 type ChatMode = 'demo' | 'live'
+type RetrievalScope = 'statutes_only' | 'statutes_and_interpretations' | 'full_argumentation'
 
 type Message = {
   id: string
   role: Role
   content: string
   created_at?: string
+  structured_reply?: StructuredReply
+}
+
+type StructuredReplySection = {
+  key: string
+  title: string
+  content: string
+}
+
+type StructuredReply = {
+  opening_statute?: string | null
+  sections: StructuredReplySection[]
 }
 
 type ChatResponse = {
@@ -19,11 +34,50 @@ type ChatResponse = {
   model: string
   redactions: string[]
   chat_id?: string
+  structured_reply?: StructuredReply | null
+}
+
+type RetrievalPreferences = {
+  include_interpretations: boolean
+  include_judgments: boolean
+}
+
+type IntentHintAnswer = {
+  question: string
+  option_id: string
+  option_label: string
+}
+
+type PromptHintOption = {
+  id: string
+  label: string
+}
+
+type PromptHint = {
+  id: string
+  question: string
+  options: PromptHintOption[]
+}
+
+type PromptHintsResponse = {
+  hints: PromptHint[]
+  model: string
+  mode: 'live' | 'fallback'
 }
 
 type ModelsResponse = {
   default_model: string
   models: string[]
+}
+
+type HealthResponse = {
+  status: string
+  anthropic_configured: boolean
+  supabase_configured: boolean
+  rag_index_configured: boolean
+  chat_storage_available: boolean
+  auth_configured: boolean
+  stripe_configured: boolean
 }
 
 type ThreadSummary = {
@@ -46,6 +100,48 @@ type ThreadDetail = ThreadSummary & {
 
 type LocalThreadMessages = Record<string, Message[]>
 
+type Profile = {
+  id: string
+  email?: string | null
+  full_name?: string | null
+  law_firm?: string | null
+  stripe_customer_id?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+type TokenPack = {
+  id: string
+  name: string
+  token_amount: number
+  price_gross: number
+  currency: string
+  description: string
+}
+
+type AccountResponse = {
+  user_id: string
+  email?: string | null
+  profile: Profile
+  token_balance: number
+  stripe_configured: boolean
+  token_packs: TokenPack[]
+  model_token_costs: Record<string, number>
+}
+
+type AuthMode = 'signin' | 'signup'
+
+type AssistantSection = {
+  key?: string
+  title: string
+  content: string
+}
+
+type ParsedAssistantMessage = {
+  intro: string
+  sections: AssistantSection[]
+}
+
 const modelLabels: Record<string, string> = {
   'claude-opus-4-8': 'Claude Opus 4.8',
   'claude-sonnet-4-6': 'Claude Sonnet 4.6',
@@ -54,9 +150,40 @@ const modelLabels: Record<string, string> = {
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
 const LOCAL_THREAD_PREFIX = 'local-thread-'
-const APP_VERSION = '0.4.0'
+const HINT_DEBOUNCE_MS = 900
+const MIN_DRAFT_LENGTH_FOR_HINTS = 24
+const ACTIVE_HINT_COUNT = 3
+const MAX_HINT_QUESTION_COUNT = 5
+const ASSISTANT_SECTION_TITLES = [
+  'Teza',
+  'Analiza',
+  'Źródła',
+  'Ryzyka i luki',
+  'Źródła zwrócone przez retrieval',
+  'Źródła użyte przez retrieval',
+] as const
 
-const creditsLeft = 17
+const retrievalScopeOptions: Array<{
+  value: RetrievalScope
+  label: string
+  description: string
+}> = [
+  {
+    value: 'statutes_only',
+    label: 'Tylko przepisy',
+    description: 'Bez interpretacji i bez wyroków.',
+  },
+  {
+    value: 'statutes_and_interpretations',
+    label: 'Przepisy + interpretacje',
+    description: 'Dobra równowaga między normą a praktyką organów.',
+  },
+  {
+    value: 'full_argumentation',
+    label: 'Pełna argumentacja',
+    description: 'Przepisy, interpretacje i orzecznictwo.',
+  },
+]
 
 function isLocalThreadId(chatId: string | null | undefined): chatId is string {
   return Boolean(chatId?.startsWith(LOCAL_THREAD_PREFIX))
@@ -69,6 +196,243 @@ function buildThreadTitle(content: string) {
 
 function buildThreadPreview(content: string) {
   return content.trim().replace(/\s+/g, ' ').slice(0, 120)
+}
+
+function buildIntentHintsPayload(
+  intentHintAnswers: Record<string, IntentHintAnswer>,
+): IntentHintAnswer[] {
+  return Object.values(intentHintAnswers)
+}
+
+function buildRetrievalPreferences(scope: RetrievalScope): RetrievalPreferences {
+  if (scope === 'statutes_only') {
+    return { include_interpretations: false, include_judgments: false }
+  }
+  if (scope === 'statutes_and_interpretations') {
+    return { include_interpretations: true, include_judgments: false }
+  }
+  return { include_interpretations: true, include_judgments: true }
+}
+
+function slugifyHintOption(label: string) {
+  const normalized = label
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+  return normalized.slice(0, 48) || 'opcja'
+}
+
+function normalizeHintOptions(hint: Partial<PromptHint>) {
+  if (Array.isArray(hint.options) && hint.options.length >= 2) {
+    return hint.options
+      .map((option) => ({
+        id: String(option?.id ?? '').trim() || slugifyHintOption(String(option?.label ?? '')),
+        label: String(option?.label ?? '').trim(),
+      }))
+      .filter((option) => option.label)
+  }
+
+  return []
+}
+
+function normalizePromptHintsResponse(payload: PromptHintsResponse | { hints?: unknown; model?: unknown; mode?: unknown }): PromptHintsResponse {
+  const rawHints = Array.isArray(payload.hints) ? payload.hints : []
+  const seenIds = new Map<string, number>()
+  const seenQuestions = new Set<string>()
+  const hints = rawHints
+    .map((hint, index) => {
+      const question = String((hint as PromptHint)?.question ?? '').trim()
+      if (!question) {
+        return null
+      }
+      const normalizedQuestion = question.toLowerCase()
+      if (seenQuestions.has(normalizedQuestion)) {
+        return null
+      }
+      seenQuestions.add(normalizedQuestion)
+
+      const options = normalizeHintOptions(hint as Partial<PromptHint>)
+      const baseId = String((hint as PromptHint)?.id ?? '').trim() || `hint-${index}-${slugifyHintOption(question)}`
+      const duplicateCount = seenIds.get(baseId) ?? 0
+      seenIds.set(baseId, duplicateCount + 1)
+      return {
+        id: duplicateCount === 0 ? baseId : `${baseId}-${duplicateCount + 1}`,
+        question,
+        options,
+      }
+    })
+    .filter((hint): hint is PromptHint => Boolean(hint))
+
+  return {
+    hints,
+    model: String(payload.model ?? 'fallback'),
+    mode: payload.mode === 'live' ? 'live' : 'fallback',
+  }
+}
+
+function buildExcludedHintQuestions(promptHints: PromptHint[], answeredHints: IntentHintAnswer[]) {
+  return [
+    ...promptHints.map((hint) => hint.question),
+    ...answeredHints.map((hint) => hint.question),
+  ]
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function parseAssistantMessage(content: string): ParsedAssistantMessage {
+  const normalized = content.replace(/\r\n/g, '\n').trim()
+  if (!normalized) {
+    return { intro: '', sections: [] }
+  }
+
+  const headingsPattern = ASSISTANT_SECTION_TITLES.map(escapeRegExp).join('|')
+  const sectionRegex = new RegExp(`(^|\\n\\n)(${headingsPattern})\\n`, 'g')
+  const matches = Array.from(normalized.matchAll(sectionRegex))
+
+  if (matches.length === 0) {
+    return { intro: normalized, sections: [] }
+  }
+
+  const firstMatch = matches[0]
+  const intro = normalized.slice(0, firstMatch.index ?? 0).trim()
+  const sections: AssistantSection[] = matches.map((match, index) => {
+    const title = match[2]
+    const contentStart = (match.index ?? 0) + match[0].length
+    const nextStart = index + 1 < matches.length ? (matches[index + 1].index ?? normalized.length) : normalized.length
+    return {
+      title,
+      content: normalized.slice(contentStart, nextStart).trim(),
+    }
+  })
+
+  return { intro, sections }
+}
+
+function isSectionOpenByDefault(title: string) {
+  return title === 'Teza' || title === 'Analiza'
+}
+
+function renderInlineRichText(text: string): ReactNode[] {
+  const segments = text.split(/(\*\*[^*]+\*\*)/g)
+  return segments.map((segment, index) => {
+    if (segment.startsWith('**') && segment.endsWith('**') && segment.length > 4) {
+      return <strong key={`strong-${index}`}>{segment.slice(2, -2)}</strong>
+    }
+
+    return <span key={`text-${index}`}>{segment}</span>
+  })
+}
+
+function renderInlineHeading(level: number, content: string, key: string) {
+  const richContent = renderInlineRichText(content)
+
+  if (level <= 3) {
+    return <h3 key={key} className="assistant-inline-heading">{richContent}</h3>
+  }
+  if (level === 4) {
+    return <h4 key={key} className="assistant-inline-heading">{richContent}</h4>
+  }
+  return <h5 key={key} className="assistant-inline-heading">{richContent}</h5>
+}
+
+function renderRichText(content: string, baseKey: string) {
+  const blocks = content
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean)
+
+  return blocks.map((block, blockIndex) => {
+    const lines = block.split('\n').map((line) => line.trim()).filter(Boolean)
+    if (!lines.length) {
+      return null
+    }
+
+    const headingMatch = lines[0].match(/^(#{1,4})\s+(.+)$/)
+    if (headingMatch) {
+      const headingLevel = Math.min(headingMatch[1].length + 2, 6)
+      const bodyLines = lines.slice(1)
+      return (
+        <section key={`${baseKey}-heading-${blockIndex}`} className="assistant-rich-block">
+          {renderInlineHeading(headingLevel, headingMatch[2], `${baseKey}-heading-title-${blockIndex}`)}
+          {bodyLines.length > 0 ? (
+            <p className="message-content">
+              {renderInlineRichText(bodyLines.join(' '))}
+            </p>
+          ) : null}
+        </section>
+      )
+    }
+
+    if (lines.every((line) => /^[-*]\s+/.test(line))) {
+      return (
+        <ul key={`${baseKey}-list-${blockIndex}`} className="assistant-rich-list">
+          {lines.map((line, lineIndex) => (
+            <li key={`${baseKey}-item-${blockIndex}-${lineIndex}`}>
+              {renderInlineRichText(line.replace(/^[-*]\s+/, ''))}
+            </li>
+          ))}
+        </ul>
+      )
+    }
+
+    return (
+      <p key={`${baseKey}-paragraph-${blockIndex}`} className="message-content">
+        {renderInlineRichText(lines.join(' '))}
+      </p>
+    )
+  })
+}
+
+function AssistantMessageBody({
+  content,
+  structuredReply,
+}: {
+  content: string
+  structuredReply?: StructuredReply
+}) {
+  const parsed = structuredReply
+    ? {
+        intro: structuredReply.opening_statute?.trim() ?? '',
+        sections: structuredReply.sections,
+      }
+    : parseAssistantMessage(content)
+
+  if (!parsed.sections.length) {
+    return <div className="assistant-rich-text">{renderRichText(content, 'assistant-message')}</div>
+  }
+
+  return (
+    <div className="assistant-message-body">
+      {parsed.intro ? (
+        <section className="assistant-statute-block" aria-label="Przepis otwierający odpowiedź">
+          <p className="assistant-statute-label">Przepis</p>
+          <div className="assistant-rich-text">{renderRichText(parsed.intro, 'assistant-intro')}</div>
+        </section>
+      ) : null}
+
+      <div className="assistant-sections">
+        {parsed.sections.map((section) => (
+          <details
+            key={section.key ?? `${section.title}-${section.content.slice(0, 24)}`}
+            className="assistant-section"
+            open={isSectionOpenByDefault(section.title)}
+          >
+            <summary className="assistant-section-summary">{section.title}</summary>
+            <div className="assistant-section-panel">
+              <div className="assistant-rich-text">
+                {renderRichText(section.content, section.key ?? section.title)}
+              </div>
+            </div>
+          </details>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 function createOptimisticThread(initialMessage: string): ThreadSummary {
@@ -101,7 +465,19 @@ function formatThreadTimestamp(value: string) {
   }).format(date)
 }
 
-function StatusGlyph({ kind }: { kind: 'credits' | 'model' | 'shield' }) {
+function formatPrice(gross: number, currency: string) {
+  return new Intl.NumberFormat('pl-PL', {
+    style: 'currency',
+    currency: currency.toUpperCase(),
+    maximumFractionDigits: 2,
+  }).format(gross / 100)
+}
+
+function formatTokenCount(value: number) {
+  return new Intl.NumberFormat('pl-PL').format(value)
+}
+
+function StatusGlyph({ kind }: { kind: 'credits' | 'model' | 'shield' | 'account' }) {
   if (kind === 'credits') {
     return (
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -122,6 +498,15 @@ function StatusGlyph({ kind }: { kind: 'credits' | 'model' | 'shield' }) {
     )
   }
 
+  if (kind === 'account') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z" />
+        <path d="M5 20a7 7 0 0 1 14 0" />
+      </svg>
+    )
+  }
+
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M12 3 5 6v6c0 4.4 2.8 8.5 7 9.8 4.2-1.3 7-5.4 7-9.8V6l-7-3Z" />
@@ -130,7 +515,7 @@ function StatusGlyph({ kind }: { kind: 'credits' | 'model' | 'shield' }) {
   )
 }
 
-function SidebarActionIcon({ kind }: { kind: 'new' | 'archive' | 'restore' }) {
+function SidebarActionIcon({ kind }: { kind: 'new' | 'archive' | 'restore' | 'logout' }) {
   if (kind === 'new') {
     return (
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -149,6 +534,16 @@ function SidebarActionIcon({ kind }: { kind: 'new' | 'archive' | 'restore' }) {
     )
   }
 
+  if (kind === 'logout') {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M10 17H6a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h4" />
+        <path d="M14 8l6 4-6 4" />
+        <path d="M20 12H9" />
+      </svg>
+    )
+  }
+
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M4 7h16" />
@@ -158,7 +553,43 @@ function SidebarActionIcon({ kind }: { kind: 'new' | 'archive' | 'restore' }) {
   )
 }
 
+async function readErrorResponse(response: Response) {
+  try {
+    const payload = await response.json() as { detail?: string }
+    if (payload.detail) {
+      return payload.detail
+    }
+  } catch {
+    return `Backend zwrócił ${response.status}`
+  }
+
+  return `Backend zwrócił ${response.status}`
+}
+
+async function apiFetch(path: string, session: Session, init?: RequestInit) {
+  const headers = new Headers(init?.headers)
+  headers.set('Authorization', `Bearer ${session.access_token}`)
+  if (init?.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+
+  return fetch(`${API_BASE_URL}${path}`, {
+    ...init,
+    headers,
+  })
+}
+
 function App() {
+  const [session, setSession] = useState<Session | null>(null)
+  const [authMode, setAuthMode] = useState<AuthMode>('signin')
+  const [authEmail, setAuthEmail] = useState('')
+  const [authPassword, setAuthPassword] = useState('')
+  const [authFullName, setAuthFullName] = useState('')
+  const [authLoading, setAuthLoading] = useState(true)
+  const [authSubmitting, setAuthSubmitting] = useState(false)
+  const [authError, setAuthError] = useState('')
+  const [authInfo, setAuthInfo] = useState('')
+
   const [messages, setMessages] = useState<Message[]>([])
   const [draft, setDraft] = useState('')
   const [error, setError] = useState('')
@@ -176,30 +607,162 @@ function App() {
   const [lastMode, setLastMode] = useState<ChatMode>('demo')
   const [lastModel, setLastModel] = useState('claude-sonnet-4-6')
   const [lastRedactions, setLastRedactions] = useState<string[]>([])
+  const [chatStorageAvailable, setChatStorageAvailable] = useState(false)
+  const [promptHints, setPromptHints] = useState<PromptHint[]>([])
+  const [intentHintAnswers, setIntentHintAnswers] = useState<Record<string, IntentHintAnswer>>({})
+  const [isHintsLoading, setIsHintsLoading] = useState(false)
+  const [hintMode, setHintMode] = useState<'live' | 'fallback'>('fallback')
+  const [retrievalScope, setRetrievalScope] = useState<RetrievalScope>('full_argumentation')
+
+  const [account, setAccount] = useState<AccountResponse | null>(null)
+  const [profileDraft, setProfileDraft] = useState({ full_name: '', law_firm: '' })
+  const [isProfileSaving, setIsProfileSaving] = useState(false)
+  const [checkoutBusyPackId, setCheckoutBusyPackId] = useState<string | null>(null)
+
+  async function fetchPromptHints({
+    draftText,
+    answeredHints,
+    excludedQuestions,
+    maxHints,
+  }: {
+    draftText: string
+    answeredHints: IntentHintAnswer[]
+    excludedQuestions: string[]
+    maxHints: number
+  }) {
+    const response = await fetch(`${API_BASE_URL}/api/chat/hints`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        draft: draftText,
+        intent_hints: answeredHints,
+        excluded_questions: excludedQuestions,
+        max_hints: maxHints,
+      }),
+    })
+
+    if (!response.ok) {
+      throw new Error('Nie udało się pobrać podpowiedzi.')
+    }
+
+    return normalizePromptHintsResponse(await response.json())
+  }
+
+  async function refreshAccount(activeSession: Session) {
+    const response = await apiFetch('/api/account', activeSession)
+    if (!response.ok) {
+      throw new Error(await readErrorResponse(response))
+    }
+
+    const payload = await response.json() as AccountResponse
+    setAccount(payload)
+    setProfileDraft({
+      full_name: payload.profile.full_name ?? '',
+      law_firm: payload.profile.law_firm ?? '',
+    })
+    return payload
+  }
+
+  function resetWorkspaceState() {
+    setMessages([])
+    setDraft('')
+    setError('')
+    setIsSending(false)
+    setActiveThreads([])
+    setArchivedThreads([])
+    setSelectedChatId(null)
+    setShowArchived(false)
+    setLocalThreadMessages({})
+    setPromptHints([])
+    setIntentHintAnswers({})
+    setIsHintsLoading(false)
+    setHintMode('fallback')
+    setAccount(null)
+    setProfileDraft({ full_name: '', law_firm: '' })
+    setLastRedactions([])
+  }
 
   useEffect(() => {
+    if (!supabaseBrowserClient) {
+      setAuthLoading(false)
+      return
+    }
+
+    let isMounted = true
+
+    void supabaseBrowserClient.auth.getSession().then(({ data, error: sessionError }) => {
+      if (!isMounted) {
+        return
+      }
+      if (sessionError) {
+        setAuthError(sessionError.message)
+      }
+      setSession(data.session ?? null)
+      setAuthLoading(false)
+    })
+
+    const { data } = supabaseBrowserClient.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession)
+      setAuthLoading(false)
+      setAuthError('')
+      setAuthInfo('')
+      if (!nextSession) {
+        resetWorkspaceState()
+      }
+    })
+
+    return () => {
+      isMounted = false
+      data.subscription.unsubscribe()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!session) {
+      setIsBootstrapping(false)
+      return
+    }
+
+    const activeSession = session
     let isCancelled = false
 
     async function bootstrap() {
+      setIsBootstrapping(true)
+      setError('')
+
       try {
-        const [modelsResponse, threadsResponse] = await Promise.all([
+        const [healthResponse, modelsResponse, accountPayload] = await Promise.all([
+          fetch(`${API_BASE_URL}/api/health`),
           fetch(`${API_BASE_URL}/api/models`),
-          fetch(`${API_BASE_URL}/api/chats`),
+          refreshAccount(activeSession),
         ])
+
+        const healthPayload = healthResponse.ok
+          ? (await healthResponse.json()) as HealthResponse
+          : null
+
+        if (!isCancelled) {
+          setChatStorageAvailable(Boolean(healthPayload?.chat_storage_available))
+        }
 
         if (!modelsResponse.ok) {
           throw new Error('Nie udało się pobrać listy modeli.')
         }
 
-        const modelsPayload = (await modelsResponse.json()) as ModelsResponse
+        const modelsPayload = await modelsResponse.json() as ModelsResponse
         if (!isCancelled) {
           setAvailableModels(modelsPayload.models)
           setSelectedModel(modelsPayload.default_model)
           setLastModel(modelsPayload.default_model)
         }
 
-        if (threadsResponse.ok) {
-          const threadsPayload = (await threadsResponse.json()) as ThreadsResponse
+        if (healthPayload?.chat_storage_available) {
+          const threadsResponse = await apiFetch('/api/chats', activeSession)
+          if (!threadsResponse.ok) {
+            throw new Error(await readErrorResponse(threadsResponse))
+          }
+
+          const threadsPayload = await threadsResponse.json() as ThreadsResponse
           if (!isCancelled) {
             setActiveThreads(threadsPayload.active)
             setArchivedThreads(threadsPayload.archived)
@@ -209,9 +772,13 @@ function App() {
             }
           }
         }
-      } catch {
+
         if (!isCancelled) {
-          setAvailableModels(['claude-sonnet-4-6'])
+          setAccount(accountPayload)
+        }
+      } catch (bootstrapError) {
+        if (!isCancelled) {
+          setError(bootstrapError instanceof Error ? bootstrapError.message : 'Nie udało się uruchomić aplikacji.')
         }
       } finally {
         if (!isCancelled) {
@@ -225,10 +792,17 @@ function App() {
     return () => {
       isCancelled = true
     }
-  }, [])
+  }, [session])
 
   useEffect(() => {
-    if (!selectedChatId) {
+    if (!session || !selectedChatId) {
+      return
+    }
+
+    if (!chatStorageAvailable && !isLocalThreadId(selectedChatId)) {
+      setSelectedChatId(null)
+      setMessages([])
+      setIsThreadLoading(false)
       return
     }
 
@@ -243,28 +817,24 @@ function App() {
     setIsThreadLoading(true)
     setError('')
 
-    void fetch(`${API_BASE_URL}/api/chats/${selectedChatId}`)
+    void apiFetch(`/api/chats/${selectedChatId}`, session)
       .then(async (response) => {
         if (!response.ok) {
-          throw new Error('Nie udało się wczytać wątku.')
+          throw new Error(await readErrorResponse(response))
         }
 
-        return (await response.json()) as ThreadDetail
+        return response.json() as Promise<ThreadDetail>
       })
       .then((payload) => {
-        if (isCancelled) {
-          return
+        if (!isCancelled) {
+          setMessages(payload.messages)
         }
-
-        setMessages(payload.messages)
       })
       .catch((loadError) => {
-        if (isCancelled) {
-          return
+        if (!isCancelled) {
+          setMessages([])
+          setError(loadError instanceof Error ? loadError.message : 'Nie udało się wczytać wątku.')
         }
-
-        setMessages([])
-        setError(loadError instanceof Error ? loadError.message : 'Nie udało się wczytać wątku.')
       })
       .finally(() => {
         if (!isCancelled) {
@@ -275,7 +845,55 @@ function App() {
     return () => {
       isCancelled = true
     }
-  }, [localThreadMessages, selectedChatId])
+  }, [chatStorageAvailable, localThreadMessages, selectedChatId, session])
+
+  useEffect(() => {
+    const trimmedDraft = draft.trim()
+    const answeredHints = buildIntentHintsPayload(intentHintAnswers)
+
+    if (trimmedDraft.length < MIN_DRAFT_LENGTH_FOR_HINTS || isSending || answeredHints.length >= MAX_HINT_QUESTION_COUNT) {
+      setPromptHints([])
+      if (trimmedDraft.length < MIN_DRAFT_LENGTH_FOR_HINTS) {
+        setIntentHintAnswers((currentAnswers) => (Object.keys(currentAnswers).length ? {} : currentAnswers))
+      }
+      setIsHintsLoading(false)
+      setHintMode('fallback')
+      return
+    }
+
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => {
+      setIsHintsLoading(true)
+
+      void fetchPromptHints({
+        draftText: trimmedDraft,
+        answeredHints,
+        excludedQuestions: answeredHints.map((hint) => hint.question),
+        maxHints: Math.min(ACTIVE_HINT_COUNT, Math.max(MAX_HINT_QUESTION_COUNT - answeredHints.length, 0)) || 1,
+      })
+        .then((payload) => {
+          if (controller.signal.aborted) {
+            return
+          }
+          setPromptHints(payload.hints)
+          setHintMode(payload.mode)
+        })
+        .catch(() => {
+          setPromptHints([])
+          setHintMode('fallback')
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) {
+            setIsHintsLoading(false)
+          }
+        })
+    }, HINT_DEBOUNCE_MS)
+
+    return () => {
+      controller.abort()
+      window.clearTimeout(timeoutId)
+    }
+  }, [draft, isSending, intentHintAnswers])
 
   function upsertActiveThread(thread: ThreadSummary) {
     setActiveThreads((currentThreads) => [
@@ -306,13 +924,23 @@ function App() {
     )
   }
 
-  async function refreshThreads(preferredChatId?: string | null) {
-    const response = await fetch(`${API_BASE_URL}/api/chats`)
-    if (!response.ok) {
-      throw new Error('Nie udało się odświeżyć listy wątków.')
+  async function refreshThreads(activeSession: Session, preferredChatId?: string | null) {
+    if (!chatStorageAvailable) {
+      setActiveThreads([])
+      setArchivedThreads([])
+      if (preferredChatId === null) {
+        setSelectedChatId(null)
+        setMessages([])
+      }
+      return
     }
 
-    const payload = (await response.json()) as ThreadsResponse
+    const response = await apiFetch('/api/chats', activeSession)
+    if (!response.ok) {
+      throw new Error(await readErrorResponse(response))
+    }
+
+    const payload = await response.json() as ThreadsResponse
     setActiveThreads(payload.active)
     setArchivedThreads(payload.archived)
 
@@ -340,7 +968,64 @@ function App() {
     }
   }
 
+  async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!supabaseBrowserClient) {
+      return
+    }
+
+    setAuthSubmitting(true)
+    setAuthError('')
+    setAuthInfo('')
+
+    try {
+      if (authMode === 'signup') {
+        const { error: signUpError } = await supabaseBrowserClient.auth.signUp({
+          email: authEmail.trim(),
+          password: authPassword,
+          options: {
+            data: {
+              full_name: authFullName.trim(),
+            },
+          },
+        })
+
+        if (signUpError) {
+          throw signUpError
+        }
+
+        setAuthInfo('Konto zostało utworzone. Jeśli masz włączone potwierdzenie mailowe, dokończ je w skrzynce.')
+      } else {
+        const { error: signInError } = await supabaseBrowserClient.auth.signInWithPassword({
+          email: authEmail.trim(),
+          password: authPassword,
+        })
+
+        if (signInError) {
+          throw signInError
+        }
+      }
+    } catch (submitError) {
+      setAuthError(submitError instanceof Error ? submitError.message : 'Nie udało się uwierzytelnić.')
+    } finally {
+      setAuthSubmitting(false)
+    }
+  }
+
+  async function handleSignOut() {
+    if (!supabaseBrowserClient) {
+      return
+    }
+
+    setError('')
+    await supabaseBrowserClient.auth.signOut()
+  }
+
   async function handleArchive(chatId: string, archived: boolean) {
+    if (!session) {
+      return
+    }
+
     if (isLocalThreadId(chatId)) {
       const source = activeThreads.find((thread) => thread.id === chatId) ?? archivedThreads.find((thread) => thread.id === chatId)
       if (!source) {
@@ -367,20 +1052,17 @@ function App() {
     setError('')
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/chats/${chatId}`, {
+      const response = await apiFetch(`/api/chats/${chatId}`, session, {
         method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-        },
         body: JSON.stringify({ archived }),
       })
 
       if (!response.ok) {
-        throw new Error('Nie udało się zaktualizować wątku.')
+        throw new Error(await readErrorResponse(response))
       }
 
       const nextSelectedId = archived && selectedChatId === chatId ? null : chatId
-      await refreshThreads(nextSelectedId)
+      await refreshThreads(session, nextSelectedId)
     } catch (archiveError) {
       setError(archiveError instanceof Error ? archiveError.message : 'Nie udało się zaktualizować wątku.')
     } finally {
@@ -394,10 +1076,135 @@ function App() {
     setDraft('')
     setError('')
     setLastRedactions([])
+    setPromptHints([])
+    setIntentHintAnswers({})
+    setHintMode('fallback')
+  }
+
+  function handleHintAnswer(hint: PromptHint, option: PromptHintOption, index: number) {
+    const trimmedDraft = draft.trim()
+    if (!trimmedDraft) {
+      return
+    }
+
+    const nextAnswer: IntentHintAnswer = {
+      question: hint.question,
+      option_id: option.id,
+      option_label: option.label,
+    }
+    const answeredHints = [
+      ...buildIntentHintsPayload(intentHintAnswers),
+      nextAnswer,
+    ]
+
+    setIntentHintAnswers((currentAnswers) => ({
+      ...currentAnswers,
+      [hint.id]: nextAnswer,
+    }))
+
+    const nextPromptHints = promptHints.filter((_, promptHintIndex) => promptHintIndex !== index)
+
+    if (answeredHints.length >= MAX_HINT_QUESTION_COUNT) {
+      setPromptHints(nextPromptHints)
+      return
+    }
+
+    setIsHintsLoading(true)
+    const excludedQuestions = buildExcludedHintQuestions(nextPromptHints, answeredHints)
+
+    void fetchPromptHints({
+      draftText: trimmedDraft,
+      answeredHints,
+      excludedQuestions,
+      maxHints: 1,
+    })
+      .then((payload) => {
+        setHintMode(payload.mode)
+        setPromptHints((currentHints) => {
+          const currentWithoutAnswered = currentHints.filter((currentHint) => currentHint.id !== hint.id)
+          const replacement = payload.hints[0]
+          if (!replacement) {
+            return currentWithoutAnswered
+          }
+
+          const nextHints = [...currentWithoutAnswered]
+          const boundedIndex = Math.min(index, nextHints.length)
+          nextHints.splice(boundedIndex, 0, replacement)
+          return nextHints
+        })
+      })
+      .catch(() => {
+        setPromptHints(nextPromptHints)
+        setHintMode('fallback')
+      })
+      .finally(() => {
+        setIsHintsLoading(false)
+      })
+  }
+
+  async function handleProfileSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!session) {
+      return
+    }
+
+    setIsProfileSaving(true)
+    setError('')
+
+    try {
+      const response = await apiFetch('/api/account/profile', session, {
+        method: 'PATCH',
+        body: JSON.stringify(profileDraft),
+      })
+
+      if (!response.ok) {
+        throw new Error(await readErrorResponse(response))
+      }
+
+      await refreshAccount(session)
+    } catch (profileError) {
+      setError(profileError instanceof Error ? profileError.message : 'Nie udało się zapisać profilu.')
+    } finally {
+      setIsProfileSaving(false)
+    }
+  }
+
+  async function handleCheckout(pack: TokenPack) {
+    if (!session) {
+      return
+    }
+
+    setCheckoutBusyPackId(pack.id)
+    setError('')
+
+    try {
+      const response = await apiFetch('/api/billing/checkout-session', session, {
+        method: 'POST',
+        body: JSON.stringify({
+          pack_id: pack.id,
+          success_url: `${window.location.origin}?checkout=success`,
+          cancel_url: `${window.location.origin}?checkout=cancel`,
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(await readErrorResponse(response))
+      }
+
+      const payload = await response.json() as { checkout_url: string }
+      window.location.assign(payload.checkout_url)
+    } catch (checkoutError) {
+      setError(checkoutError instanceof Error ? checkoutError.message : 'Nie udało się rozpocząć płatności.')
+    } finally {
+      setCheckoutBusyPackId(null)
+    }
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (!session) {
+      return
+    }
 
     const trimmedDraft = draft.trim()
     if (!trimmedDraft || isSending) {
@@ -408,6 +1215,7 @@ function App() {
       ...messages,
       { id: crypto.randomUUID(), role: 'user' as const, content: trimmedDraft },
     ]
+    const intentHintsPayload = buildIntentHintsPayload(intentHintAnswers)
 
     let pendingChatId = selectedChatId
     if (!pendingChatId) {
@@ -437,28 +1245,35 @@ function App() {
 
     setMessages(nextMessages)
     setDraft('')
+    setPromptHints([])
+    setIntentHintAnswers({})
+    setHintMode('fallback')
     setError('')
     setIsSending(true)
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/chat`, {
+      const response = await apiFetch('/api/chat', session, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
         body: JSON.stringify({
           messages: nextMessages.map(({ role, content }) => ({ role, content })),
           model: selectedModel,
           chat_id: isLocalThreadId(pendingChatId) ? null : pendingChatId,
+          intent_hints: intentHintsPayload,
+          retrieval_preferences: buildRetrievalPreferences(retrievalScope),
         }),
       })
 
       if (!response.ok) {
-        throw new Error(`Backend zwrócił ${response.status}`)
+        throw new Error(await readErrorResponse(response))
       }
 
-      const data: ChatResponse = await response.json()
-      const assistantMessage = { id: crypto.randomUUID(), role: 'assistant' as const, content: data.reply }
+      const data = await response.json() as ChatResponse
+      const assistantMessage = {
+        id: crypto.randomUUID(),
+        role: 'assistant' as const,
+        content: data.reply,
+        structured_reply: data.structured_reply ?? undefined,
+      }
       const resolvedChatId = data.chat_id ?? pendingChatId
       const now = new Date().toISOString()
 
@@ -513,11 +1328,13 @@ function App() {
         assistantMessage,
       ])
 
+      await refreshAccount(session)
+
       if (data.chat_id) {
         try {
-          await refreshThreads(data.chat_id)
+          await refreshThreads(session, data.chat_id)
         } catch {
-          // Keep the optimistic sidebar state when history storage is unavailable.
+          // Keep optimistic thread list when storage is unavailable.
         }
       }
     } catch (submissionError) {
@@ -526,6 +1343,13 @@ function App() {
           ? submissionError.message
           : 'Nie udało się wysłać wiadomości.',
       )
+      if (session) {
+        try {
+          await refreshAccount(session)
+        } catch {
+          // Ignore secondary account refresh errors.
+        }
+      }
     } finally {
       setIsSending(false)
     }
@@ -537,6 +1361,133 @@ function App() {
   const hasMessages = messages.length > 0
   const modelStatusLabel = lastMode === 'live' ? 'Live' : 'Demo'
   const modelDisplayLabel = modelLabels[lastModel] ?? lastModel
+  const answeredHintCount = Object.keys(intentHintAnswers).length
+  const totalHintCount = MAX_HINT_QUESTION_COUNT
+  const remainingHintCount = Math.max(totalHintCount - answeredHintCount, 0)
+  const userDisplayName = account?.profile.full_name || session?.user.user_metadata.full_name || session?.user.email || 'Konto'
+  const currentModelCost = account?.model_token_costs[selectedModel] ?? 0
+
+  if (!isSupabaseConfigured) {
+    return (
+      <main className="setup-shell">
+        <section className="setup-card">
+          <img className="setup-logo" src={logoUrl} alt="Alitigator" />
+          <p className="eyebrow">Konfiguracja</p>
+          <h1>Supabase nie jest jeszcze podpięty</h1>
+          <p>
+            Uzupełnij `VITE_SUPABASE_URL` i `VITE_SUPABASE_PUBLISHABLE_KEY`, żeby uruchomić logowanie,
+            profile i rozliczanie tokenów.
+          </p>
+        </section>
+      </main>
+    )
+  }
+
+  if (authLoading) {
+    return (
+      <main className="setup-shell">
+        <section className="setup-card">
+          <img className="setup-logo" src={logoUrl} alt="Alitigator" />
+          <p className="eyebrow">Sesja</p>
+          <h1>Przygotowuję konto…</h1>
+        </section>
+      </main>
+    )
+  }
+
+  if (!session) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-hero">
+          <div className="brand-lockup brand-lockup-hero">
+            <span className="brand-mark">
+              <img className="brand-logo" src={logoUrl} alt="Alitigator" />
+            </span>
+            <div className="brand-meta">
+              <strong>Alitigator</strong>
+              <p>Research podatkowy z kontem użytkownika, historią i pakietami tokenów.</p>
+            </div>
+          </div>
+          <div className="hero-copy">
+            <p className="eyebrow">Konta i billing</p>
+            <h1>Zaloguj się, żeby pracować na własnym saldzie tokenów</h1>
+            <p>
+              W tej wersji każdy użytkownik ma własny profil, historię wątków i saldo tokenów, które
+              backend rozlicza przed odpowiedzią modelu.
+            </p>
+          </div>
+        </section>
+
+        <section className="auth-card">
+          <div className="auth-tabs" role="tablist" aria-label="Tryb logowania">
+            <button
+              type="button"
+              className={authMode === 'signin' ? 'auth-tab auth-tab-active' : 'auth-tab'}
+              onClick={() => setAuthMode('signin')}
+            >
+              Logowanie
+            </button>
+            <button
+              type="button"
+              className={authMode === 'signup' ? 'auth-tab auth-tab-active' : 'auth-tab'}
+              onClick={() => setAuthMode('signup')}
+            >
+              Rejestracja
+            </button>
+          </div>
+
+          <form className="auth-form" onSubmit={handleAuthSubmit}>
+            {authMode === 'signup' ? (
+              <label className="auth-field">
+                <span>Imię i nazwisko</span>
+                <input
+                  value={authFullName}
+                  onChange={(event) => setAuthFullName(event.target.value)}
+                  placeholder="np. Anna Kowalska"
+                  autoComplete="name"
+                />
+              </label>
+            ) : null}
+
+            <label className="auth-field">
+              <span>E-mail</span>
+              <input
+                type="email"
+                value={authEmail}
+                onChange={(event) => setAuthEmail(event.target.value)}
+                placeholder="anna@kancelaria.pl"
+                autoComplete="email"
+                required
+              />
+            </label>
+
+            <label className="auth-field">
+              <span>Hasło</span>
+              <input
+                type="password"
+                value={authPassword}
+                onChange={(event) => setAuthPassword(event.target.value)}
+                placeholder="Minimum 6 znaków"
+                autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'}
+                required
+              />
+            </label>
+
+            {authError ? <p className="error-text">{authError}</p> : null}
+            {authInfo ? <p className="helper-text helper-text-positive">{authInfo}</p> : null}
+
+            <button type="submit" className="auth-submit" disabled={authSubmitting}>
+              {authSubmitting
+                ? 'Przetwarzam…'
+                : authMode === 'signup'
+                  ? 'Załóż konto'
+                  : 'Zaloguj się'}
+            </button>
+          </form>
+        </section>
+      </main>
+    )
+  }
 
   return (
     <main className="app-shell">
@@ -548,6 +1499,7 @@ function App() {
             </span>
             <div className="brand-meta">
               <strong>Alitigator</strong>
+              <p>{userDisplayName}</p>
             </div>
           </div>
           <button type="button" className="sidebar-primary-action" onClick={handleStartNewChat}>
@@ -633,14 +1585,82 @@ function App() {
                     </div>
                   </button>
                 ))}
-                {archivedThreads.length === 0 ? (
-                  <div className="thread-empty-state muted-empty-state">
-                    <p>Jeszcze nic tu nie trafiło.</p>
-                  </div>
-                ) : null}
               </div>
             ) : null}
           </div>
+        </div>
+
+        <div className="sidebar-account">
+          <div className="status-chip status-chip-wide">
+            <span className="status-icon"><StatusGlyph kind="account" /></span>
+            <span>
+              <strong>{account?.email ?? session.user.email}</strong>
+              <small>Konto aktywne</small>
+            </span>
+          </div>
+
+          <form className="profile-form" onSubmit={handleProfileSave}>
+            <label className="profile-field">
+              <span>Imię i nazwisko</span>
+              <input
+                value={profileDraft.full_name}
+                onChange={(event) => setProfileDraft((current) => ({ ...current, full_name: event.target.value }))}
+                placeholder="np. Anna Kowalska"
+              />
+            </label>
+            <label className="profile-field">
+              <span>Kancelaria</span>
+              <input
+                value={profileDraft.law_firm}
+                onChange={(event) => setProfileDraft((current) => ({ ...current, law_firm: event.target.value }))}
+                placeholder="np. Kancelaria Tax & Co"
+              />
+            </label>
+            <button type="submit" className="secondary-button" disabled={isProfileSaving}>
+              {isProfileSaving ? 'Zapisuję…' : 'Zapisz profil'}
+            </button>
+          </form>
+
+          <div className="billing-card">
+            <div className="billing-card-header">
+              <p className="eyebrow">Saldo</p>
+              <strong>{formatTokenCount(account?.token_balance ?? 0)} tokenów</strong>
+              <p>Aktualny koszt wybranego modelu: {formatTokenCount(currentModelCost)} tokenów za odpowiedź.</p>
+            </div>
+
+            <div className="billing-pack-list">
+              {(account?.token_packs ?? []).map((pack) => (
+                <button
+                  key={pack.id}
+                  type="button"
+                  className="billing-pack"
+                  onClick={() => void handleCheckout(pack)}
+                  disabled={checkoutBusyPackId === pack.id || !account?.stripe_configured}
+                >
+                  <span>
+                    <strong>{pack.name}</strong>
+                    <small>{formatTokenCount(pack.token_amount)} tokenów</small>
+                  </span>
+                  <span>
+                    <strong>{formatPrice(pack.price_gross, pack.currency)}</strong>
+                    <small>{pack.description}</small>
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            {!account?.stripe_configured ? (
+              <p className="helper-text small-text">
+                Stripe nie jest jeszcze skonfigurowany po stronie backendu. Katalog pakietów już działa,
+                ale checkout będzie aktywny dopiero po ustawieniu sekretów.
+              </p>
+            ) : null}
+          </div>
+
+          <button type="button" className="ghost-button" onClick={() => void handleSignOut()}>
+            <SidebarActionIcon kind="logout" />
+            <span>Wyloguj</span>
+          </button>
         </div>
       </aside>
 
@@ -658,8 +1678,8 @@ function App() {
             <div className="status-chip">
               <span className="status-icon"><StatusGlyph kind="credits" /></span>
               <span>
-                <strong>{creditsLeft}</strong>
-                <small>Kredyty</small>
+                <strong>{formatTokenCount(account?.token_balance ?? 0)}</strong>
+                <small>Tokeny</small>
               </span>
             </div>
             <div className="status-chip">
@@ -691,7 +1711,14 @@ function App() {
             ? messages.map((message) => (
                 <article key={message.id} className={`message message-${message.role}`}>
                   <p className="message-role">{message.role === 'assistant' ? 'aLitigator' : 'Ty'}</p>
-                  <p className="message-content">{message.content}</p>
+                  {message.role === 'assistant' ? (
+                    <AssistantMessageBody
+                      content={message.content}
+                      structuredReply={message.structured_reply}
+                    />
+                  ) : (
+                    <p className="message-content">{message.content}</p>
+                  )}
                 </article>
               ))
             : null}
@@ -734,14 +1761,36 @@ function App() {
                       </option>
                     ))}
                   </select>
-                  <span className="model-select-chevron" aria-hidden="true">
-                    <svg viewBox="0 0 20 20">
-                      <path d="m5 7 5 6 5-6" />
-                    </svg>
-                  </span>
                 </div>
               </div>
+
+              <div className="status-chip">
+                <span className="status-icon"><StatusGlyph kind="credits" /></span>
+                <span>
+                  <strong>{formatTokenCount(currentModelCost)}</strong>
+                  <small>Koszt odpowiedzi</small>
+                </span>
+              </div>
             </div>
+
+            <div className="retrieval-scope-shell" aria-label="Zakres materiałów do analizy">
+              <p className="model-select-label retrieval-scope-label">Zakres źródeł</p>
+              <div className="retrieval-scope-options" role="group" aria-label="Zakres źródeł">
+                {retrievalScopeOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={`retrieval-scope-option ${retrievalScope === option.value ? 'retrieval-scope-option-active' : ''}`}
+                    onClick={() => setRetrievalScope(option.value)}
+                    aria-pressed={retrievalScope === option.value}
+                  >
+                    <strong>{option.label}</strong>
+                    <span>{option.description}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <label className="sr-only" htmlFor="chat-input">
               Treść pytania
             </label>
@@ -751,18 +1800,61 @@ function App() {
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               placeholder="Opisz stan faktyczny, pytanie podatkowe albo szkic pisma do rozwinięcia..."
-              rows={5}
+              rows={6}
               maxLength={12000}
             />
+
+            {draft.trim().length >= MIN_DRAFT_LENGTH_FOR_HINTS ? (
+              <section className="prompt-hints-panel" aria-live="polite">
+                <div className="prompt-hints-header">
+                  <div>
+                    <p className="prompt-hints-eyebrow">Tryb podpowiedzi</p>
+                    <strong>Pomóż nam lepiej odczytać intencję pytania</strong>
+                    <p className="prompt-hints-progress">
+                      Zebrane: {answeredHintCount} z {totalHintCount}. Pozostało: {remainingHintCount}.
+                    </p>
+                  </div>
+                  <span className={`prompt-hints-badge prompt-hints-badge-${hintMode}`}>
+                    {isHintsLoading ? 'Analiza…' : hintMode === 'live' ? 'Haiku' : 'Fallback'}
+                  </span>
+                </div>
+
+                {promptHints.length > 0 ? (
+                  <div className="prompt-hints-list">
+                    {promptHints.map((hint, index) => (
+                      <article key={hint.id} className="prompt-hint-card">
+                        <p className="prompt-hint-question">{hint.question}</p>
+                        <div className="prompt-hint-options" role="group" aria-label={hint.question}>
+                          {hint.options.map((option) => (
+                            <button
+                              key={option.id}
+                              type="button"
+                              className={`prompt-hint-option ${intentHintAnswers[hint.id]?.option_id === option.id ? 'prompt-hint-option-active' : ''}`}
+                              onClick={() => handleHintAnswer(hint, option, index)}
+                            >
+                              {option.label}
+                            </button>
+                          ))}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="helper-text small-text">
+                    {isHintsLoading
+                      ? 'Przygotowuję krótkie pytania doprecyzowujące…'
+                      : 'Gdy treść będzie bardziej konkretna, pokażemy tu pytania pomocnicze.'}
+                  </p>
+                )}
+              </section>
+            ) : null}
+
             <div className="composer-actions">
-              <div className="composer-footer-meta">
-                <p className="helper-text small-text">
-                  Jeśli możesz, opisuj stan faktyczny bez pełnych danych klienta.
-                </p>
-                <p className="version-badge">Wersja {APP_VERSION}</p>
-              </div>
-              <button type="submit" disabled={isSending || !draft.trim() || isSidebarBusy}>
-                {isSending ? 'Wysyłanie...' : 'Wyślij pytanie'}
+              <p className="helper-text small-text">
+                Odpowiedź zostanie rozliczona na koncie po stronie backendu według cennika modelu.
+              </p>
+              <button type="submit" className="submit-button" disabled={isSending || isSidebarBusy}>
+                {isSending ? 'Analizuję…' : 'Wyślij'}
               </button>
             </div>
           </form>

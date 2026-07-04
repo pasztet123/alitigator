@@ -39,10 +39,93 @@ Nie zapisuj kluczy API w repo. Backend czyta `ANTHROPIC_API_KEY` z pliku `.env` 
 
 Ta wersja zawiera:
 
-- prosty czat w zielonej identyfikacji aLitigator
+- logowanie i rejestrację przez Supabase Auth
+- profile użytkowników i historię wątków przypisaną do `user_id`
+- ledger tokenów po stronie backendu
+- przygotowany checkout Stripe do sprzedaży doładowań tokenów
 - backendowy proxy do Claude
 - podstawowe maskowanie danych wrażliwych
-- miejsce na późniejsze podpięcie Supabase, auth, kredytów i RAG
+- RAG lokalny i opcjonalny storage w Supabase
+
+## Konta, tokeny i Stripe
+
+Nowy schemat pod konta i billing znajduje się w:
+
+- `apps/api/sql/auth_billing_schema.sql`
+
+Schemat dodaje:
+
+- `profiles`
+- `credit_ledger`
+- `credit_orders`
+- rozszerzenie `chat_threads` o `user_id`
+- polityki RLS dla profili, ledgera, zamówień i czatów
+
+Backend udostępnia teraz:
+
+- `GET /api/account`
+- `PATCH /api/account/profile`
+- `POST /api/billing/checkout-session`
+- `POST /api/billing/webhooks/stripe`
+
+Ważne założenie MVP:
+
+- sprzedajemy pakiety tokenów, a backend rozlicza odpowiedź modelu stałą stawką per model z `ALITIGATOR_MODEL_TOKEN_COSTS_JSON`
+- to jest warstwa billingowa gotowa pod Stripe i konto użytkownika; dokładne meteringi input/output tokenów można dołożyć później bez przebudowy schematu
+
+### Konfiguracja Supabase i Stripe
+
+1. W Supabase uruchom SQL z:
+   - `apps/api/sql/auth_billing_schema.sql`
+   - jeśli chcesz też zdalny corpus RAG: `apps/api/sql/rag_schema.sql`
+2. Ustaw backendowe sekrety w `apps/api/.env`:
+   - `SUPABASE_URL`
+   - `SUPABASE_SECRET_KEY`
+   - `STRIPE_SECRET_KEY`
+   - `STRIPE_WEBHOOK_SECRET`
+   - `ALITIGATOR_STRIPE_SUCCESS_URL`
+   - `ALITIGATOR_STRIPE_CANCEL_URL`
+3. Ustaw frontend:
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_PUBLISHABLE_KEY`
+4. Dostosuj katalog pakietów i cennik modeli:
+   - `ALITIGATOR_TOKEN_PACKS_JSON`
+   - `ALITIGATOR_MODEL_TOKEN_COSTS_JSON`
+
+Stripe webhook powinien wskazywać na:
+
+- `POST /api/billing/webhooks/stripe`
+
+### Lokalny webhook przez Stripe CLI
+
+Jeśli nie masz jeszcze domeny, webhook do developmentu odpalaj lokalnie przez Stripe CLI.
+
+Przepływ:
+
+1. Uruchom backend lokalnie na `http://127.0.0.1:8000`
+2. Zaloguj Stripe CLI do swojego konta
+3. Forwarduj eventy do:
+   - `http://127.0.0.1:8000/api/billing/webhooks/stripe`
+4. Skopiuj wypisany przez CLI secret `whsec_...`
+5. Wstaw go lokalnie do `apps/api/.env` jako:
+   - `STRIPE_WEBHOOK_SECRET=whsec_...`
+
+Przykładowa komenda:
+
+```bash
+stripe listen --forward-to http://127.0.0.1:8000/api/billing/webhooks/stripe
+```
+
+Do tego flow w naszym backendzie wystarczą eventy:
+
+- `checkout.session.completed`
+- `checkout.session.expired`
+- `checkout.session.async_payment_failed`
+
+Bezpieczeństwo na czas developmentu:
+
+- do lokalnych testów używaj testowego klucza Stripe, nie `sk_live_...`
+- secret z `stripe listen` jest tylko lokalny i nie będzie taki sam jak secret produkcyjnego webhooka po deploymencie
 
 ## Import interpretacji do RAG
 
@@ -217,6 +300,7 @@ Obecna wersja nadal zostawia JSONL jako roboczy bufor ingestu, ale ten tryb jest
 ## Supabase
 
 - schemat RAG jest przygotowany pod `public`, żeby działał od razu z domyślną ekspozycją Data API
-- tabele bazowe: `profiles`, `credit_ledger`, `chat_threads`, `chat_messages`
-- RLS jest włączone na wszystkich czterech tabelach
+- schemat kont i billingu też zakłada `public` oraz `auth.users` jako źródło tożsamości
+- tabele bazowe: `profiles`, `credit_ledger`, `credit_orders`, `chat_threads`, `chat_messages`
+- RLS jest włączone na tabelach użytkownika
 - sekret `SUPABASE_SECRET_KEY` ma pozostać wyłącznie po stronie backendu

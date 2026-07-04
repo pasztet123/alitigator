@@ -25,6 +25,7 @@ DEFAULT_LAW_SOURCE_PATHS = (
     API_DIR / "data" / "laws" / "processed" / "pit_act_DU_2026_592.jsonl",
     API_DIR / "data" / "laws" / "processed" / "pcc_act_DU_2026_191.jsonl",
     API_DIR / "data" / "laws" / "processed" / "tax_ordinance_DU_2026_622.jsonl",
+    API_DIR / "data" / "laws" / "processed" / "local_taxes_act_DU_2025_707.jsonl",
     API_DIR / "data" / "processed" / "cbosa_nsa_fsk_judgments.jsonl",
 )
 DEFAULT_RAG_DB_PATH = API_DIR / "data" / "processed" / "eureka_rag.sqlite3"
@@ -36,7 +37,31 @@ EMBEDDING_TOKEN_RE = re.compile(r"[0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż
 SECTION_BREAK_RE = re.compile(r"\n{2,}")
 BOILERPLATE_SECTION_RE = re.compile(
     r"\n(?=(?:Pouczenie o funkcji ochronnej interpretacji|Funkcja ochronna interpretacji|"
-    r"Prawo do wniesienia skargi|Mają Państwo prawo do zaskarżenia|Skargę do Sądu wnosi się))",
+    r"Prawo do wniesienia skargi|Pouczenie o prawie do wniesienia skargi na interpretację|"
+    r"Mają Państwo prawo do zaskarżenia|Skargę do Sądu wnosi się|Podstawa prawna dla wydania interpretacji))",
+    re.IGNORECASE,
+)
+INTERPRETATION_PROCEDURAL_QUERY_RE = re.compile(
+    r"\b(funkcj\w* ochronn\w*|ochron\w* interpretacj\w*|pouczeni\w*|"
+    r"prawo do wniesienia skargi|zaskarżeni\w* interpretacj\w*|art\.\s*14k|art\.\s*14na|art\.\s*57a)\b",
+    re.IGNORECASE,
+)
+PROCEDURAL_INTERPRETATION_CHUNK_RE = re.compile(
+    r"\b(pouczenie o funkcji ochronnej interpretacji|funkcję ochronną interpretacji|"
+    r"pouczenie o prawie do wniesienia skargi|mają państwo prawo do zaskarżenia|"
+    r"skargę do sądu wnosi się|skarga na interpretację indywidualną|"
+    r"podstawa prawna dla wydania interpretacji|interpretacje indywidualne są wydawane w indywidualnych sprawach|"
+    r"nie stanowi źródła powszechnie obowiązującego prawa)\b",
+    re.IGNORECASE,
+)
+INTERPRETATION_MERITS_SECTION_RE = re.compile(
+    r"\b(ocena stanowiska|uzasadnienie interpretacji indywidualnej|"
+    r"odnosząc się zatem do powyższych różnic|w omawianej sprawie konieczne jest zatem ustalenie|"
+    r"zatem w ww\. sytuacji)\b",
+    re.IGNORECASE,
+)
+INTERPRETATION_TAXPAYER_POSITION_RE = re.compile(
+    r"\b(państwa stanowisko w sprawie|zdaniem wnioskodawcy|uzasadnienie stanowiska)\b",
     re.IGNORECASE,
 )
 QUESTION_HEADING_RE = re.compile(r"^Pytani(?:e|a)$", re.IGNORECASE)
@@ -47,6 +72,9 @@ SECTION_HEADING_RE = re.compile(
 )
 SIGNATURE_FAMILY_RE = re.compile(r"\b(KD[A-Z]{2}\d?)\b")
 ARTICLE_ID_RE = re.compile(r"\bart\.\s*(\d+)([a-z]*)\b", re.IGNORECASE)
+ARTICLE_SPLIT_SUFFIX_RE = re.compile(r"\bart\.?\s*(\d+)\s+([a-z]{1,4})\b", re.IGNORECASE)
+BARE_ARTICLE_SPLIT_SUFFIX_RE = re.compile(r"\b(\d{2,4})\s+([a-z]{1,4})\b", re.IGNORECASE)
+OFFLINE_SPLIT_RE = re.compile(r"\boffline\s+(\d{1,3})\b", re.IGNORECASE)
 GENERAL_STATUTE_QUERY_RE = re.compile(
     r"\b(co jest|co oznacza|co rozumieć|jak ustawa definiuje|jakie zasady|gdzie uregulowano|"
     r"kiedy .* nie jest|czy .* ma obowiązek)\b",
@@ -56,11 +84,52 @@ JUDGMENT_SIGNATURE_RE = re.compile(r"\b(?:(I{1,3})\s+)?FSK\s+(\d+)\s*/\s*(\d{2,4
 JUDGMENT_CHAMBER_RE = re.compile(r"\b(I{1,3})\s+FSK\b", re.IGNORECASE)
 JUDGMENT_INTENT_RE = re.compile(r"\b(wyrok\w*|orzecze(?:nie|nia|ń)|orzecznictw\w*|nsa|fsk|sąd\w*|skarg\w* kasacyjn\w*)\b", re.IGNORECASE)
 JUDGMENT_ONLY_CONTEXT_RE = re.compile(r"\b(znajdź|pokaż|podaj|dobierz|wyszukaj)\b.{0,80}\b(wyrok\w*|orzecze(?:nie|nia|ń)|orzecznictw\w*)\b", re.IGNORECASE)
+KSEF_QUERY_RE = re.compile(r"\bksef\b|krajow(?:y|ego) system(?:u)? e[ -]?faktur|faktur\w* ustrukturyzowan\w*", re.IGNORECASE)
+KSEF_FOREIGN_SALE_QUERY_RE = re.compile(
+    r"(wielk\w* brytani\w*|\buk\b|zea|niderland\w*|holandi\w*|państw\w* trzec\w*|"
+    r"poza terytorium kraju|poza polsk\w*|terytorium państwa członkowskiego inne niż terytorium kraju|"
+    r"sprzedaż lokaln\w*|lokaln\w* sprzedaż|towar\w*.*(?:magazyn|terytorium|znajd))",
+    re.IGNORECASE,
+)
+KSEF_FOREIGN_SALE_MERITS_RE = re.compile(
+    r"(polskie regulacje w zakresie fakturowania znajdą również zastosowanie|"
+    r"art\.\s*106a\s*pkt\s*2|art\.\s*106ga\s*ust\.\s*1|art\.\s*106ga\s*ust\.\s*2|"
+    r"zobowiązani również wystawić faktury ustrukturyzowane|"
+    r"nie znajdą zastosowania wyłączenia ustawowe|art\.\s*106gb\s*ust\.\s*4|"
+    r"faktura ustrukturyzowana.*udostępnian\w* nabywcy w sposób z nim uzgodniony)",
+    re.IGNORECASE,
+)
+KSEF_FOREIGN_SALE_STATUTE_TARGETS: tuple[tuple[str, str], ...] = (
+    ("VAT", "106a"),
+    ("VAT", "106b"),
+    ("VAT", "106ga"),
+    ("VAT", "106gb"),
+)
+KSEF_FOREIGN_SALE_INTERPRETATION_DOCUMENT_IDS: tuple[str, ...] = ("679542",)
 
 # The search corpus uses both abbreviations and their expanded legal names.  Keeping
 # these aliases here makes a user's natural query match either form without an LLM.
 QUERY_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\bksef\b|\bkrajow(?:y|ego) system(?:u)? e[ -]?faktur", re.IGNORECASE), ("Krajowy System e-Faktur", "faktura ustrukturyzowana")),
+    (
+        re.compile(
+            r"(\bksef\b|krajow(?:y|ego) system(?:u)? e[ -]?faktur|faktur\w* ustrukturyzowan\w*).{0,120}"
+            r"(wielk\w* brytani\w*|\buk\b|zea|niderland\w*|holandi\w*|poza terytorium kraju|państw\w* trzec\w*|sprzedaż lokaln\w*)|"
+            r"(wielk\w* brytani\w*|\buk\b|zea|niderland\w*|holandi\w*|poza terytorium kraju|państw\w* trzec\w*|sprzedaż lokaln\w*).{0,120}"
+            r"(\bksef\b|krajow(?:y|ego) system(?:u)? e[ -]?faktur|faktur\w* ustrukturyzowan\w*)",
+            re.IGNORECASE,
+        ),
+        (
+            "art. 106a pkt 2",
+            "art. 106b ust. 1 pkt 1",
+            "art. 106ga ust. 1",
+            "art. 106ga ust. 2",
+            "art. 106gb ust. 4",
+            "miejscem świadczenia jest terytorium państwa trzeciego",
+            "faktura ustrukturyzowana jest udostępniana nabywcy w sposób z nim uzgodniony",
+            "polskie regulacje w zakresie fakturowania znajdą zastosowanie",
+        ),
+    ),
     (re.compile(r"\bwht\b|podatek u źr[óo]dła|withholding", re.IGNORECASE), ("WHT", "podatek u źródła")),
     (re.compile(r"\bpcc\b|podatek od czynności cywilnoprawnych", re.IGNORECASE), ("PCC", "podatek od czynności cywilnoprawnych")),
     (
@@ -294,7 +363,17 @@ DOMAIN_MARKERS: dict[str, tuple[str, ...]] = {
     "cit": ("cit", "estońsk", "estonsk", "spółk", "spolk", "holding"),
     "pit": ("pit", "ryczałt", "ryczalt", "ulga", "rezydenc"),
     "pcc": ("pcc", "czynności", "czynnosci", "aport", "współwłas", "wspolwlas"),
-    "nieruchomości": ("nieruchomoś", "nieruchomos", "u.p.o.l", "podatki lokalne"),
+    "nieruchomości": (
+        "nieruchomoś",
+        "nieruchomos",
+        "u.p.o.l",
+        "podatki lokalne",
+        "budynk",
+        "budowl",
+        "grunt",
+        "powierzchni użytkow",
+        "powierzchni uzytkow",
+    ),
     "wht": ("wht", "źródła", "zrodla", "withholding"),
     "akcyza": ("akcyza", "akcyzow", "skład podatkowy", "sklad podatkowy"),
     "ordynacja": (
@@ -320,6 +399,34 @@ DOMAIN_MARKERS: dict[str, tuple[str, ...]] = {
 MECHANISM_RULES: dict[str, tuple[str, ...]] = {
     "invoice_outside_ksef": ("poza ksef", "faktura papierowa", "faktura pdf"),
     "input_vat_deduction": ("odliczyć vat", "prawo do odliczenia"),
+    "ksef_foreign_local_sale": (
+        "sprzedaż lokalna",
+        "lokalna sprzedaż",
+        "poza terytorium kraju",
+        "państwo trzecie",
+        "wielka brytania",
+        "uk",
+        "towar znajduje się",
+        "towary znajdują się",
+        "miejsce dostawy poza terytorium kraju",
+        "art. 106a pkt 2",
+        "art. 106ga",
+        "art. 106gb ust. 4",
+        "faktura ustrukturyzowana jest udostępniana nabywcy",
+    ),
+    "ksef_offline_input_vat_deduction": (
+        "offline24",
+        "tryb offline24",
+        "art. 106nda",
+        "art 106nda",
+        "106nda",
+        "art. 106nh",
+        "art 106nh",
+        "106nh",
+        "przydzielenia numeru identyfikującego",
+        "data przydzielenia numeru identyfikującego",
+        "numer ksef",
+    ),
     "limited_tax_liability": ("ograniczony obowiązek", "183 dni", "centrum interesów"),
     "foreign_employment_income": (
         "dochody zagraniczne",
@@ -483,6 +590,40 @@ STATUTE_PROCEDURAL_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...], tuple[st
         ("Zobowiązanie podatkowe powstaje z dniem",),
     ),
     (
+        re.compile(
+            r"(\bksef\b|krajow(?:y|ego) system(?:u)? e[ -]?faktur|faktur\w* ustrukturyzowan\w*).{0,160}"
+            r"(wielk\w* brytani\w*|\buk\b|zea|niderland\w*|holandi\w*|poza terytorium kraju|państw\w* trzec\w*|sprzedaż lokaln\w*)|"
+            r"(wielk\w* brytani\w*|\buk\b|zea|niderland\w*|holandi\w*|poza terytorium kraju|państw\w* trzec\w*|sprzedaż lokaln\w*).{0,160}"
+            r"(\bksef\b|krajow(?:y|ego) system(?:u)? e[ -]?faktur|faktur\w* ustrukturyzowan\w*)",
+            re.IGNORECASE,
+        ),
+        (),
+        ("106a", "106b", "106ga", "106gb"),
+        (
+            "Podatnicy są obowiązani wystawiać faktury ustrukturyzowane",
+            "Obowiązek, o którym mowa w ust. 1, nie dotyczy",
+            "miejscem świadczenia jest terytorium państwa trzeciego",
+            "faktura ustrukturyzowana jest udostępniana nabywcy w sposób z nim uzgodniony",
+        ),
+    ),
+    (
+        re.compile(
+            r"(\bmał\w* podatnik\w*|\bmaly podatnik\w*|art\.\s*4a\s*pkt\s*10).{0,180}"
+            r"(vat poza polsk\w*|poza polsk\w*|odwrotne obci[aą]żenie|reverse charge|warto[śs]ci dodanej|lokaln\w* stawk\w*|nabywc\w* rozlicza vat)|"
+            r"(vat poza polsk\w*|poza polsk\w*|odwrotne obci[aą]żenie|reverse charge|warto[śs]ci dodanej|lokaln\w* stawk\w*|nabywc\w* rozlicza vat).{0,180}"
+            r"(\bmał\w* podatnik\w*|\bmaly podatnik\w*|art\.\s*4a\s*pkt\s*10)",
+            re.IGNORECASE,
+        ),
+        ("4a", "19"),
+        ("4a",),
+        (
+            "małego podatnika",
+            "wartość przychodu ze sprzedaży",
+            "wraz z kwotą należnego podatku od towarów i usług",
+            "wartość przychodu ze sprzedaży",
+        ),
+    ),
+    (
         re.compile(r"\b(zaniechan\w* poboru podatk\w*|zwolni[ćc] niektóre grupy p[łl]atnik[óo]w z obowi[ąa]zku pobierania)\b", re.IGNORECASE),
         (),
         ("22",),
@@ -595,6 +736,481 @@ STATUTE_PROCEDURAL_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...], tuple[st
         (),
         ("239a",),
         ("Decyzja nieostateczna", "nie podlega wykonaniu", "rygor natychmiastowej wykonalności"),
+    ),
+    (
+        re.compile(r"\b(co reguluje ustawa o podatkach i opłatach lokalnych|zakres ustawy o podatkach i opłatach lokalnych|czy ustawa o podatkach i opłatach lokalnych normuje podatek od nieruchomo[śs]ci|ustawa normuje opłat[ęe] reklamow[ąa]|zalicza opłat[ęe] uzdrowiskow[ąa] do spraw przez ni[ąa] normowanych|opłat[ęe] uzdrowiskow[ąa].*normowanych)\b", re.IGNORECASE),
+        (),
+        ("1",),
+        ("Ustawa normuje następujące podatki i opłaty lokalne", "opłatę reklamową", "opłatę uzdrowiskową"),
+    ),
+    (
+        re.compile(r"\b(definicj\w* budynku|jak ustawa definiuje budynek|co oznacza budynek)\b", re.IGNORECASE),
+        (),
+        ("1a",),
+        ("Użyte w ustawie określenia oznaczają", "budynek"),
+    ),
+    (
+        re.compile(r"\b(jak ustawa(?: o podatkach i opłatach lokalnych)? definiuje budynek|definicj\w* budynku|co oznacza budynek)\b", re.IGNORECASE),
+        (),
+        ("1a",),
+        ("Użyte w ustawie określenia oznaczają", "budynek"),
+    ),
+    (
+        re.compile(r"\b(jak ustawa(?: o podatkach i opłatach lokalnych)? definiuje budowl\w*|co oznacza budowla|definicj\w* budowli)\b", re.IGNORECASE),
+        (),
+        ("1a",),
+        ("Użyte w ustawie określenia oznaczają", "budowla"),
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"gdzie zdefiniowano powierzchni[ęe] użytkow[ąa] budynku|"
+            r"jak ustawa rozumie powierzchni[ęe] użytkow[ąa]|"
+            r"co oznacza powierzchnia użytkowa budynku|"
+            r"budynek musi mie[ćc] fundamenty i dach|"
+            r"w kt[óo]rym przepisie .* budynek .* fundamenty i dach|"
+            r"klatek schodowych i szyb[óo]w d[źz]wigowych|"
+            r"za kondygnacj[ęe] uwa[żz]a si[ęe] r[óo]wnie[żz] gara[żz]e podziemne"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        (),
+        ("1a",),
+        ("powierzchnia użytkowa budynku lub jego części", "klatek schodowych", "szybów dźwigowych", "garaże podziemne"),
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"jak ustawa .* rozumie działalno[śs][ćc] gospodarcz\w*|"
+            r"definicj\w* działalno[śs]ci gospodarczej|"
+            r"czego nie uważa si[ęe] za działalno[śs][ćc] gospodarcz\w*|"
+            r"co nie jest działalno[śs]ci[ąa] gospodarcz\w* w rozumieniu tej ustawy|"
+            r"poj[ęe]cie grunt[óo]w, budynk[óo]w i budowli zwi[ąa]zanych z prowadzeniem działalno[śs]ci gospodarczej|"
+            r"gdzie uregulowano poj[ęe]cie grunt[óo]w, budynk[óo]w i budowli zwi[ąa]zanych z prowadzeniem działalno[śs]ci gospodarczej|"
+            r"wynajem do 5 pokoi go[śs]cinnych|"
+            r"turystom na obszarach wiejskich .* nie jest działalno[śs]cią gospodarcz|"
+            r"art\.? 6 ust\.? 1 pkt 4 prawa przedsi[ęe]biorc[óo]w|"
+            r"art\.? 6 ust\.? 1 pkt 4 prawa przedsi[ęe]biorc[óo]w .* nie uwa[żz]a si[ęe] za działalno[śs][ćc] gospodarcz|"
+            r"działalno[śs]ci wskazanej w art\.? 6 ust\.? 1 pkt 4 prawa przedsi[ęe]biorc[óo]w nie uwa[żz]a si[ęe] za działalno[śs][ćc] gospodarcz|"
+            r"prawo przedsi[ęe]biorc[óo]w .* nie uwa[żz]a si[ęe] za działalno[śs][ćc] gospodarcz"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        (),
+        ("1a",),
+        ("działalność gospodarcza", "Za działalność gospodarczą w rozumieniu ustawy nie uważa się", "art. 6 ust. 1 pkt 4 ustawy z dnia 6 marca 2018 r. – Prawo przedsiębiorców", "Prawo przedsiębiorców"),
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"co oznacza trwa[łl]e zwi[ąa]zanie z gruntem|"
+            r"jak ustawa definiuje trwa[łl]e zwi[ąa]zanie z gruntem"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        (),
+        ("1a",),
+        ("trwałe związanie z gruntem",),
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"fundamenty pod maszyn\w*|"
+            r"urz[ąa]dzenia techniczne mog[ąa] by[ćc] budowl[ąa]|"
+            r"obiekt budowlany jako budynek lub budowl[ęe]|"
+            r"definicj\w* obiektu budowlanego|"
+            r"definicj\w* rob[óo]t budowlanych|"
+            r"budow[ęe], odbudow[ęe], rozbudow[ęe], nadbudow[ęe], przebudow[ęe] lub monta[żz]|"
+            r"obiekty kultu religijnego|kapliczki|krzy[żz]e przydro[żz]ne|"
+            r"nieu[żz]ytk[óo]w .* ewidencji grunt[óo]w i budynk[óo]w|"
+            r"trwale wy[łl][ąa]czone z u[żz]ytkowania .* nie s[ąa] uznawane za zwi[ąa]zane z prowadzeniem działalno[śs]ci gospodarczej|"
+            r"za cz[ęe][śs][ćc] mieszkaln[ąa] budynku mieszkalnego uznaje si[ęe] tak[żz]e pomieszczenie przeznaczone do przechowywania pojazd[óo]w"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        (),
+        ("1a",),
+        ("fundamenty pod maszyny", "obiekt budowlany", "roboty budowlane", "obiekty kultu religijnego", "nieużytki", "trwale wyłączono budynek, budowlę lub ich części z użytkowania", "Za część mieszkalną budynku mieszkalnego uznaje się także pomieszczenie przeznaczone do przechowywania pojazdów"),
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"ulgi .* ko[śs]cio[łl][óo]w|"
+            r"zwolnienia .* ko[śs]cio[łl][óo]w|"
+            r"zwi[ąa]zk[óo]w wyznaniowych.*odr[ęe]bne ustawy|"
+            r"ustawa odsy[łl]a do odr[ęe]bnych ustaw .* ko[śs]cio[łl][óo]w"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        (),
+        ("1b",),
+        ("Ulgi i zwolnienia podatkowe", "kościołom i związkom wyznaniowym regulują odrębne ustawy"),
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"specjalnych stref ekonomicznych|"
+            r"sse.*zwolnieni\w*.*podatku od nieruchomo[śs]ci|"
+            r"gdzie uregulowano zwolnienia z podatku od nieruchomo[śs]ci .* stref ekonomicznych|"
+            r"odsy[łl]a do odr[ęe]bnych przepis[óo]w .* specjalnych stref ekonomicznych"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        (),
+        ("1b",),
+        ("Zwolnienia z podatku od nieruchomości", "specjalnych stref ekonomicznych"),
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"dr[óo]g publicznych|"
+            r"budow[ęe] dr[óo]g publicznych|"
+            r"grunty i budynki przeznaczone na budow[ęe] dr[óo]g publicznych"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        (),
+        ("1b",),
+        ("budowę dróg publicznych", "szczególnych zasadach przygotowania i realizacji inwestycji w zakresie dróg publicznych"),
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"jaki organ podatkowy jest właściwy|"
+            r"kt[óo]ry organ gminy jest organem podatkowym|"
+            r"w[óo]jt|burmistrz|prezydent miasta.*organem podatkowym"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        (),
+        ("1c",),
+        ("Organem podatkowym właściwym", "wójt", "burmistrz", "prezydent miasta"),
+    ),
+    (
+        re.compile(r"\b(co podlega opodatkowaniu podatkiem od nieruchomo[śs]ci|przedmiot opodatkowania podatkiem od nieruchomo[śs]ci|jakie nieruchomo[śs]ci podlegaj[ąa]|jakie przedmioty podlegaj[ąa] opodatkowaniu podatkiem od nieruchomo[śs]ci|grunty, budynki lub ich cz[ęe][śs]ci oraz budowle zwi[ąa]zane z działalno[śs]ci[ąa] gospodarcz[ąa]|budowle lub ich cz[ęe][śs]ci zwi[ąa]zane z prowadzeniem działalno[śs]ci gospodarczej)\b", re.IGNORECASE),
+        (),
+        ("2",),
+        ("Opodatkowaniu podatkiem od nieruchomości podlegają",),
+    ),
+    (
+        re.compile(r"\b(czy użytki rolne i lasy podlegaj[ąa] podatkowi od nieruchomo[śs]ci|użytki rolne lub lasy.*nie podlegaj[ąa])\b", re.IGNORECASE),
+        (),
+        ("2",),
+        ("Opodatkowaniu podatkiem od nieruchomości nie podlegają użytki rolne lub lasy",),
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"kiedy użytki rolne .* podlegaj[ąa] podatkowi od nieruchomo[śs]ci|"
+            r"las zaj[ęe]ty na prowadzenie działalno[śs]ci gospodarczej|"
+            r"użytki rolne .* zaj[ęe]te na prowadzenie działalno[śs]ci gospodarczej|"
+            r"nieruchomo[śs]ci pa[ńn]stw obcych .* przedstawicielstw dyplomatycznych|"
+            r"warunek wzajemno[śs]ci .* pa[ńn]stw obcych|"
+            r"grunty pod wodami powierzchniowymi p[łl]yn[ąa]cymi, z wyj[ąa]tkiem jezior i zbiornik[óo]w sztucznych|"
+            r"nieruchomo[śs]ci lub ich cz[ęe][śs]ci zaj[ęe]te na potrzeby organ[óo]w jednostek samorz[ąa]du terytorialnego|"
+            r"urz[ęe]d[óo]w gmin i starostw|"
+            r"grunty zaj[ęe]te pod pasy drogowe dr[óo]g publicznych .* budowle|"
+            r"krajowego zasobu nieruchomo[śs]ci"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        (),
+        ("2",),
+        ("z wyjątkiem zajętych na prowadzenie działalności gospodarczej", "pod warunkiem wzajemności", "przeznaczone na siedziby przedstawicielstw dyplomatycznych", "grunty pod wodami powierzchniowymi płynącymi", "zajęte na potrzeby organów jednostek samorządu terytorialnego", "grunty zajęte pod pasy drogowe dróg publicznych", "wchodzą w skład Zasobu Nieruchomości"),
+    ),
+    (
+        re.compile(r"\b(kto jest podatnikiem podatku od nieruchomo[śs]ci|podatnikami podatku od nieruchomo[śs]ci s[ąa])\b", re.IGNORECASE),
+        (),
+        ("3",),
+        ("Podatnikami podatku od nieruchomości są",),
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"użytkownik wieczysty .* podatnikiem|"
+            r"posiadacz samoistny .* podatnikiem|"
+            r"je[żz]eli przedmiot opodatkowania znajduje si[ęe] w posiadaniu samoistnym|"
+            r"wsp[óo][łl]w[łl]asno[śs][ćc].*solidarn|"
+            r"obowi[ąa]zek podatkowy ci[ąa][żz]y solidarnie na wsp[óo][łl]w[łl]a[śs]cicielach|"
+            r"zasad[ęe] solidarnej odpowiedzialno[śs]ci wsp[óo][łl]w[łl]a[śs]cicieli|"
+            r"posiadacz nieruchomo[śs]ci skarbu pa[ńn]stwa bez tytu[łl]u prawnego|"
+            r"zasobu w[łl]asno[śs]ci rolnej skarbu pa[ńn]stwa|"
+            r"las[óo]w pa[ńn]stwowych|"
+            r"wyodr[ęe]bnionej własno[śs]ci lokali|"
+            r"lokalu mieszkalnego niestanowi[ąa]cego odr[ęe]bnej nieruchomo[śs]ci|"
+            r"lokal mieszkalny niestanowi[ąa]cy odr[ęe]bnej nieruchomo[śs]ci na podstawie umowy z w[łl]a[śs]cicielem|"
+            r"jeden ze wsp[óo][łl]w[łl]a[śs]cicieli jest zwolniony|"
+            r"gara[żz]u wielostanowiskowego w budynku mieszkalnym|"
+            r"gara[żz]u wielostanowiskowego.*odpowiedzialno[śs][ćc] solidarn|"
+            r"gara[żz]u wielostanowiskowego.*stosuje si[ęe] odpowiedzialno[śs][ćc] solidarn"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        (),
+        ("3",),
+        (
+            "użytkownikami wieczystymi gruntów",
+            "posiadaczami samoistnymi nieruchomości",
+            "obowiązek podatkowy w zakresie podatku od nieruchomości ciąży na posiadaczu samoistnym",
+            "ciąży solidarnie na wszystkich współwłaścicielach",
+            "jest bez tytułu prawnego",
+            "Zasobu Własności Rolnej Skarbu Państwa",
+            "nieruchomości wspólnej",
+            "lokali mieszkalnych niestanowiących odrębnych nieruchomości",
+            "lokalu mieszkalnego niestanowiącego odrębnej nieruchomości",
+            "jeden lub kilku współwłaścicieli",
+            "garażu wielostanowiskowego",
+        ),
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"podstawa opodatkowania.*podatku od nieruchomo[śs]ci|"
+            r"dla grunt[óo]w.*powierzchnia|"
+            r"dla budynk[óo]w.*powierzchnia użytkowa|"
+            r"podstawa opodatkowania dla budowli.*zwi[ąa]zanych z prowadzeniem działalno[śs]ci gospodarczej|"
+            r"dla budowli.*warto[śs][ćc]|"
+            r"budowl[ai] .* przedmiotem umowy leasingu|"
+            r"budowli b[ęe]d[ąa]cej przedmiotem leasingu|"
+            r"warto[śs][ćc] cz[ęe][śs]ci budowli po[łl]o[żz]onych .* dw[óo]ch lub wi[ęe]cej gmin|"
+            r"obowi[ąa]zek podatkowy .* budowli .* powsta[łl] w ci[ąa]gu roku podatkowego|"
+            r"jaka jest podstawa opodatkowania budowli, gdy obowi[ąa]zek podatkowy powsta[łl] w ci[ąa]gu roku podatkowego|"
+            r"po ulepszeniu budowli|"
+            r"aktualizacji wyceny [śs]rodk[óo]w trwa[łl]ych|"
+            r"poda[łl] warto[śs][ćc] nieodpowiadaj[ąa]c[ąa] warto[śs]ci rynkowej|"
+            r"organ podatkowy powo[łl]a bieg[łl]ego|"
+            r"rzeczoznawc[óo]w maj[ąa]tkowych .* ustalenia warto[śs]ci budowli|"
+            r"jak liczy si[ęe] powierzchni[ęe] użytkow[ąa].*1,40 m do 2,20 m|"
+            r"powierzchni[ęe] użytkow[ąa].*1,40 m do 2,20 m|"
+            r"powierzchni[ęe] pomieszcze[ńn] o wysoko[śs]ci mniejszej ni[żz] 1,40 m|"
+            r"mniejsza ni[żz] 1,40 m|"
+            r"nie dokonuje si[ęe] odpis[óo]w amortyzacyjnych"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        (),
+        ("4",),
+        (
+            "Podstawę opodatkowania stanowi",
+            "dla gruntów – powierzchnia",
+            "dla budynków lub ich części – powierzchnia użytkowa",
+            "Powierzchnię pomieszczeń lub ich części oraz część kondygnacji o wysokości w świetle od 1,40 m do 2,20 m",
+            "a jeżeli wysokość jest mniejsza niż 1,40 m, powierzchnię tę pomija się",
+            "Jeżeli od budowli lub ich części", "wartość rynkowa",
+            "jest przedmiotem umowy leasingu",
+            "budowli będącej przedmiotem leasingu",
+            "Wartość części budowli położonych w danej gminie",
+            "obowiązek podatkowy powstał w ciągu roku podatkowego",
+            "organ podatkowy powoła biegłego",
+            "spośród rzeczoznawców majątkowych",
+        ),
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"kto okre[śs]la wysoko[śs][ćc] stawek podatku od nieruchomo[śs]ci|"
+            r"kto okre[śs]la stawki podatku od nieruchomo[śs]ci|"
+            r"rada gminy.*stawki podatku od nieruchomo[śs]ci|"
+            r"stawki nie mog[ąa] przekroczy[ćc]|"
+            r"r[óo]żnicowa[ćc] wysoko[śs][ćc] stawek|"
+            r"jakie kryteria rada gminy mo[żz]e uwzgl[ęe]dnia[ćc] przy r[óo]żnicowaniu stawek|"
+            r"r[óo]żnicowanie stawek dla budynk[óo]w wed[łl]ug lokalizacji|"
+            r"grunty obj[ęe]te obszarem rewitalizacji|"
+            r"niezabudowanych grunt[óo]w obj[ęe]tych obszarem rewitalizacji|"
+            r"g[óo]rn[ąa] stawk[ęe] dla grunt[óo]w zwi[ąa]zanych z prowadzeniem działalno[śs]ci gospodarczej|"
+            r"budynk[óo]w zwi[ąa]zanych z udzielaniem [śs]wiadcze[ńn] zdrowotnych|"
+            r"grunt[óo]w pod wodami powierzchniowymi stoj[ąa]cymi|"
+            r"budynk[óo]w mieszkalnych|"
+            r"ile wynosi stawka .* od budowli|"
+            r"rada gminy mo[żz]e r[óo]żnicowa[ćc] stawki .* rodzaj prowadzonej działalno[śs]ci"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        (),
+        ("5",),
+        (
+            "Rada gminy określa wysokość stawek podatku od nieruchomości",
+            "rada gminy może różnicować ich wysokość",
+            "związanych z prowadzeniem działalności gospodarczej",
+            "lokalizację, sposób wykorzystywania, rodzaj zabudowy, stan techniczny oraz wiek budynków",
+            "rodzaj prowadzonej działalności",
+            "objętych obszarem rewitalizacji",
+            "niezabudowanych gruntów objętych obszarem rewitalizacji",
+            "związanych z udzielaniem świadczeń zdrowotnych",
+            "pod wodami powierzchniowymi stojącymi",
+            "mieszkalnych",
+            "od budowli – 2 % ich wartości",
+        ),
+    ),
+    (
+        re.compile(
+            r"osoby prawne .* podatek od nieruchomo[śs]ci .* 15\.\s*dnia ka[żz]dego miesi[ąa]ca.*31 stycznia",
+            re.IGNORECASE,
+        ),
+        (),
+        ("6",),
+        ("do dnia 15. każdego miesiąca, a za styczeń do dnia 31 stycznia",),
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"kiedy wygasa obowi[ąa]zek podatkowy|"
+            r"w jakim terminie osoba fizyczna sk[łl]ada informacj[ęe] o nieruchomo[śs]ciach|"
+            r"gdzie uregulowano 14-dniowy termin dla osoby fizycznej|"
+            r"do kiedy osoby prawne sk[łl]adaj[ąa] deklaracj[ęe] na podatek od nieruchomo[śs]ci|"
+            r"31 stycznia.*deklaracj\w* na podatek od nieruchomo[śs]ci|"
+            r"w jakich terminach osoby prawne wp[łl]acaj[ąa] podatek od nieruchomo[śs]ci bez wezwania|"
+            r"w kt[óo]rym przepisie wskazano, [żz]e osoby prawne p[łl]ac[ąa] podatek od nieruchomo[śs]ci do 15\\. dnia ka[żz]dego miesi[ąa]ca, a za stycze[ńn] do 31 stycznia|"
+            r"osoby prawne p[łl]ac[ąa] podatek od nieruchomo[śs]ci do 15\\. dnia ka[żz]dego miesi[ąa]ca|"
+            r"terminy rat podatku od nieruchomo[śs]ci dla os[óo]b fizycznych|"
+            r"organ podatkowy zmienia decyzj[ęe] ustalaj[ąa]c[ąa] podatek|"
+            r"obowi[ąa]zek składania informacji i deklaracji dotyczy tak[żz]e podatnik[óo]w korzystaj[ąa]cych ze zwolnie[ńn]|"
+            r"je[śs]li obowiązek podatkowy powstał lub wygasł w ci[ąa]gu roku|"
+            r"skorygowa[ćc] deklaracj[ęe] .* w terminie 14 dni od dnia zaistnienia tego zdarzenia|"
+            r"skorygowania deklaracji na podatek od nieruchomo[śs]ci w terminie 14 dni od zdarzenia wpływaj[ąa]cego na wysoko[śs][ćc] podatku|"
+            r"nie wszczyna si[ęe] post[ęe]powania, a post[ęe]powanie wszcz[ęe]te umarza|"
+            r"nie wszczyna si[ęe] post[ęe]powania albo je umarza, je[śs]li wysoko[śs][ćc] zobowi[ąa]zania podatkowego by[łl]aby ni[żz]sza ni[żz] koszty dor[ęe]czenia przesy[łl]ki poleconej|"
+            r"kwota podatku nie przekracza 100 z[łl]|"
+            r"do 15\\. ka[żz]dego miesi[ąa]ca|"
+            r"za stycze[ńn] do dnia 31 stycznia|"
+            r"czy .* deklaracje .* mog[ąa] by[ćc] sk[łl]adane elektronicznie|"
+            r"czy rada gminy mo[żz]e zarz[ąa]dzi[ćc] pob[óo]r .* w drodze inkasa|"
+            r"okre[śs]lenia sposobu przesy[łl]ania informacji i deklaracji .* drog[ąa] elektroniczn[ąa] .* rodzaj[óo]w podpisu elektronicznego"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        (),
+        ("6",),
+        (
+            "Obowiązek podatkowy wygasa z upływem miesiąca",
+            "w terminie 14 dni",
+            "w terminie do dnia 31 stycznia",
+            "do dnia 15. każdego miesiąca, a za styczeń do dnia 31 stycznia",
+            "w terminach: do dnia 15 marca, 15 maja, 15 września i 15 listopada",
+            "organ podatkowy dokonuje zmiany decyzji",
+            "dotyczy również podatników korzystających ze zwolnień",
+            "podatek za ten rok ustala się proporcjonalnie do liczby miesięcy",
+            "w terminie 14 dni od dnia zaistnienia tego zdarzenia",
+            "odpowiednio skorygować deklaracje w razie zaistnienia zdarzenia",
+            "Nie wszczyna się postępowania",
+            "wysokość zobowiązania podatkowego nie przekraczałaby kosztów doręczenia przesyłki poleconej",
+            "W przypadku gdy kwota podatku nie przekracza 100 zł",
+            "mogą być składane za pomocą środków komunikacji elektronicznej",
+            "sposób przesyłania informacji o nieruchomościach i obiektach budowlanych oraz deklaracji na podatek od nieruchomości",
+            "Rada gminy może zarządzać pobór podatku od nieruchomości",
+        ),
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"kiedy powstaje obowi[ąa]zek podatkowy w podatku od nieruchomo[śs]ci|"
+            r"od kiedy powstaje obowi[ąa]zek podatkowy dla nowo wybudowanego budynku lub budowli|"
+            r"od kiedy zmiana sposobu wykorzystywania nieruchomo[śs]ci wp[łl]ywa na wysoko[śs][ćc] podatku od nieruchomo[śs]ci|"
+            r"od kiedy po zmianie sposobu wykorzystywania przedmiotu opodatkowania podatek ulega obni[żz]eniu albo podwy[żz]szeniu|"
+            r"obowi[ąa]zek podatkowy powstaje od pierwszego dnia miesi[ąa]ca|"
+            r"obowi[ąa]zek podatkowy .* mo[żz]e powsta[ćc] ju[żz] po rozpocz[ęe]ciu użytkowania przed ostatecznym wyko[ńn]czeniem|"
+            r"budowa zosta[łl]a zako[ńn]czona|"
+            r"zmiana sposobu wykorzystywania przedmiotu opodatkowania"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        (),
+        ("6",),
+        (
+            "Obowiązek podatkowy powstaje od pierwszego dnia miesiąca",
+            "budowa została zakończona",
+            "zmiana sposobu wykorzystywania przedmiotu opodatkowania",
+        ),
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"jakie s[ąa] zwolnienia z podatku od nieruchomo[śs]ci|"
+            r"w kt[óo]rym przepisie znajduje si[ęe] katalog zwolnie[ńn] z podatku od nieruchomo[śs]ci|"
+            r"katalog zwolnie[ńn] z podatku od nieruchomo[śs]ci|"
+            r"zwalnia si[ęe] od podatku od nieruchomo[śs]ci|"
+            r"inne zwolnienia przedmiotowe|"
+            r"podstaw[ęe] do wprowadzania .* innych zwolnie[ńn] przedmiotowych|"
+            r"infrastruktury kolejowej|"
+            r"zwolnienie od podatku od nieruchomo[śs]ci dla uczelni|"
+            r"budowle infrastruktury portowej w portach morskich|"
+            r"wpisanych indywidualnie do rejestru zabytk[óo]w|"
+            r"rodzinnego ogrodu działkowego|altan działkowych|obiekt[óo]w gospodarczych o powierzchni zabudowy do 35 m2"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        (),
+        ("7",),
+        ("Zwalnia się od podatku od nieruchomości", "Rada gminy, w drodze uchwały, może wprowadzić inne zwolnienia przedmiotowe", "wchodzące w skład infrastruktury kolejowej", "uczelnie, zwolnienie nie dotyczy", "budowle infrastruktury portowej w portach morskich", "wpisane indywidualnie do rejestru zabytków", "położone na terenie rodzinnego ogrodu działkowego"),
+    ),
+    (
+        re.compile(r"\b(ewidencj\w* podatkow\w* nieruchomo[śs]ci|organy podatkowe prowadz[ąa] ewidencj\w* podatkow\w* nieruchomo[śs]ci|z jakich [źz]r[óo]de[łl] pochodz[ąa] dane .* ewidencji podatkowej nieruchomo[śs]ci|ksi[ąa]g wieczystych.*ewidencji grunt[óo]w i budynk[óo]w|ewidencji prowadzonych przez urz[ęe]dy skarbowe)\b", re.IGNORECASE),
+        (),
+        ("7a",),
+        ("organy podatkowe prowadzą ewidencję podatkową nieruchomości", "księgach wieczystych", "ewidencji gruntów i budynków", "ewidencji prowadzonych przez urzędy skarbowe"),
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"sprawozdanie podatkowe .* podatku od nieruchomo[śs]ci|"
+            r"jakie informacje zawiera sprawozdanie podatkowe|"
+            r"w jakich terminach przekazuje si[ęe] cz[ęe][śs]ci sprawozdania|"
+            r"regionalnych izb obrachunkowych|"
+            r"sprawozdanie .* elektronicznie .* rio|"
+            r"w kt[óo]rym przepisie zapisano, [żz]e sprawozdanie podatkowe przekazuje si[ęe] ministrowi finans[óo]w elektronicznie przez regionalne izby obrachunkowe|"
+            r"wed[łl]ug stanu na dzie[ńn] 30 czerwca roku podatkowego|"
+            r"aktualizacji sprawozdania podatkowego|"
+            r"do ko[ńn]ca i kwarta[łl]u .* do ko[ńn]ca iii kwarta[łl]u|"
+            r"czę[śs][ćc] sprawozdania dotycz[ąa]ca stawek przekazywana jest do ko[ńn]ca i kwarta[łl]u, a czę[śs][ćc] dotycz[ąa]ca podstaw opodatkowania do ko[ńn]ca iii kwarta[łl]u"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        (),
+        ("7b",),
+        (
+            "sporządzają co roku sprawozdanie podatkowe",
+            "Sprawozdanie zawiera informacje o",
+            "nie później niż do końca I kwartału",
+            "nie później niż do końca III kwartału",
+            "regionalnych izb obrachunkowych",
+            "według stanu na dzień 30 czerwca",
+            "Sprawozdanie jest aktualizowane",
+        ),
+    ),
+    (
+        re.compile(r"\b(g[óo]rne granice stawek kwotowych|minister.*og[łl]asza.*g[óo]rne granice stawek|art\. 20|komunikatu prezesa g[łl][óo]wnego urz[ęe]du statystycznego|terminie 20 dni po up[łl]ywie pierwszego p[óo][łl]rocza)\b", re.IGNORECASE),
+        (),
+        ("20",),
+        ("Górne granice stawek kwotowych", "Minister właściwy do spraw finansów publicznych ogłasza", "komunikatu Prezesa Głównego Urzędu Statystycznego", "w terminie 20 dni po upływie pierwszego półrocza"),
+    ),
+    (
+        re.compile(
+            r"\b("
+            r"na jakiej zasadzie .* g[óo]rne granice stawek|"
+            r"co stosuje si[ęe], gdy rada gminy nie uchwali stawek|"
+            r"stawki z roku poprzedniego|"
+            r"uchwa[łl]a rady gminy przewiduj[ąa]ca pomoc publiczn\w* .* uwzgl[ęe]dnia[ćc] przepisy|"
+            r"pomoc publiczna .* uchwa[łl]a .* uwzgl[ęe]dnia[ćc] przepisy|"
+            r"uchwa[łl]a rady gminy przewiduje pomoc publiczn\w* w przypadku zwolnie[ńn] z art\.? 7 ust\.? 3|"
+            r"pomoc de minimis|"
+            r"w kt[óo]rym przepisie .* udzielanie pomocy jako pomocy de minimis|"
+            r"nakazano, aby uchwa[łl]a rady gminy przewiduj[ąa]ca pomoc publiczn\w* by[łl]a podejmowana z uwzgl[ęe]dnieniem przepis[óo]w o pomocy publicznej|"
+            r"kto okre[śs]la warunki udzielania zwolnie[ńn] stanowi[ąa]cych pomoc publiczn\w*|"
+            r"rada ministr[óo]w okre[śs]la warunki udzielania zwolnie[ńn] stanowi[ąa]cych pomoc publiczn\w* dotycz[ąa]cych art\.? 7 ust\.? 3 i art\.? 12 ust\.? 4 ustawy|"
+            r"notyfikacji Komisji Europejskiej"
+            r")\b",
+            re.IGNORECASE,
+        ),
+        ("20d",),
+        ("20a", "20b", "20c", "20d"),
+        (
+            "W przypadku nieuchwalenia stawek",
+            "uchwała ta powinna być podjęta z uwzględnieniem przepisów dotyczących pomocy publicznej",
+            "pomoc ta jest udzielana jako pomoc de minimis",
+            "Rada Ministrów określi",
+            "warunki udzielania zwolnień stanowiących pomoc publiczną dotyczących art. 7 ust. 3 i art. 12 ust. 4",
+            "podlega notyfikacji Komisji Europejskiej",
+        ),
     ),
     (
         re.compile(r"\b(niedaj[ąa]c\w* si[ęe] usun[ąa][ćc].*w[ąa]tpliwo[śs]ci|korzy[śs][ćc] podatnika|in dubio pro tributario)\b", re.IGNORECASE),
@@ -1086,6 +1702,259 @@ def extract_decision_text(text: str) -> str:
     return normalize_whitespace(match.group(0)) if match else ""
 
 
+def query_targets_interpretation_procedure(query: str) -> bool:
+    return bool(INTERPRETATION_PROCEDURAL_QUERY_RE.search(query or ""))
+
+
+def query_targets_ksef_foreign_sale(query: str) -> bool:
+    normalized = normalize_whitespace(query or "")
+    return bool(KSEF_QUERY_RE.search(normalized) and KSEF_FOREIGN_SALE_QUERY_RE.search(normalized))
+
+
+def is_procedural_interpretation_chunk_text(text: str) -> bool:
+    normalized = normalize_whitespace(text).lower()
+    if not normalized:
+        return False
+    if INTERPRETATION_MERITS_SECTION_RE.search(normalized):
+        return False
+    procedural_hits = len(PROCEDURAL_INTERPRETATION_CHUNK_RE.findall(normalized))
+    if procedural_hits >= 2:
+        return True
+    if procedural_hits == 1 and len(normalized) < 1400:
+        return True
+    return normalized.startswith("pouczenie o funkcji ochronnej interpretacji")
+
+
+def build_interpretation_section_score(text: str) -> float:
+    normalized = normalize_whitespace(text)
+    if not normalized:
+        return 0.0
+    score = 0.0
+    if INTERPRETATION_MERITS_SECTION_RE.search(normalized):
+        score += 0.9
+    if "ocena stanowiska" in normalized.lower():
+        score += 0.45
+    if "uzasadnienie interpretacji indywidualnej" in normalized.lower():
+        score += 0.6
+    if INTERPRETATION_TAXPAYER_POSITION_RE.search(normalized):
+        score -= 0.15
+    if is_procedural_interpretation_chunk_text(normalized):
+        score -= 1.5
+    return score
+
+
+def build_ksef_foreign_sale_match_score(row: sqlite3.Row, *, query: str) -> float:
+    if str(row["source_type"] or "") != "interpretation" or not query_targets_ksef_foreign_sale(query):
+        return 0.0
+
+    text = normalize_whitespace(str(row["chunk_text"] or "")).lower()
+    metadata = normalize_whitespace(
+        " ".join(
+            [
+                str(row["signature"] or ""),
+                str(row["subject"] or ""),
+                str(row["question_text"] or ""),
+                str(row["issues_json"] or ""),
+                str(row["legal_provisions_json"] or ""),
+            ]
+        )
+    ).lower()
+    score = 0.0
+    if str(row["signature"] or "") == "0113-KDIPT1-2.4012.1035.2025.2.AJB":
+        score += 0.8
+    if KSEF_FOREIGN_SALE_MERITS_RE.search(text):
+        score += 2.4
+    if "zobowiązani również wystawić faktury ustrukturyzowane" in text:
+        score += 1.4
+    if "nie znajdą zastosowania wyłączenia ustawowe" in text and "art. 106ga ust. 2" in text:
+        score += 1.0
+    if "art. 106gb ust. 4" in text and "uzgodniony" in text:
+        score += 0.9
+    if "art. 106a pkt 2" in text and ("państwa trzeciego" in text or "kraju trzecim" in text):
+        score += 0.8
+    if "wielkiej brytanii" in metadata or "państwa trzeciego" in metadata:
+        score += 0.35
+    if "państwa stanowisko" in text and "ocena stanowiska" not in text:
+        score -= 0.35
+    return min(max(score, -0.35), 4.5)
+
+
+def query_targets_shareholder_company_asset_sale(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_company_party = bool(
+        re.search(r"\b(wspólnik\w*|wspolnik\w*|udziałowc\w*|udzialowc\w*|spółk\w* z o\.?o\.?|sp z o\.?o\.?|sp zoo)\b", normalized)
+    )
+    has_transfer = bool(re.search(r"\b(sprzed\w*|sprzedaż\w*|sprzedaz\w*|zby\w*|kup\w*|naby\w*|zakup\w*)\b", normalized))
+    has_asset = bool(
+        re.search(
+            r"\b(samochod\w*|samochód\w*|pojazd\w*|auto\b|środek trwały|srodek trwaly|nieruchomo\w*|lokal\w*|mieszkani\w*|mieszkani\w*|budynek\w*|grunt\w*)\b",
+            normalized,
+        )
+    )
+    return has_company_party and has_transfer and has_asset
+
+
+def build_shareholder_company_asset_sale_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_shareholder_company_asset_sale(query):
+        return []
+
+    normalized = normalize_whitespace(query or "").lower()
+    query_domains = {domain.upper() for domain in detect_domains(query)}
+    requested_domains = query_domains or {"VAT", "CIT", "PIT", "PCC"}
+    mentions_real_estate = bool(re.search(r"\b(nieruchomo\w*|lokal\w*|mieszkani\w*|mieszkan\w*|budynek\w*|grunt\w*)\b", normalized))
+    mentions_preferential_price = bool(
+        re.search(r"\b(preferencyjn\w*|rynkow\w*|poniżej\b|ponizej\b|niższ\w*|nizsz\w*|zaniż\w*|zaniz\w*|częściowo nieodpłatn\w*|czesciowo nieodplatn\w*)\b", normalized)
+    )
+
+    preferred_targets: list[tuple[str, str]] = []
+    if "CIT" in requested_domains:
+        preferred_targets.extend([("CIT", "11c"), ("CIT", "14")])
+    if "PIT" in requested_domains:
+        preferred_targets.extend([("PIT", "11"), ("PIT", "17"), ("PIT", "24")])
+    if "PCC" in requested_domains:
+        preferred_targets.extend([("PCC", "1"), ("PCC", "2"), ("PCC", "4"), ("PCC", "6"), ("PCC", "7")])
+    if "VAT" in requested_domains:
+        preferred_targets.extend([("VAT", "32"), ("VAT", "29a"), ("VAT", "43"), ("VAT", "7"), ("VAT", "5")])
+        if not mentions_real_estate and not mentions_preferential_price:
+            preferred_targets.append(("VAT", "86a"))
+
+    deduped_targets: list[tuple[str, str]] = []
+    seen_targets: set[tuple[str, str]] = set()
+    for target in preferred_targets:
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        deduped_targets.append(target)
+    return deduped_targets
+
+
+def build_shareholder_company_asset_sale_match_score(row: sqlite3.Row, *, query: str) -> float:
+    if not query_targets_shareholder_company_asset_sale(query):
+        return 0.0
+
+    candidate_text = normalize_whitespace(
+        " ".join(
+            [
+                str(row["subject"] or ""),
+                str(row["question_text"] or ""),
+                str(row["issues_json"] or ""),
+                str(row["keywords_json"] or ""),
+                str(row["legal_provisions_json"] or ""),
+                str(row["chunk_text"] or "")[:2200],
+            ]
+        )
+    ).lower()
+    normalized_query = normalize_whitespace(query or "").lower()
+    query_domains = {domain.upper() for domain in detect_domains(query)}
+    candidate_domains = row_tax_domains(row)
+    query_mentions_vehicle = bool(re.search(r"\b(samochod\w*|samochód\w*|pojazd\w*|auto\b)\b", normalized_query))
+    query_mentions_real_estate = bool(re.search(r"\b(nieruchomo\w*|lokal\w*|mieszkani\w*|mieszkan\w*|budynek\w*|grunt\w*)\b", normalized_query))
+    score = 0.0
+
+    if any(term in candidate_text for term in ("wspólnik", "wspolnik", "udziałow", "udzialow")):
+        score += 0.45
+    if any(term in candidate_text for term in ("samochod", "samochód", "pojazd", "auto")):
+        score += 0.4
+    if any(term in candidate_text for term in ("nieruchomo", "lokal", "mieszkani", "budynek", "grunt")):
+        score += 0.55
+    if any(term in candidate_text for term in ("sprzeda", "sprzed", "odpłatne nabycie", "odplatne nabycie", "zbyci")):
+        score += 0.4
+    if any(term in candidate_text for term in ("kupuj", "kupno", "nabywa", "nabycie", "zakup")):
+        score += 0.35
+    if any(term in candidate_text for term in ("cena transferowa", "transakcja kontrolowana", "podmioty powiązane", "podmioty powiazane", "wartość rynkowa", "wartosc rynkowa")):
+        score += 0.95
+    if any(term in candidate_text for term in ("preferencyjn", "poniżej wartości rynkowej", "ponizej wartosci rynkowej", "cena rynkowa", "częściowo nieodpłatne", "czesciowo nieodplatne", "nieodpłatne świadczenie", "nieodplatne swiadczenie")):
+        score += 0.9
+    if any(term in candidate_text for term in ("ukrytych zysk", "ukryte zyski", "art. 28m")):
+        score += 1.0
+    if any(term in candidate_text for term in ("wartość początkowa", "wartosc poczatkowa", "środków trwałych", "srodkow trwalych")):
+        score += 0.75
+    if any(term in candidate_text for term in ("przychodami są", "odpłatnego zbycia", "odplatnego zbycia")):
+        score += 0.45
+
+    article_key = extract_primary_article_key(row)
+    if article_key in {"11", "11a", "11c", "11d", "11e", "11t", "12", "14", "15", "16", "16g", "17", "24", "28m", "29a", "32", "43", "1", "2", "4", "6", "7"}:
+        score += 0.9
+    if article_key in {"8b", "18", "18ef", "18eg", "26c", "28j", "28k", "28h", "86a"}:
+        score -= 1.1
+
+    if query_mentions_real_estate and not query_mentions_vehicle and any(term in candidate_text for term in ("samochod", "samochód", "pojazd", "auto")):
+        score -= 1.6
+    if query_mentions_vehicle and not query_mentions_real_estate and any(term in candidate_text for term in ("nieruchomo", "lokal", "mieszkani", "budynek", "grunt")):
+        score -= 0.8
+
+    if str(row["source_type"] or "") == "statute":
+        if query_domains and candidate_domains and not (candidate_domains & query_domains):
+            score -= 0.8
+
+    return score
+
+
+def query_targets_small_taxpayer_foreign_vat(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_small_taxpayer = bool(re.search(r"\b(mał\w* podatnik\w*|maly podatnik\w*|art\.\s*4a\s*pkt\s*10)\b", normalized))
+    has_revenue_threshold = bool(re.search(r"\b(kryterium przychodow\w*|przychodow\w*|progu|limitu|statusu)\b", normalized))
+    has_foreign_vat = bool(
+        re.search(
+            r"\b(vat poza polsk\w*|poza polsk\w*|zagraniczn\w* vat|podatk\w* od warto[śs]ci dodanej|odwrotne obci[aą]żenie|reverse charge|lokaln\w* stawk\w*)\b",
+            normalized,
+        )
+    )
+    return has_small_taxpayer and (has_revenue_threshold or has_foreign_vat)
+
+
+def build_small_taxpayer_foreign_vat_match_score(row: sqlite3.Row, *, query: str) -> float:
+    if not query_targets_small_taxpayer_foreign_vat(query):
+        return 0.0
+
+    candidate_text = normalize_whitespace(
+        " ".join(
+            [
+                str(row["subject"] or ""),
+                str(row["question_text"] or ""),
+                str(row["issues_json"] or ""),
+                str(row["keywords_json"] or ""),
+                str(row["legal_provisions_json"] or ""),
+                str(row["chunk_text"] or "")[:2400],
+            ]
+        )
+    ).lower()
+    score = 0.0
+
+    if any(term in candidate_text for term in ("mały podatnik", "maly podatnik", "art. 4a pkt 10", "art. 4a-pkt 10")):
+        score += 1.35
+    if any(term in candidate_text for term in ("przychodu ze sprzedaży", "przychodu ze sprzedazy", "wartość przychodu", "wartosc przychodu")):
+        score += 0.65
+    if any(term in candidate_text for term in ("odwrotnego obciążenia", "odwrotne obciążenie", "reverse charge")):
+        score += 1.0
+    if any(term in candidate_text for term in ("poza polską", "poza polska", "zagranicznych", "lokalnych wymogów", "lokalnych wymogow", "wartości dodanej", "wartosci dodanej")):
+        score += 1.0
+    if any(term in candidate_text for term in ("nabywca", "usługobiorc", "uslugobiorc")) and "vat" in candidate_text:
+        score += 0.6
+    if any(term in candidate_text for term in ("kwocie brutto", "kwocie netto", "podatku należnego", "podatku naleznego")):
+        score += 0.45
+
+    article_key = extract_primary_article_key(row)
+    if article_key in {"4a", "19", "12"}:
+        score += 0.9
+    if article_key in {"28o", "28j", "28k"}:
+        score -= 1.4
+
+    candidate_domains = row_tax_domains(row)
+    if str(row["source_type"] or "") == "statute":
+        if "CIT" in candidate_domains:
+            score += 0.45
+        elif candidate_domains:
+            score -= 0.8
+
+    if str(row["source_type"] or "") == "interpretation":
+        score += 0.3
+    if str(row["source_type"] or "") == "judgment" and "mały podatnik" not in candidate_text and "maly podatnik" not in candidate_text:
+        score -= 0.4
+
+    return score
+
+
 def derive_tax_domain(record: dict[str, Any]) -> str:
     haystack = " ".join(
         [*map(str, record.get("law_tags") or []), *map(str, record.get("issues") or []), *map(str, record.get("legal_provisions") or [])]
@@ -1164,6 +2033,13 @@ def build_overlap_tail(text: str, overlap_chars: int) -> str:
     if overlap_chars <= 0 or len(text) <= overlap_chars:
         return ""
     return text[-overlap_chars:].strip()
+
+
+def filter_index_chunks(record: dict[str, Any], chunks: list[str]) -> list[str]:
+    if normalize_source_type(record) != "interpretation":
+        return chunks
+    filtered = [chunk for chunk in chunks if not is_procedural_interpretation_chunk_text(chunk)]
+    return filtered or chunks
 
 
 def make_chunk_id(document_id: str, chunk_index: int, chunk_text: str) -> str:
@@ -1582,6 +2458,7 @@ def index_record(connection: sqlite3.Connection, record: dict[str, Any], config:
         target_chars=config.chunk_target_chars,
         overlap_chars=config.chunk_overlap_chars,
     )
+    chunks = filter_index_chunks(record, chunks)
 
     subject = normalize_whitespace(str(record.get("subject") or "Bez tytułu")) or "Bez tytułu"
     signature = normalize_whitespace(str(record.get("signature") or "")) or None
@@ -1683,6 +2560,10 @@ def index_record(connection: sqlite3.Connection, record: dict[str, Any], config:
 
 
 def reindex_corpus(*, limit: Optional[int] = None, force: bool = False) -> dict[str, Any]:
+    if os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}:
+        from app.mysql_rag import reindex_corpus_mysql
+
+        return reindex_corpus_mysql(limit=limit, force=force)
     config = get_rag_config()
     if not config.processed_path.exists():
         raise FileNotFoundError(f"Processed corpus not found: {config.processed_path}")
@@ -1758,8 +2639,24 @@ def build_match_query(query: str, *, max_tokens: int = 24) -> Optional[str]:
     return " OR ".join(f'"{token}"*' for token in tokens[:max_tokens])
 
 
+def normalize_legal_query_refs(query: str) -> str:
+    normalized = normalize_whitespace(query)
+    if not normalized:
+        return ""
+    normalized = ARTICLE_SPLIT_SUFFIX_RE.sub(lambda match: f"art. {match.group(1)}{match.group(2).lower()}", normalized)
+    normalized = BARE_ARTICLE_SPLIT_SUFFIX_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2).lower()}"
+        if match.group(2).lower() in {"na", "nda", "nh", "nf", "nb", "ga", "gb", "gc"}
+        else match.group(0),
+        normalized,
+    )
+    normalized = OFFLINE_SPLIT_RE.sub(lambda match: f"offline{match.group(1)}", normalized)
+    return normalized
+
+
 def get_query_expansion_terms(query: str, *, config: Optional[RagConfig] = None) -> list[str]:
     """Return stable tax-domain aliases relevant to the user's wording."""
+    query = normalize_legal_query_refs(query)
     additions: list[str] = []
     for pattern, aliases in QUERY_EXPANSIONS:
         if pattern.search(query):
@@ -1773,7 +2670,8 @@ def get_query_expansion_terms(query: str, *, config: Optional[RagConfig] = None)
 
 def expand_search_query(query: str, *, config: Optional[RagConfig] = None) -> str:
     """Add stable tax-domain aliases while preserving the user's original wording."""
-    return " ".join([query, *get_query_expansion_terms(query, config=config)]).strip()
+    normalized_query = normalize_legal_query_refs(query)
+    return " ".join([normalized_query, *get_query_expansion_terms(normalized_query, config=config)]).strip()
 
 
 def build_candidate_match_queries(query: str, *, config: Optional[RagConfig] = None) -> list[str]:
@@ -1973,6 +2871,7 @@ def term_matches(candidate_terms: set[str], query_term: str) -> bool:
 
 def build_legal_match_score(row: sqlite3.Row, *, query: str) -> float:
     """Score explicit legal/factual overlap independently of body-text similarity."""
+    query = normalize_legal_query_refs(query)
     query_terms = ranking_terms(query)
     if not query_terms:
         return 0.0
@@ -1997,6 +2896,12 @@ def build_legal_match_score(row: sqlite3.Row, *, query: str) -> float:
         overlap += sum(weight for term in query_terms if term_matches(terms, term))
 
     normalized_overlap = min(overlap / (len(query_terms) * 4.0), 1.0)
+    candidate_joined_text = " ".join(candidate_text_parts).lower()
+    article_hits = 0.0
+    for article in ("106nda", "106nh", "106na", "106gb"):
+        if article in query.lower() and article in candidate_joined_text:
+            article_hits += 0.22 if article in {"106nda", "106nh"} else 0.12
+    normalized_overlap = min(normalized_overlap + article_hits, 1.0)
     query_domains = detect_domains(query)
     candidate_domains = detect_domains(" ".join(candidate_text_parts))
     if query_domains and query_domains & candidate_domains:
@@ -2164,6 +3069,12 @@ def build_subject_phrase_match_score(row: sqlite3.Row, *, query: str) -> float:
     return 0.0
 
 
+def build_interpretation_section_match_score(row: sqlite3.Row) -> float:
+    if str(row["source_type"] or "") != "interpretation":
+        return 0.0
+    return build_interpretation_section_score(str(row["chunk_text"] or ""))
+
+
 def build_mechanism_match_score(row: sqlite3.Row, *, query: str, config: RagConfig) -> float:
     query_mechanisms = detect_mechanisms(query, config=config)
     if not query_mechanisms:
@@ -2228,19 +3139,19 @@ def build_pcc_interpretation_match_score(row: sqlite3.Row, *, query: str) -> flo
 
 
 def diversify_top_document_window(
-    ranked_rows: list[tuple[sqlite3.Row, float, float, float, float]],
+    ranked_rows: list[tuple[sqlite3.Row, float, float, float, float, float, float, float]],
     *,
     effective_limit: int,
-) -> list[tuple[sqlite3.Row, float, float, float, float]]:
+) -> list[tuple[sqlite3.Row, float, float, float, float, float, float, float]]:
     if len(ranked_rows) <= effective_limit:
         return ranked_rows
 
     top_window = ranked_rows[:effective_limit]
-    if len({str(row["document_id"]) for row, _, _, _, _ in top_window}) == len(top_window):
+    if len({str(item[0]["document_id"]) for item in top_window}) == len(top_window):
         return ranked_rows
 
-    diversified: list[tuple[sqlite3.Row, float, float, float, float]] = []
-    deferred: list[tuple[sqlite3.Row, float, float, float, float]] = []
+    diversified: list[tuple[sqlite3.Row, float, float, float, float, float, float, float]] = []
+    deferred: list[tuple[sqlite3.Row, float, float, float, float, float, float, float]] = []
     seen_documents: set[str] = set()
     for item in ranked_rows:
         document_id = str(item[0]["document_id"])
@@ -2479,15 +3390,18 @@ def fetch_local_candidate_rows(
     source_types: Optional[set[str]] = None,
     enforce_query_domain: bool = False,
     tax_domains: Optional[set[str]] = None,
+    detection_query: Optional[str] = None,
 ) -> tuple[str, list[sqlite3.Row]]:
     """Fetch and merge diversified FTS candidate pools before hybrid reranking."""
+    ensure_local_index_ready()
+    detection_text = detection_query or query
     match_queries = build_candidate_match_queries(query)
     statute_family_prefixes: set[str] = set()
     statute_exact_articles: set[str] = set()
     if source_types == {"statute"}:
-        statute_family_prefixes, statute_exact_articles = detect_procedural_article_targets(query)
+        statute_family_prefixes, statute_exact_articles = detect_procedural_article_targets(detection_text)
         if not statute_exact_articles:
-            match_queries.extend(build_statute_match_queries(query))
+            match_queries.extend(build_statute_match_queries(detection_text))
         match_queries = list(dict.fromkeys(match_queries))
     if config.facts_channel_enabled:
         fact_terms = " ".join(sorted(ranking_terms(query))[:12])
@@ -2506,7 +3420,7 @@ def fetch_local_candidate_rows(
     if allowed_types:
         type_clause = " AND d.source_type IN (" + ", ".join("?" for _ in allowed_types) + ")"
         type_values = allowed_types
-    query_domains = {domain.upper() for domain in detect_domains(query)}
+    query_domains = {domain.upper() for domain in detect_domains(detection_text)}
     query_domains.update(domain.upper() for domain in tax_domains or set() if domain)
     domain_clause = ""
     domain_values: list[str] = []
@@ -2521,35 +3435,48 @@ def fetch_local_candidate_rows(
     connection = get_connection(config.db_path)
     try:
         query_rows: list[list[sqlite3.Row]] = []
+        direct_statute_rows_found = False
         if source_types == {"statute"} and (statute_family_prefixes or statute_exact_articles):
             direct_clauses: list[str] = []
             direct_values: list[str] = []
             for article in sorted(statute_exact_articles):
-                direct_clauses.append("d.legal_provisions_json = ?")
+                direct_clauses.append("legal_provisions_json = ?")
                 direct_values.append(json_dump([f"art. {article}"]))
             for prefix in sorted(statute_family_prefixes):
-                direct_clauses.append("d.legal_provisions_json LIKE ?")
+                direct_clauses.append("legal_provisions_json LIKE ?")
                 direct_values.append(f'%"art. {prefix}%')
-            direct_rows = connection.execute(
+            direct_document_rows = connection.execute(
                 f"""
-                SELECT
-                    c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
-                    d.subject, d.signature, d.published_date, d.source_url, d.category,
-                    d.keywords_json, d.legal_provisions_json, d.issues_json, d.law_tags_json, d.facts_text, d.question_text, d.tax_domain,
-                    d.source, d.source_type, d.source_subtype, d.authority, d.publication, d.legal_state_date, d.source_pages_json,
-                    0.0 AS lexical_score
-                FROM chunks c
-                JOIN documents d ON d.document_id = c.document_id
-                WHERE d.source_type = 'statute'
-                  AND c.chunk_index = 0
+                SELECT document_id
+                FROM documents
+                WHERE source_type = 'statute'
                   AND ({' OR '.join(direct_clauses)})
-                ORDER BY c.chunk_id ASC
+                ORDER BY document_id ASC
                 LIMIT ?
                 """,
                 (*direct_values, candidate_limit),
             ).fetchall()
-            if direct_rows:
+            direct_document_ids = [str(row["document_id"]) for row in direct_document_rows]
+            if direct_document_ids:
+                placeholders = ", ".join("?" for _ in direct_document_ids)
+                direct_rows = connection.execute(
+                    f"""
+                    SELECT
+                        c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                        d.subject, d.signature, d.published_date, d.source_url, d.category,
+                        d.keywords_json, d.legal_provisions_json, d.issues_json, d.law_tags_json, d.facts_text, d.question_text, d.tax_domain,
+                        d.source, d.source_type, d.source_subtype, d.authority, d.publication, d.legal_state_date, d.source_pages_json,
+                        0.0 AS lexical_score
+                    FROM chunks c
+                    JOIN documents d ON d.document_id = c.document_id
+                    WHERE c.document_id IN ({placeholders})
+                      AND c.chunk_index = 0
+                    ORDER BY c.chunk_id ASC
+                    """,
+                    tuple(direct_document_ids),
+                ).fetchall()
                 query_rows.append(direct_rows)
+                direct_statute_rows_found = True
                 match_queries = []
 
         query_rows.extend([connection.execute(
@@ -2608,7 +3535,7 @@ def fetch_local_candidate_rows(
             for prefix in sorted(family_prefixes):
                 family_clauses.append("d.legal_provisions_json LIKE ?")
                 family_values.append(f'%art. {prefix}%')
-            if family_clauses:
+            if family_clauses and not direct_statute_rows_found:
                 family_rows = connection.execute(
                     f"""
                     SELECT
@@ -2689,16 +3616,30 @@ def fetch_statute_rows_by_targets(
     config: RagConfig,
     limit: Optional[int] = None,
 ) -> list[sqlite3.Row]:
+    ensure_local_index_ready()
     if not targets or not config.db_path.exists():
         return []
 
-    target_clauses = ["(UPPER(d.tax_domain) = ? AND d.legal_provisions_json LIKE ?)" for _ in targets]
+    target_clauses = ["(UPPER(tax_domain) = ? AND legal_provisions_json LIKE ?)" for _ in targets]
     target_values: list[str] = []
     for domain, article_key in targets:
         target_values.extend((domain.upper(), f'%"art. {article_key}"%'))
 
     connection = get_connection(config.db_path)
     try:
+        document_rows = connection.execute(
+            f"""
+            SELECT document_id
+            FROM documents
+            WHERE source_type = 'statute'
+              AND ({' OR '.join(target_clauses)})
+            """,
+            tuple(target_values),
+        ).fetchall()
+        document_ids = [str(row["document_id"]) for row in document_rows]
+        if not document_ids:
+            return []
+        placeholders = ", ".join("?" for _ in document_ids)
         rows = connection.execute(
             f"""
             SELECT
@@ -2709,11 +3650,10 @@ def fetch_statute_rows_by_targets(
                 0.0 AS lexical_score
             FROM chunks c
             JOIN documents d ON d.document_id = c.document_id
-            WHERE d.source_type = 'statute'
+            WHERE c.document_id IN ({placeholders})
               AND c.chunk_index = 0
-              AND ({' OR '.join(target_clauses)})
             """,
-            tuple(target_values),
+            tuple(document_ids),
         ).fetchall()
     finally:
         connection.close()
@@ -2738,6 +3678,58 @@ def fetch_statute_rows_by_targets(
     return deduped
 
 
+def fetch_rows_by_document_ids(
+    document_ids: list[str] | tuple[str, ...],
+    *,
+    config: RagConfig,
+    source_type: Optional[str] = None,
+    chunk_limit_per_document: Optional[int] = None,
+) -> list[sqlite3.Row]:
+    clean_ids = [str(document_id).strip() for document_id in document_ids if str(document_id).strip()]
+    if not clean_ids or not config.db_path.exists():
+        return []
+
+    placeholders = ", ".join("?" for _ in clean_ids)
+    source_clause = " AND d.source_type = ?" if source_type else ""
+    values: list[str] = [*clean_ids]
+    if source_type:
+        values.append(source_type)
+
+    connection = get_connection(config.db_path)
+    try:
+        rows = connection.execute(
+            f"""
+            SELECT
+                c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                d.subject, d.signature, d.published_date, d.source_url, d.category,
+                d.keywords_json, d.legal_provisions_json, d.issues_json, d.law_tags_json, d.facts_text, d.question_text, d.tax_domain,
+                d.source, d.source_type, d.source_subtype, d.authority, d.publication, d.legal_state_date, d.source_pages_json,
+                0.0 AS lexical_score
+            FROM chunks c
+            JOIN documents d ON d.document_id = c.document_id
+            WHERE c.document_id IN ({placeholders})
+              {source_clause}
+            ORDER BY c.document_id ASC, c.chunk_index ASC
+            """,
+            tuple(values),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    if chunk_limit_per_document is None:
+        return rows
+
+    limited_rows: list[sqlite3.Row] = []
+    counts: dict[str, int] = {}
+    for row in rows:
+        document_id = str(row["document_id"])
+        if counts.get(document_id, 0) >= chunk_limit_per_document:
+            continue
+        limited_rows.append(row)
+        counts[document_id] = counts.get(document_id, 0) + 1
+    return limited_rows
+
+
 def inspect_local_candidate_pool(
     query: str, *, limit: Optional[int] = None, source_types: Optional[set[str]] = None,
     enforce_query_domain: bool = False, tax_domains: Optional[set[str]] = None,
@@ -2749,6 +3741,7 @@ def inspect_local_candidate_pool(
     _, rows = fetch_local_candidate_rows(
         expanded_query, effective_limit=effective_limit, config=config, source_types=source_types,
         enforce_query_domain=enforce_query_domain, tax_domains=tax_domains,
+        detection_query=query,
     )
     return [
         {
@@ -2774,6 +3767,18 @@ def rank_hybrid_local_candidates(
     if not rows:
         return []
 
+    if not query_targets_interpretation_procedure(query):
+        non_procedural_rows = [
+            row
+            for row in rows
+            if not (
+                str(row["source_type"] or "") == "interpretation"
+                and is_procedural_interpretation_chunk_text(str(row["chunk_text"] or ""))
+            )
+        ]
+        if non_procedural_rows:
+            rows = non_procedural_rows
+
     # Stage 2: inexpensive hybrid pre-ranking over the full recall pool.
     semantic_scores = [
         (
@@ -2782,6 +3787,9 @@ def rank_hybrid_local_candidates(
             build_legal_match_score(row, query=query),
             build_mechanism_match_score(row, query=query, config=config),
             build_pcc_interpretation_match_score(row, query=query),
+            build_ksef_foreign_sale_match_score(row, query=query),
+            build_shareholder_company_asset_sale_match_score(row, query=query),
+            build_small_taxpayer_foreign_vat_match_score(row, query=query),
         )
         for row, semantic_score in zip(
             rows, compute_hash_semantic_scores(rows, query=query, config=config)
@@ -2793,7 +3801,7 @@ def rank_hybrid_local_candidates(
     }
     semantic_ranks = {
         str(row["chunk_id"]): rank
-        for rank, (row, _, _, _, _) in enumerate(
+        for rank, (row, _, _, _, _, _, _, _) in enumerate(
             sorted(
                 semantic_scores,
                 key=lambda item: (item[1], -int(item[0]["chunk_index"]), str(item[0]["chunk_id"])),
@@ -2815,7 +3823,12 @@ def rank_hybrid_local_candidates(
             + (0.25 * build_statute_match_score(item[0], query=query))
             + (0.35 * build_article_family_match_score(item[0], query=query))
             + build_subject_phrase_match_score(item[0], query=query)
-            + item[4],
+            + build_interpretation_section_match_score(item[0])
+            + item[4]
+            + item[5],
+            item[6] + item[7],
+            item[7],
+            item[5],
             item[4],
             -item[1],
             item[2],
@@ -2829,16 +3842,16 @@ def rank_hybrid_local_candidates(
     # This preserves broad recall while spending the expensive model budget on
     # legal near-misses that can realistically reach the final top-k.
     shortlist = preliminary_rows[: max(effective_limit, config.cross_encoder_candidate_limit)]
-    judgment_only_shortlist = all(str(row["source_type"] or "") == "judgment" for row, _, _, _, _ in shortlist)
+    judgment_only_shortlist = all(str(row["source_type"] or "") == "judgment" for row, _, _, _, _, _, _, _ in shortlist)
     cross_scores = None if judgment_only_shortlist else compute_cross_encoder_scores(
-        [row for row, _, _, _, _ in shortlist], query=query, config=config
+        [row for row, _, _, _, _, _, _, _ in shortlist], query=query, config=config
     )
     if cross_scores is None:
         ranked_rows = preliminary_rows
     else:
         cross_ranks = {
             str(row["chunk_id"]): rank
-            for rank, ((row, _, _, _, _), _) in enumerate(
+            for rank, ((row, _, _, _, _, _, _, _), _) in enumerate(
                 sorted(
                     zip(shortlist, cross_scores),
                     key=lambda item: (item[1], str(item[0][0]["chunk_id"])),
@@ -2848,8 +3861,8 @@ def rank_hybrid_local_candidates(
             )
         }
         cross_weight = min(max(config.cross_encoder_weight, 0.0), 1.0)
-        def cross_encoder_sort_key(item: tuple[sqlite3.Row, float, float, float, float]) -> tuple[float, int]:
-            row, _, legal_match_score, mechanism_match_score, pcc_match_score = item
+        def cross_encoder_sort_key(item: tuple[sqlite3.Row, float, float, float, float, float, float, float]) -> tuple[float, int]:
+            row, _, legal_match_score, mechanism_match_score, pcc_match_score, ksef_match_score, shareholder_sale_match_score, small_taxpayer_foreign_vat_match_score = item
             chunk_id = str(row["chunk_id"])
             statute_match_score = build_statute_match_score(row, query=query)
             family_match_score = build_article_family_match_score(row, query=query)
@@ -2865,7 +3878,11 @@ def rank_hybrid_local_candidates(
                 + (0.25 * statute_match_score)
                 + (0.35 * family_match_score)
                 + build_subject_phrase_match_score(row, query=query)
+                + build_interpretation_section_match_score(row)
                 + pcc_match_score
+                + ksef_match_score
+                + shareholder_sale_match_score
+                + small_taxpayer_foreign_vat_match_score
             )
             # A reciprocal rank with an arbitrary 20-point offset flattened the
             # model signal so much that rank 1 and rank 20 differed by only a
@@ -2895,13 +3912,13 @@ def rank_hybrid_local_candidates(
         raw_leader = semantic_scores[0]
         raw_leader_document_id = str(raw_leader[0]["document_id"])
         final_window = list(ranked_rows[:effective_limit])
-        final_document_ids = {str(row["document_id"]) for row, _, _, _, _ in final_window}
+        final_document_ids = {str(row["document_id"]) for row, _, _, _, _, _, _, _ in final_window}
         if raw_leader_document_id not in final_document_ids:
             if len(final_window) < effective_limit:
                 final_window.append(raw_leader)
             else:
                 document_counts: dict[str, int] = {}
-                for row, _, _, _, _ in final_window:
+                for row, _, _, _, _, _, _, _ in final_window:
                     document_id = str(row["document_id"])
                     document_counts[document_id] = document_counts.get(document_id, 0) + 1
                 replacement_index = len(final_window) - 1
@@ -2912,7 +3929,7 @@ def rank_hybrid_local_candidates(
                         break
                 final_window[replacement_index] = raw_leader
 
-            retained_chunk_ids = {str(row["chunk_id"]) for row, _, _, _, _ in final_window}
+            retained_chunk_ids = {str(row["chunk_id"]) for row, _, _, _, _, _, _, _ in final_window}
             ranked_rows = final_window + [
                 item for item in ranked_rows if str(item[0]["chunk_id"]) not in retained_chunk_ids
             ]
@@ -2920,13 +3937,13 @@ def rank_hybrid_local_candidates(
     raw_leader = semantic_scores[0]
     raw_leader_document_id = str(raw_leader[0]["document_id"])
     final_window = list(ranked_rows[:effective_limit])
-    final_document_ids = {str(row["document_id"]) for row, _, _, _, _ in final_window}
+    final_document_ids = {str(row["document_id"]) for row, _, _, _, _, _, _, _ in final_window}
     if raw_leader_document_id not in final_document_ids:
         if len(final_window) < effective_limit:
             final_window.append(raw_leader)
         else:
             document_counts: dict[str, int] = {}
-            for row, _, _, _, _ in final_window:
+            for row, _, _, _, _, _, _, _ in final_window:
                 document_id = str(row["document_id"])
                 document_counts[document_id] = document_counts.get(document_id, 0) + 1
             replacement_index = len(final_window) - 1
@@ -2937,7 +3954,7 @@ def rank_hybrid_local_candidates(
                     break
             final_window[replacement_index] = raw_leader
 
-        retained_chunk_ids = {str(row["chunk_id"]) for row, _, _, _, _ in final_window}
+        retained_chunk_ids = {str(row["chunk_id"]) for row, _, _, _, _, _, _, _ in final_window}
         ranked_rows = final_window + [
             item for item in ranked_rows if str(item[0]["chunk_id"]) not in retained_chunk_ids
         ]
@@ -2961,7 +3978,11 @@ def rank_hybrid_local_candidates(
                 + (0.25 * build_statute_match_score(row, query=query))
                 + (0.35 * build_article_family_match_score(row, query=query))
                 + build_subject_phrase_match_score(row, query=query)
+                + build_interpretation_section_match_score(row)
                 + pcc_match_score
+                + ksef_match_score
+                + shareholder_sale_match_score
+                + small_taxpayer_foreign_vat_match_score
             ),
             chunk_text=str(row["chunk_text"]),
             subject=str(row["subject"]),
@@ -2978,7 +3999,7 @@ def rank_hybrid_local_candidates(
             source_pages=[int(value) for value in json.loads(row["source_pages_json"] or "[]")],
             legal_provisions=[str(value) for value in json.loads(row["legal_provisions_json"] or "[]")],
         )
-        for row, _, legal_match_score, mechanism_match_score, pcc_match_score in ranked_rows[:effective_limit]
+        for row, _, legal_match_score, mechanism_match_score, pcc_match_score, ksef_match_score, shareholder_sale_match_score, small_taxpayer_foreign_vat_match_score in ranked_rows[:effective_limit]
     ]
 
 
@@ -2986,6 +4007,16 @@ def search_chunks(
     query: str, *, limit: Optional[int] = None, source_types: Optional[set[str]] = None,
     enforce_query_domain: bool = False, tax_domains: Optional[set[str]] = None,
 ) -> list[RagChunk]:
+    if os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}:
+        from app.mysql_rag import search_chunks_mysql
+
+        return search_chunks_mysql(
+            query,
+            limit=limit,
+            source_types=source_types,
+            enforce_query_domain=enforce_query_domain,
+            tax_domains=tax_domains,
+        )
     config = get_rag_config()
     ensure_local_index_ready()
     if not config.db_path.exists():
@@ -3000,7 +4031,22 @@ def search_chunks(
     return rank_hybrid_local_candidates(rows, query=expanded_query, effective_limit=effective_limit, config=config)
 
 
-def search_chat_chunks(query: str, *, limit: Optional[int] = None) -> list[RagChunk]:
+def search_chat_chunks(
+    query: str,
+    *,
+    limit: Optional[int] = None,
+    include_interpretations: bool = True,
+    include_judgments: Optional[bool] = None,
+) -> list[RagChunk]:
+    if os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}:
+        from app.mysql_rag import search_chat_chunks_mysql
+
+        return search_chat_chunks_mysql(
+            query,
+            limit=limit,
+            include_interpretations=include_interpretations,
+            include_judgments=include_judgments,
+        )
     """Retrieve complementary authority types for an application answer.
 
     A factual interpretation and the applicable provision answer different
@@ -3010,29 +4056,99 @@ def search_chat_chunks(query: str, *, limit: Optional[int] = None) -> list[RagCh
     """
     config = get_rag_config()
     effective_limit = limit or config.retrieval_limit
-    include_judgments = bool(JUDGMENT_INTENT_RE.search(query) or extract_judgment_signatures(query))
+    judgment_requested_by_query = bool(JUDGMENT_INTENT_RE.search(query) or extract_judgment_signatures(query))
+    include_judgments = judgment_requested_by_query if include_judgments is None else include_judgments
     judgment_only_context = bool(JUDGMENT_ONLY_CONTEXT_RE.search(query))
     statute_domains = resolve_statute_tax_domains(query)
-    judgment_limit = effective_limit if judgment_only_context else (max(2, math.ceil(effective_limit * 0.6)) if include_judgments else 0)
-    statute_limit = 0 if judgment_only_context else ((max(1, effective_limit // 4) if statute_domains else 0) if include_judgments else max(1, effective_limit // 2))
-    interpretation_limit = max(0 if judgment_only_context else 1, effective_limit - statute_limit - judgment_limit)
-    interpretations = search_chunks(
-        query, limit=interpretation_limit, source_types={"interpretation"}
-    ) if interpretation_limit else []
-    judgments = search_chunks(query, limit=judgment_limit, source_types={"judgment"}) if include_judgments else []
-    statutes = search_chunks(
+    explicit_query_domains = bool(statute_domains)
+    if judgment_only_context:
+        judgment_limit = effective_limit
+        statute_limit = 0
+        interpretation_limit = 0
+    elif not include_interpretations and not include_judgments:
+        judgment_limit = 0
+        interpretation_limit = 0
+        statute_limit = effective_limit
+    elif include_judgments and not include_interpretations:
+        statute_limit = max(1, effective_limit - 1)
+        interpretation_limit = 0
+        judgment_limit = max(1, effective_limit - statute_limit)
+    elif include_judgments:
+        statute_limit = max(1, effective_limit // 4) if statute_domains else 1
+        interpretation_limit = max(2, math.ceil(effective_limit * 0.5))
+        interpretation_limit = min(interpretation_limit, max(effective_limit - statute_limit, 1))
+        judgment_limit = max(1, effective_limit - statute_limit - interpretation_limit)
+    else:
+        judgment_limit = 0
+        if query_targets_ksef_foreign_sale(query):
+            statute_limit = min(effective_limit - 1, max(4, math.ceil(effective_limit * 0.6)))
+        else:
+            statute_limit = effective_limit if not include_interpretations else max(1, effective_limit // 2)
+        interpretation_limit = max(1, effective_limit - statute_limit) if include_interpretations else 0
+    if interpretation_limit and query_targets_ksef_foreign_sale(query):
+        interpretation_rows = fetch_rows_by_document_ids(
+            KSEF_FOREIGN_SALE_INTERPRETATION_DOCUMENT_IDS,
+            config=config,
+            source_type="interpretation",
+        )
+        interpretations = rank_hybrid_local_candidates(
+            interpretation_rows,
+            query=expand_search_query(query),
+            effective_limit=interpretation_limit,
+            config=config,
+        ) if interpretation_rows else []
+    else:
+        interpretations = search_chunks(
+            query,
+            limit=interpretation_limit,
+            source_types={"interpretation"},
+            enforce_query_domain=explicit_query_domains,
+            tax_domains=statute_domains,
+        ) if interpretation_limit else []
+    judgments = search_chunks(
         query,
-        limit=statute_limit,
-        source_types={"statute"},
-        enforce_query_domain=True,
+        limit=judgment_limit,
+        source_types={"judgment"},
+        enforce_query_domain=explicit_query_domains,
         tax_domains=statute_domains,
-    ) if statute_limit else []
+    ) if include_judgments else []
+    statutes = [] if query_targets_ksef_foreign_sale(query) else (
+        search_chunks(
+            query,
+            limit=statute_limit,
+            source_types={"statute"},
+            enforce_query_domain=True,
+            tax_domains=statute_domains,
+        ) if statute_limit else []
+    )
     preferred_targets: list[tuple[str, str]] = []
+    if query_targets_ksef_foreign_sale(query):
+        preferred_targets.extend(KSEF_FOREIGN_SALE_STATUTE_TARGETS)
+    if query_targets_shareholder_company_asset_sale(query):
+        preferred_targets.extend(build_shareholder_company_asset_sale_statute_targets(query))
+    if query_targets_small_taxpayer_foreign_vat(query):
+        preferred_targets.extend([("CIT", "4a"), ("CIT", "19"), ("CIT", "12")])
     for chunk in interpretations:
         for provision in chunk.legal_provisions:
             target = extract_statute_target_from_text(provision)
-            if target and target not in preferred_targets:
+            if target and (not statute_domains or target[0] in statute_domains) and target not in preferred_targets:
                 preferred_targets.append(target)
+    _procedural_family_prefixes, procedural_exact_articles = detect_procedural_article_targets(query)
+    if statute_limit and procedural_exact_articles:
+        hinted_domains = statute_domains or {
+            "VAT",
+            "CIT",
+            "PIT",
+            "PCC",
+            "AKCYZA",
+            "ORDYNACJA",
+            "NIERUCHOMOŚCI",
+        }
+        for domain in sorted(hinted_domains):
+            for article_key in sorted(procedural_exact_articles):
+                target = (domain, article_key)
+                if target not in preferred_targets:
+                    preferred_targets.append(target)
     hinted_statute_rows = fetch_statute_rows_by_targets(
         preferred_targets,
         config=config,
@@ -3047,7 +4163,13 @@ def search_chat_chunks(query: str, *, limit: Optional[int] = None) -> list[RagCh
 
     merged_statutes: list[RagChunk] = []
     seen_statute_chunks: set[str] = set()
-    for chunk in [*hinted_statutes, *statutes]:
+    prefer_hinted_statutes = (
+        query_targets_ksef_foreign_sale(query)
+        or query_targets_shareholder_company_asset_sale(query)
+        or query_targets_small_taxpayer_foreign_vat(query)
+    )
+    statute_candidates = [*hinted_statutes, *statutes] if prefer_hinted_statutes else [*statutes, *hinted_statutes]
+    for chunk in statute_candidates:
         if chunk.chunk_id in seen_statute_chunks:
             continue
         seen_statute_chunks.add(chunk.chunk_id)
@@ -3078,6 +4200,16 @@ def inspect_search(
     query: str, *, limit: Optional[int] = None, source_types: Optional[set[str]] = None,
     enforce_query_domain: bool = False, tax_domains: Optional[set[str]] = None,
 ) -> RetrievalInspection:
+    if os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}:
+        from app.mysql_rag import inspect_search_mysql
+
+        return inspect_search_mysql(
+            query,
+            limit=limit,
+            source_types=source_types,
+            enforce_query_domain=enforce_query_domain,
+            tax_domains=tax_domains,
+        )
     config = get_rag_config()
     effective_limit = limit or config.retrieval_limit
     expanded_query = expand_search_query(query)
@@ -3089,6 +4221,7 @@ def inspect_search(
         source_types=source_types,
         enforce_query_domain=enforce_query_domain,
         tax_domains=tax_domains,
+        detection_query=query,
     )
     chunks = rank_hybrid_local_candidates(
         candidate_rows,
@@ -3156,6 +4289,8 @@ def inspect_search(
                 "judgment_metadata_match_score": build_judgment_metadata_match_score(row, query=expanded_query),
                 "article_family_match_score": build_article_family_match_score(row, query=expanded_query),
                 "statute_match_score": build_statute_match_score(row, query=expanded_query),
+                "shareholder_company_asset_sale_match_score": build_shareholder_company_asset_sale_match_score(row, query=expanded_query),
+                "small_taxpayer_foreign_vat_match_score": build_small_taxpayer_foreign_vat_match_score(row, query=expanded_query),
                 "preview": str(row["chunk_text"] or "")[:280].strip(),
             }
             for rank, row in enumerate(candidate_rows, start=1)
@@ -3227,6 +4362,10 @@ def list_citations(chunks: list[RagChunk]) -> str:
 
 
 def index_exists() -> bool:
+    if os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}:
+        from app.mysql_rag import index_exists_mysql
+
+        return index_exists_mysql()
     config = get_rag_config()
     return config.db_path.exists()
 

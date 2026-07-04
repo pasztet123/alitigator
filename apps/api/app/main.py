@@ -1580,7 +1580,9 @@ async def chat(
         effective_user_prompt,
         include_interpretations=(request.retrieval_preferences.include_interpretations if request.retrieval_preferences else True),
         include_judgments=(request.retrieval_preferences.include_judgments if request.retrieval_preferences else None),
-    ) or search_chunks_supabase(effective_user_prompt)
+    )
+    if not retrieved_chunks and os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() == "sqlite":
+        retrieved_chunks = search_chunks_supabase(effective_user_prompt)
     if not api_key:
         demo_reply = build_demo_reply(latest_user_message, retrieved_chunks, retrieval_prompt=effective_user_prompt)
         structured_reply = parse_structured_reply(demo_reply)

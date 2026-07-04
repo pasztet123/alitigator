@@ -21,6 +21,10 @@ TOTAL_CASES="$(python3 -c "import json; from pathlib import Path; cases=json.loa
 echo "Benchmark cases: $TOTAL_CASES"
 echo "Reports dir: $REPORT_DIR"
 
+# Prebuild the local statute index once to avoid concurrent SQLite writes when
+# worker processes start in parallel and all try to auto-reindex together.
+.venv/bin/python -B -c "from app.rag import ensure_local_index_ready; ensure_local_index_ready()"
+
 for ((start=0; start<TOTAL_CASES; start+=BATCH_SIZE)); do
   end=$((start + BATCH_SIZE - 1))
   if (( end >= TOTAL_CASES )); then

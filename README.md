@@ -7,7 +7,8 @@ Minimalne MVP platformy do researchu podatkowego i roboczego pisania pism.
 - frontend: React + Vite
 - backend: FastAPI
 - model: Claude API przez backendowy proxy
-- baza danych: Supabase w kolejnym kroku
+- baza danych kont i billing: Supabase
+- baza dokumentów RAG: lokalny SQLite albo zewnętrzny MariaDB/MySQL
 
 ## Uruchomienie lokalne
 
@@ -77,7 +78,6 @@ Ważne założenie MVP:
 
 1. W Supabase uruchom SQL z:
    - `apps/api/sql/auth_billing_schema.sql`
-   - jeśli chcesz też zdalny corpus RAG: `apps/api/sql/rag_schema.sql`
 2. Ustaw backendowe sekrety w `apps/api/.env`:
    - `SUPABASE_URL`
    - `SUPABASE_SECRET_KEY`
@@ -165,7 +165,7 @@ curl -X POST http://127.0.0.1:8000/api/rag/eureka/import \
 Backend ma teraz dwa tryby indeksu RAG:
 
 - domyślny: lokalny SQLite FTS jako główne źródło retrievalu,
-- opcjonalny: Supabase, jeśli chcesz świadomie przenieść corpus do zdalnej bazy.
+- opcjonalny: MariaDB/MySQL jako zewnętrzny magazyn corpusu.
 
 Domyślny przepływ jest taki:
 
@@ -201,6 +201,36 @@ curl -X POST http://127.0.0.1:8000/api/rag/reindex \
 Lokalny fallback zapisuje indeks w:
 
 - `apps/api/data/processed/eureka_rag.sqlite3`
+
+## MariaDB/MySQL dla corpusu RAG
+
+Jeśli chcesz trzymać interpretacje i wyroki poza plikiem SQLite, backend obsługuje osobny storage RAG w MariaDB/MySQL.
+
+1. Utwórz schemat z:
+   - `apps/api/sql/rag_mysql_schema.sql`
+2. Ustaw w `apps/api/.env`:
+   - `ALITIGATOR_RAG_BACKEND=mysql`
+   - `ALITIGATOR_RAG_MYSQL_HOST=...`
+   - `ALITIGATOR_RAG_MYSQL_PORT=3306`
+   - `ALITIGATOR_RAG_MYSQL_DATABASE=...`
+   - `ALITIGATOR_RAG_MYSQL_USER=...`
+   - `ALITIGATOR_RAG_MYSQL_PASSWORD=...`
+   - opcjonalnie `ALITIGATOR_RAG_MYSQL_DOCUMENTS_TABLE=rag_documents`
+   - opcjonalnie `ALITIGATOR_RAG_MYSQL_CHUNKS_TABLE=rag_chunks`
+   - opcjonalnie `ALITIGATOR_RAG_MYSQL_SSL_DISABLED=true`, jeśli hosting nie wspiera SSL dla połączeń MySQL
+3. Uruchom reindeksację:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/rag/reindex \
+	-H 'Content-Type: application/json' \
+	-d '{"force":true}'
+```
+
+Po przełączeniu backendu na `mysql`:
+
+- `/api/chat` korzysta z MariaDB/MySQL jako źródła dokumentów RAG,
+- `/api/rag/search` odpytuje MariaDB/MySQL,
+- Supabase nadal obsługuje auth, profile, chat storage i billing.
 
 ### Diagnostyka retrievalu
 

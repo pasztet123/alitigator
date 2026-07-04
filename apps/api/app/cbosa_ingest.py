@@ -31,7 +31,6 @@ DEFAULT_RETRY_COUNT = 3
 DEFAULT_PAGE_SIZE = 100
 
 DETAIL_LINK_RE = re.compile(r"/doc/([0-9A-Za-z_-]+)")
-SIGNATURE_RE = re.compile(r"\b(?:I|II|III|IV|V|VI|VII|VIII)?\s*FSK\b[^<\n\r]{0,80}", re.IGNORECASE)
 DATE_RE = re.compile(r"\b(20\d{2}|19\d{2})[-.](\d{2})[-.](\d{2})\b")
 HTML_TAG_RE = re.compile(r"<[^>]+>")
 WHITESPACE_RE = re.compile(r"\s+")
@@ -151,6 +150,7 @@ class FetchConfig:
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT
     retry_count: int = DEFAULT_RETRY_COUNT
     search_params: str | None = None
+    target_symbol_prefixes: str | None = None
     raw_output_path: str | None = None
     output_path: str | None = None
     overwrite: bool = False
@@ -291,7 +291,7 @@ def extract_detail_ids(html: str) -> list[str]:
     ids: list[str] = []
     anchors = re.findall(r"<a\b[^>]*href=['\"](/doc/([0-9A-Za-z_-]+))['\"][^>]*>(.*?)</a>", html, flags=re.IGNORECASE | re.DOTALL)
     if anchors:
-        candidates = [document_id for _, document_id, label_html in anchors if "FSK" in strip_tags(label_html).upper()]
+        candidates = [document_id for _, document_id, _ in anchors]
     else:
         candidates = [match.group(1) for match in DETAIL_LINK_RE.finditer(html)]
 
@@ -315,17 +315,30 @@ def extract_title(html: str) -> str:
     return "Wyrok NSA - Izba Finansowa"
 
 
+def infer_decision_type(title: str) -> str:
+    normalized = normalize_spaces(title).lower()
+    if "postanowienie" in normalized:
+        return "Postanowienie"
+    return "Wyrok"
+
+
 def extract_signature(html: str, fallback: str = "") -> str:
+    title = extract_title(html)
+    title_prefix = re.split(r"\s+-\s+(?:Wyrok|Postanowienie)\b", title, maxsplit=1, flags=re.IGNORECASE)[0]
+    normalized_title_prefix = normalize_spaces(title_prefix)
+    if normalized_title_prefix and normalized_title_prefix != normalize_spaces(title):
+        return normalized_title_prefix
+
     text = html_to_text(html)
     for line in text.splitlines():
-        if "FSK" not in line.upper():
-            continue
-        match = SIGNATURE_RE.search(line)
-        if match:
-            return normalize_spaces(match.group(0))
         line = normalize_spaces(line)
-        if line:
-            return line[:120]
+        if not line:
+            continue
+        if re.search(r"\b(?:FSK|GSK|OSK|SA/|SAB/|SA\\|)\b", line, re.IGNORECASE) or "wyrok" in line.lower():
+            prefix = re.split(r"\s+-\s+(?:Wyrok|Postanowienie)\b", line, maxsplit=1, flags=re.IGNORECASE)[0]
+            prefix = normalize_spaces(prefix)
+            if prefix:
+                return prefix[:120]
     return fallback
 
 
@@ -454,12 +467,58 @@ def source_url_for_detail(options: FetchConfig, document_id: str) -> str:
     return urljoin(options.base_url.rstrip("/") + "/", path.lstrip("/"))
 
 
+def infer_source_subtype(authority: str, signature: str) -> str:
+    authority_text = authority.lower()
+    signature_text = signature.upper()
+    if "wojewódzki sąd administracyjny" in authority_text or " SA/" in f" {signature_text}":
+        return "wsa"
+    if "naczelny sąd administracyjny" in authority_text or any(marker in signature_text for marker in ("FSK", "GSK", "OSK", "FPS", "GPS")):
+        return "nsa"
+    return "administrative_court"
+
+
+def build_category(authority: str, source_subtype: str, symbol_text: str, decision_type: str) -> str:
+    if source_subtype == "wsa":
+        base = f"{decision_type} WSA"
+    elif source_subtype == "nsa":
+        base = f"{decision_type} NSA"
+    else:
+        base = normalize_spaces(f"{decision_type} {authority}") if authority else f"{decision_type} sądu administracyjnego"
+    return normalize_spaces(" - ".join(part for part in (base, symbol_text) if part))
+
+
+def parse_target_symbol_prefixes(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    prefixes = []
+    for part in value.split(","):
+        normalized = normalize_spaces(part).rstrip("*")
+        if normalized:
+            prefixes.append(normalized)
+    return tuple(prefixes)
+
+
+def row_matches_target_symbol_prefixes(row: dict[str, Any], options: FetchConfig) -> bool:
+    prefixes = parse_target_symbol_prefixes(options.target_symbol_prefixes)
+    if not prefixes:
+        return True
+    symbol_description = normalize_spaces(str(row.get("symbol_description") or ""))
+    return any(symbol_description.startswith(prefix) for prefix in prefixes)
+
+
+def row_matches_target_decision_type(row: dict[str, Any], options: FetchConfig) -> bool:
+    requested = normalize_spaces(options.judgment_type).lower()
+    actual = normalize_spaces(str(row.get("decision_type") or "Wyrok")).lower()
+    return not requested or requested == "dowolny" or actual == requested
+
+
 def build_processed_row(document_id: str, detail_html: str, *, options: FetchConfig) -> dict[str, Any]:
     plain_text = html_to_text(detail_html)
     fields = extract_cbosa_fields(plain_text)
     signature = extract_signature(detail_html)
     judgment_date = extract_first_date(fields.get("Data orzeczenia", "")) or extract_judgment_date(detail_html)
     title = extract_title(detail_html)
+    decision_type = infer_decision_type(title)
     subject = title
     if signature and signature not in subject:
         subject = f"{signature} - {title}"
@@ -467,6 +526,7 @@ def build_processed_row(document_id: str, detail_html: str, *, options: FetchCon
     thematic_text = fields.get("Hasła tematyczne", "")
     result_text = fields.get("Treść wyniku", "")
     authority = fields.get("Sąd") or "Naczelny Sąd Administracyjny"
+    source_subtype = infer_source_subtype(authority, signature)
     appealed_authority = fields.get("Skarżony organ", "")
     related_signatures = split_field_values(fields.get("Sygn. powiązane", ""))
     symbol_values = [value for value in (symbol_text, thematic_text) if value]
@@ -474,7 +534,11 @@ def build_processed_row(document_id: str, detail_html: str, *, options: FetchCon
     content_text = build_cbosa_content_text(plain_text, fields, signature=signature, subject=subject)
     legal_provisions = extract_cbosa_legal_provisions(content_text, fields)
     keywords = sorted({*extract_keywords(detail_html), *symbol_values, *symbol_domains})
-    issues = ["Izba Finansowa", "NSA", "FSK"]
+    issues = ["CBOSA", "Orzecznictwo podatkowe", authority, decision_type]
+    if source_subtype == "nsa":
+        issues.append("NSA")
+    elif source_subtype == "wsa":
+        issues.append("WSA")
     for value in [*symbol_values, result_text, appealed_authority, *related_signatures]:
         if value and value not in issues:
             issues.append(value)
@@ -483,12 +547,13 @@ def build_processed_row(document_id: str, detail_html: str, *, options: FetchCon
     return {
         "source": "cbosa",
         "source_type": "judgment",
-        "source_subtype": "nsa",
+        "source_subtype": source_subtype,
         "document_id": f"cbosa:{document_id}",
         "index": document_id,
-        "category": normalize_spaces(" - ".join(part for part in ["Wyrok NSA - Izba Finansowa", symbol_text] if part)),
+        "category": build_category(authority, source_subtype, symbol_text, decision_type),
         "subject": subject,
         "signature": signature or None,
+        "decision_type": decision_type,
         "author": authority,
         "authority": authority,
         "jurisdiction": "PL",
@@ -541,7 +606,7 @@ def rebuild_processed_from_raw(options: FetchConfig) -> dict[str, Any]:
                 skipped_duplicate += 1
                 continue
             processed_row = build_processed_row(detail_id, detail_html, options=options)
-            if not is_target_fsk_judgment(processed_row):
+            if not row_matches_target_symbol_prefixes(processed_row, options) or not row_matches_target_decision_type(processed_row, options):
                 skipped_non_fsk += 1
                 continue
             write_jsonl_row(output_file, processed_row)
@@ -557,12 +622,6 @@ def rebuild_processed_from_raw(options: FetchConfig) -> dict[str, Any]:
     }
 
 
-def is_target_fsk_judgment(row: dict[str, Any]) -> bool:
-    signature = str(row.get("signature") or "")
-    text = f"{signature}\n{row.get('subject') or ''}\n{row.get('content_text') or ''}"
-    return "FSK" in text.upper()
-
-
 def fetch_search_page(client: httpx.Client, options: FetchConfig, page: int) -> tuple[str, list[str], str]:
     errors: list[str] = []
     if page > 0:
@@ -571,7 +630,7 @@ def fetch_search_page(client: httpx.Client, options: FetchConfig, page: int) -> 
         ids = extract_detail_ids(html)
         if ids:
             return find_url, ids, html
-        raise CbosaIngestError(f"No FSK /doc/ links found at {find_url}")
+        raise CbosaIngestError(f"No judgment /doc/ links found at {find_url}")
 
     for url, data in build_search_requests(options, page):
         try:
@@ -582,7 +641,7 @@ def fetch_search_page(client: httpx.Client, options: FetchConfig, page: int) -> 
         ids = extract_detail_ids(html)
         if ids:
             return f"{url}?{urlencode(data)}", ids, html
-        errors.append(f"No FSK /doc/ links found at {url}?{urlencode(data)}")
+        errors.append(f"No judgment /doc/ links found at {url}?{urlencode(data)}")
     raise CbosaIngestError("; ".join(errors))
 
 
@@ -648,7 +707,7 @@ def run_ingest(options: FetchConfig) -> dict[str, Any]:
                         continue
                     write_jsonl_row(raw_file, {"type": "detail", "document_id": detail_id, "url": detail_url, "html": detail_html, "retrieved_at": iso_now()})
                     row = build_processed_row(detail_id, detail_html, options=options)
-                    if not is_target_fsk_judgment(row):
+                    if not row_matches_target_symbol_prefixes(row, options) or not row_matches_target_decision_type(row, options):
                         skipped_non_fsk += 1
                         continue
                     write_jsonl_row(output_file, row)
@@ -720,6 +779,7 @@ def parse_args(argv: list[str]) -> FetchConfig:
     parser.add_argument("--request-timeout", type=float, default=DEFAULT_REQUEST_TIMEOUT)
     parser.add_argument("--retry-count", type=int, default=DEFAULT_RETRY_COUNT)
     parser.add_argument("--search-params", help="Override query params, e.g. 'sygnatura={signature}&sad=NSA&page={page}&pp={page_size}'.")
+    parser.add_argument("--target-symbol-prefixes", help="Comma-separated symbol prefixes to keep, e.g. '611' or '6110,6112'.")
     parser.add_argument("--raw-output-path")
     parser.add_argument("--output-path")
     parser.add_argument("--overwrite", action="store_true")

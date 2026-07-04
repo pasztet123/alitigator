@@ -1,0 +1,50 @@
+create table if not exists rag_documents (
+    document_id varchar(191) primary key,
+    content_sha256 varchar(64) null,
+    source varchar(64) not null default 'eureka',
+    source_type varchar(32) not null default 'interpretation',
+    source_subtype varchar(32) not null default '',
+    authority varchar(191) not null default '',
+    jurisdiction varchar(16) not null default 'PL',
+    act_title varchar(512) not null default '',
+    publication varchar(255) not null default '',
+    legal_state_date varchar(32) not null default '',
+    source_pages_json longtext not null,
+    subject text not null,
+    signature varchar(255) null,
+    published_date varchar(64) null,
+    source_url text null,
+    category varchar(255) null,
+    keywords_json longtext not null,
+    legal_provisions_json longtext not null,
+    issues_json longtext not null,
+    law_tags_json longtext not null,
+    tax_domain varchar(64) not null default '',
+    signature_family varchar(64) not null default '',
+    question_text mediumtext not null,
+    facts_text mediumtext not null,
+    decision_text mediumtext not null,
+    indexed_at varchar(64) not null,
+    key idx_rag_documents_source_type (source_type),
+    key idx_rag_documents_tax_domain (tax_domain),
+    key idx_rag_documents_published_date (published_date),
+    key idx_rag_documents_content_sha256 (content_sha256)
+) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;
+
+create table if not exists rag_chunks (
+    chunk_id varchar(191) primary key,
+    document_id varchar(191) not null,
+    chunk_index int not null,
+    chunk_text mediumtext not null,
+    chunk_chars int not null,
+    search_text mediumtext not null,
+    question_text mediumtext not null,
+    facts_text mediumtext not null,
+    tax_domain varchar(64) not null default '',
+    fulltext key ft_rag_chunks_search (search_text, question_text, facts_text, tax_domain),
+    key idx_rag_chunks_document_id (document_id),
+    key idx_rag_chunks_document_chunk (document_id, chunk_index),
+    constraint fk_rag_chunks_document
+        foreign key (document_id) references rag_documents(document_id)
+        on delete cascade
+) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;

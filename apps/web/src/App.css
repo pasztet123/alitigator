@@ -76,7 +76,8 @@
 
 .sidebar {
   min-height: calc(100svh - 32px);
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 14px;
   background:
     radial-gradient(circle at top left, rgba(123, 173, 112, 0.18), transparent 34%),
@@ -122,7 +123,6 @@
 .sidebar-topbar,
 .sidebar-account,
 .auth-form,
-.profile-form,
 .billing-card,
 .billing-card-header,
 .thread-column,
@@ -203,6 +203,7 @@
 .retrieval-scope-option,
 .prompt-hint-option,
 .billing-pack,
+.billing-stepper-button,
 .auth-tab {
   transition:
     transform 120ms ease,
@@ -247,6 +248,7 @@
 .secondary-button:hover,
 .ghost-button:hover,
 .billing-pack:hover,
+.billing-stepper-button:hover,
 .retrieval-scope-option:hover,
 .prompt-hint-option:hover,
 .thread-item:hover,
@@ -259,7 +261,8 @@
 .submit-button:disabled,
 .secondary-button:disabled,
 .ghost-button:disabled,
-.billing-pack:disabled {
+.billing-pack:disabled,
+.billing-stepper-button:disabled {
   opacity: 0.56;
   cursor: wait;
   transform: none;
@@ -420,6 +423,13 @@
   width: 100%;
 }
 
+.status-chip-wide strong,
+.admin-email-trigger {
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
 .status-chip span:last-child {
   display: grid;
   min-width: 0;
@@ -428,6 +438,18 @@
 .status-chip strong,
 .billing-pack strong {
   color: #163825;
+}
+
+.admin-email-trigger {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  color: #163825;
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
 }
 
 .status-chip strong,
@@ -451,12 +473,6 @@
   justify-content: center;
   color: #1d4c32;
   background: rgba(71, 122, 81, 0.12);
-}
-
-.profile-form {
-  padding: 14px;
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.08);
 }
 
 .profile-field,
@@ -508,16 +524,102 @@ select {
 }
 
 .billing-card {
-  padding: 16px;
+  padding: 18px;
+  background:
+    linear-gradient(180deg, rgba(245, 249, 244, 0.96), rgba(236, 242, 236, 0.98)),
+    rgba(255, 255, 255, 0.9);
+  color: #173725;
+}
+
+.billing-card-header {
+  gap: 8px;
+}
+
+.billing-card-header .eyebrow {
+  color: #5f7b69;
+}
+
+.billing-card-header strong {
+  color: #173725;
+  font-size: 34px;
+  line-height: 1;
 }
 
 .billing-card-header p:last-child {
-  margin-top: -6px;
+  margin-top: 0;
+  color: #5b7364;
+  line-height: 1.45;
 }
 
 .billing-pack-list {
   display: grid;
   gap: 10px;
+}
+
+.billing-purchase-panel,
+.billing-quantity-field {
+  display: grid;
+  gap: 12px;
+}
+
+.billing-quantity-row,
+.billing-summary-row {
+  display: grid;
+  gap: 12px;
+  align-items: center;
+}
+
+.billing-quantity-row {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.billing-stepper-button {
+  border: 1px solid rgba(28, 56, 39, 0.1);
+  border-radius: 18px;
+  background: #f7fbf6;
+  color: #173725;
+  min-width: 52px;
+  min-height: 52px;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.billing-quantity-field span,
+.billing-summary-row small {
+  color: #5d7666;
+  font-weight: 500;
+}
+
+.billing-quantity-field input {
+  width: 100%;
+  border: 1px solid rgba(28, 56, 39, 0.12);
+  border-radius: 16px;
+  padding: 14px 16px;
+  background: #f7fbf6;
+  color: #173725;
+  font: inherit;
+}
+
+.billing-summary-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 16px;
+  border: 1px solid rgba(28, 56, 39, 0.1);
+  border-radius: 18px;
+  background: #fcfffb;
+}
+
+.billing-summary-row strong {
+  color: #173725;
+}
+
+.billing-summary-row > div {
+  display: grid;
+  gap: 6px;
+}
+
+.billing-checkout-button {
+  width: 100%;
 }
 
 .billing-pack {
@@ -536,6 +638,208 @@ select {
 .billing-pack span {
   display: grid;
   gap: 4px;
+}
+
+.admin-user-list,
+.admin-grant-form,
+.admin-user-card,
+.admin-user-copy,
+.admin-user-balance {
+  display: grid;
+  gap: 10px;
+}
+
+.admin-user-list {
+  gap: 12px;
+  align-content: start;
+}
+
+.admin-user-card {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  padding: 16px 18px;
+  border-radius: 22px;
+  border: 1px solid rgba(218, 234, 219, 0.12);
+  background:
+    linear-gradient(180deg, rgba(250, 253, 249, 0.08), rgba(217, 233, 218, 0.04)),
+    rgba(255, 255, 255, 0.03);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.admin-user-copy strong,
+.admin-user-balance strong {
+  color: #f4fbf4;
+}
+
+.admin-user-copy small,
+.admin-user-balance small {
+  color: rgba(225, 236, 225, 0.76);
+}
+
+.admin-user-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  grid-column: 1 / -1;
+}
+
+.admin-user-actions .secondary-button,
+.admin-user-actions .ghost-button {
+  min-width: 72px;
+}
+
+.admin-panel-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(18, 35, 24, 0.36);
+  backdrop-filter: blur(8px);
+}
+
+.admin-panel-modal {
+  width: min(960px, 100%);
+  max-height: min(86svh, 100%);
+  overflow: auto;
+  padding: 28px;
+  border-radius: 32px;
+  border: 1px solid rgba(222, 237, 224, 0.14);
+  background:
+    radial-gradient(circle at top left, rgba(126, 178, 114, 0.22), transparent 32%),
+    linear-gradient(180deg, rgba(20, 50, 35, 0.98), rgba(26, 60, 42, 0.98));
+  box-shadow: rgba(18, 35, 24, 0.38) 0 34px 90px -28px;
+  display: grid;
+  gap: 22px;
+}
+
+.admin-panel-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.admin-panel-heading,
+.admin-panel-section,
+.admin-empty-state {
+  display: grid;
+  gap: 10px;
+}
+
+.admin-panel-heading h2,
+.admin-panel-section h3 {
+  margin: 0;
+  color: #f5fbf4;
+}
+
+.admin-panel-heading h2 {
+  font-size: clamp(34px, 4vw, 54px);
+  line-height: 0.96;
+  letter-spacing: -0.04em;
+}
+
+.admin-panel-section h3 {
+  font-size: 22px;
+}
+
+.admin-panel-heading .eyebrow,
+.admin-panel-section .eyebrow {
+  color: rgba(214, 230, 216, 0.72);
+}
+
+.admin-panel-intro {
+  max-width: 56ch;
+  margin: 0;
+  color: rgba(229, 239, 230, 0.82);
+  line-height: 1.6;
+}
+
+.admin-panel-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.9fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.admin-panel-section {
+  padding: 20px;
+  border-radius: 26px;
+  border: 1px solid rgba(222, 237, 224, 0.1);
+  background: rgba(248, 252, 248, 0.05);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.admin-panel-section-form {
+  position: sticky;
+  top: 0;
+}
+
+.admin-panel-section-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.admin-panel-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 46px;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(240, 247, 239, 0.12);
+  border: 1px solid rgba(226, 237, 226, 0.12);
+  color: #f4fbf4;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.admin-panel-badge-accent {
+  background: rgba(133, 183, 118, 0.18);
+  color: #eaf8e9;
+}
+
+.admin-empty-state {
+  min-height: 148px;
+  place-content: center;
+  padding: 24px;
+  border-radius: 22px;
+  border: 1px dashed rgba(222, 237, 224, 0.16);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.admin-panel-modal .ghost-button {
+  border-color: rgba(226, 237, 226, 0.16);
+  background: rgba(250, 253, 250, 0.08);
+  color: #f5fbf4;
+}
+
+.admin-panel-modal .secondary-button {
+  background: linear-gradient(135deg, #dff0dd 0%, #ffffff 100%);
+  color: #173725;
+}
+
+.admin-panel-modal .profile-field span,
+.admin-panel-modal .helper-text,
+.admin-panel-modal .small-text {
+  color: rgba(223, 235, 224, 0.8);
+}
+
+.admin-panel-modal .profile-field input {
+  border-color: rgba(21, 48, 34, 0.32);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65);
+}
+
+.admin-panel-modal .helper-text-positive {
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(136, 193, 127, 0.14);
+  color: #eef9ed;
 }
 
 .chat-panel {
@@ -622,6 +926,74 @@ select {
 .assistant-rich-list {
   color: #243b2c;
   line-height: 1.65;
+}
+
+.message-feedback-card,
+.message-feedback-header,
+.message-feedback-comment {
+  display: grid;
+  gap: 10px;
+}
+
+.message-feedback-card {
+  margin-top: 4px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(31, 53, 39, 0.08);
+  background: rgba(242, 248, 240, 0.88);
+}
+
+.message-feedback-label,
+.message-feedback-note {
+  margin: 0;
+  color: #244032;
+}
+
+.message-feedback-header small {
+  color: #667d70;
+}
+
+.message-feedback-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.message-feedback-score {
+  min-width: 42px;
+  height: 42px;
+  border: 1px solid rgba(31, 53, 39, 0.12);
+  border-radius: 14px;
+  background: white;
+  color: #173725;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    transform 120ms ease,
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.message-feedback-score:hover {
+  transform: translateY(-1px);
+  border-color: rgba(30, 75, 48, 0.28);
+  background: #f7fbf6;
+}
+
+.message-feedback-score:disabled {
+  opacity: 0.56;
+  cursor: wait;
+  transform: none;
+}
+
+.message-feedback-comment span {
+  font-size: 13px;
+  color: #627a6c;
+}
+
+.message-feedback-comment textarea {
+  min-height: 88px;
+  resize: vertical;
 }
 
 .assistant-rich-list {
@@ -814,6 +1186,14 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .admin-panel-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-panel-section-form {
+    position: static;
+  }
+
   .sidebar {
     min-height: auto;
   }
@@ -840,6 +1220,40 @@ textarea {
 
   .billing-pack {
     flex-direction: column;
+  }
+
+  .billing-quantity-row,
+  .billing-summary-row {
+    grid-template-columns: 1fr;
+  }
+
+  .billing-stepper-button {
+    width: 100%;
+  }
+
+  .admin-panel-overlay {
+    padding: 16px;
+  }
+
+  .admin-panel-modal {
+    padding: 20px;
+    border-radius: 26px;
+  }
+
+  .admin-panel-header {
+    flex-direction: column;
+  }
+
+  .admin-panel-header .ghost-button {
+    width: 100%;
+  }
+
+  .admin-user-card {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-user-balance {
+    justify-items: start;
   }
 
   .app-shell {

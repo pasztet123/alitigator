@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from contextlib import contextmanager
 from typing import Any, Iterable, Optional
 
@@ -62,6 +63,9 @@ from app.rag import (
     compute_cross_encoder_scores,
     resolve_cross_blend_weight,
 )
+
+
+_MYSQL_SEARCH_SCHEMA_READY = False
 
 
 def is_mysql_rag_enabled() -> bool:
@@ -172,7 +176,49 @@ def ensure_schema(connection: pymysql.connections.Connection) -> None:
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """
         )
+    ensure_chunk_fulltext_index(connection)
     connection.commit()
+
+
+def ensure_chunk_fulltext_index(connection: pymysql.connections.Connection) -> None:
+    _, chunks_table = get_mysql_target()
+    expected_columns = ("search_text", "question_text", "facts_text", "tax_domain")
+    fulltext_indexes: dict[str, list[tuple[int, str]]] = {}
+
+    with connection.cursor() as cursor:
+        cursor.execute(f"SHOW INDEX FROM `{chunks_table}`")
+        for row in cursor.fetchall():
+            if str(row.get("Index_type") or "").upper() != "FULLTEXT":
+                continue
+            key_name = str(row.get("Key_name") or "")
+            sequence = int(row.get("Seq_in_index") or 0)
+            column_name = str(row.get("Column_name") or "")
+            fulltext_indexes.setdefault(key_name, []).append((sequence, column_name))
+
+        for columns in fulltext_indexes.values():
+            ordered_columns = tuple(column for _, column in sorted(columns))
+            if ordered_columns == expected_columns:
+                return
+
+        if "ft_search" in fulltext_indexes:
+            cursor.execute(f"ALTER TABLE `{chunks_table}` DROP INDEX `ft_search`")
+        cursor.execute(
+            f"""
+            ALTER TABLE `{chunks_table}`
+            ADD FULLTEXT KEY `ft_search` (`search_text`, `question_text`, `facts_text`, `tax_domain`)
+            """
+        )
+    connection.commit()
+
+
+def ensure_search_schema_ready() -> None:
+    global _MYSQL_SEARCH_SCHEMA_READY
+    if _MYSQL_SEARCH_SCHEMA_READY:
+        return
+
+    with mysql_connection() as connection:
+        ensure_schema(connection)
+    _MYSQL_SEARCH_SCHEMA_READY = True
 
 
 def mysql_backend_label() -> str:
@@ -186,6 +232,7 @@ def index_exists_mysql() -> bool:
         return False
     documents_table, chunks_table = get_mysql_target()
     try:
+        ensure_search_schema_ready()
         with mysql_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(f"SHOW TABLES LIKE %s", (documents_table,))
@@ -462,6 +509,12 @@ def build_mysql_candidate_queries(query: str) -> list[str]:
     return list(dict.fromkeys(value for value in candidates if value))
 
 
+def escape_pymysql_query_literals(sql: str) -> str:
+    # PyMySQL uses percent-formatting for placeholders, so any literal "%" in
+    # dynamically composed SQL must be escaped to avoid placeholder mismatches.
+    return re.sub(r"%(?!s)", "%%", sql)
+
+
 def build_type_and_domain_clause(
     *,
     source_types: Optional[set[str]],
@@ -497,25 +550,25 @@ def select_candidate_rows_mysql(
     limit: int,
 ) -> list[dict[str, Any]]:
     documents_table, chunks_table = get_mysql_target()
+    sql = escape_pymysql_query_literals(
+        f"""
+        SELECT
+            c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+            d.subject, d.signature, d.published_date, d.source_url, d.category,
+            d.keywords_json, d.legal_provisions_json, d.issues_json, d.law_tags_json,
+            d.facts_text, d.question_text, d.tax_domain, d.source, d.source_type,
+            d.source_subtype, d.authority, d.publication, d.legal_state_date,
+            d.source_pages_json, c.chunk_chars, 0.0 AS lexical_score
+        FROM `{chunks_table}` c
+        JOIN `{documents_table}` d ON d.document_id = c.document_id
+        WHERE {where_sql}
+        ORDER BY d.published_date DESC, c.chunk_index ASC, c.chunk_id ASC
+        LIMIT %s
+        """
+    )
     with mysql_connection() as connection:
         with connection.cursor() as cursor:
-            cursor.execute(
-                f"""
-                SELECT
-                    c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
-                    d.subject, d.signature, d.published_date, d.source_url, d.category,
-                    d.keywords_json, d.legal_provisions_json, d.issues_json, d.law_tags_json,
-                    d.facts_text, d.question_text, d.tax_domain, d.source, d.source_type,
-                    d.source_subtype, d.authority, d.publication, d.legal_state_date,
-                    d.source_pages_json, c.chunk_chars
-                FROM `{chunks_table}` c
-                JOIN `{documents_table}` d ON d.document_id = c.document_id
-                WHERE {where_sql}
-                ORDER BY d.published_date DESC, c.chunk_index ASC, c.chunk_id ASC
-                LIMIT %s
-                """,
-                (*params, limit),
-            )
+            cursor.execute(sql, (*params, limit))
             return list(cursor.fetchall())
 
 
@@ -638,6 +691,7 @@ def fetch_candidate_rows_mysql(
         detection_query=detection_text,
         config=config,
     )
+    ensure_search_schema_ready()
     documents_table, chunks_table = get_mysql_target()
     candidate_limit = max(config.candidate_pool_limit, effective_limit * 20)
     query_rows: list[list[dict[str, Any]]] = []
@@ -650,6 +704,13 @@ def fetch_candidate_rows_mysql(
     if source_types == {"statute"} and (statute_exact_articles or statute_family_prefixes):
         clauses: list[str] = []
         values: list[Any] = []
+        statute_filter_sql, statute_filter_values, _ = build_type_and_domain_clause(
+            source_types=None,
+            enforce_query_domain=enforce_query_domain,
+            tax_domains=tax_domains,
+            detection_query=detection_text,
+            config=config,
+        )
         for article in sorted(statute_exact_articles):
             clauses.append("d.legal_provisions_json = %s")
             values.append(json_dump([f"art. {article}"]))
@@ -659,8 +720,8 @@ def fetch_candidate_rows_mysql(
         if clauses:
             query_rows.append(
                 select_candidate_rows_mysql(
-                    "d.source_type = 'statute' AND c.chunk_index = 0 AND (" + " OR ".join(clauses) + ")" + filter_sql.replace(" AND d.source_type IN (%s)", ""),
-                    [*values, *filter_values],
+                    "d.source_type = 'statute' AND c.chunk_index = 0 AND (" + " OR ".join(clauses) + ")" + statute_filter_sql,
+                    [*values, *statute_filter_values],
                     limit=candidate_limit,
                 )
             )

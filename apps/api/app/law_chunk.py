@@ -49,7 +49,8 @@ def extract_act_pages(pdf_path: Path, *, short_title: str) -> list[PageText]:
     reader = PdfReader(pdf_path)
     pages = [PageText(index + 1, normalize(page.extract_text() or "")) for index, page in enumerate(reader.pages)]
     act_start_re = re.compile(
-        r"\bUSTAWA\s+z dnia .*?\b" + re.escape(short_title), re.DOTALL | re.IGNORECASE
+        r"\bU\s*S\s*T\s*A\s*W\s*A\s+z dnia .*?\b" + re.escape(short_title),
+        re.DOTALL | re.IGNORECASE,
     )
     for index, page in enumerate(pages):
         match = act_start_re.search(page.text)

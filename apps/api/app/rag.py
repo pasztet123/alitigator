@@ -24,8 +24,10 @@ DEFAULT_LAW_SOURCE_PATHS = (
     API_DIR / "data" / "laws" / "processed" / "cit_act_DU_2026_554.jsonl",
     API_DIR / "data" / "laws" / "processed" / "pit_act_DU_2026_592.jsonl",
     API_DIR / "data" / "laws" / "processed" / "pcc_act_DU_2026_191.jsonl",
+    API_DIR / "data" / "laws" / "processed" / "inheritance_gift_tax_act_DU_2026_478.jsonl",
     API_DIR / "data" / "laws" / "processed" / "tax_ordinance_DU_2026_622.jsonl",
     API_DIR / "data" / "laws" / "processed" / "local_taxes_act_DU_2025_707.jsonl",
+    API_DIR / "data" / "laws" / "processed" / "tax_treaties_core.jsonl",
     API_DIR / "data" / "processed" / "cbosa_nsa_fsk_judgments.jsonl",
 )
 DEFAULT_RAG_DB_PATH = API_DIR / "data" / "processed" / "eureka_rag.sqlite3"
@@ -131,7 +133,131 @@ QUERY_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         ),
     ),
     (re.compile(r"\bwht\b|podatek u źr[óo]dła|withholding", re.IGNORECASE), ("WHT", "podatek u źródła")),
+    (
+        re.compile(r"(\bwht\b|podatek u źr[óo]dła|withholding).{0,180}\b(dywidend\w*|odsetk\w*|zarządz\w*|zarzadz\w*|beneficial owner|pay and refund)\b|\b(dywidend\w*|odsetk\w*|zarządz\w*|zarzadz\w*|beneficial owner|pay and refund)\b.{0,180}(\bwht\b|podatek u źr[óo]dła|withholding)", re.IGNORECASE),
+        (
+            "art. 21",
+            "art. 22",
+            "art. 22c",
+            "art. 26",
+            "rzeczywisty właściciel",
+            "certyfikat rezydencji",
+            "należyta staranność",
+            "pay and refund",
+        ),
+    ),
+    (
+        re.compile(r"\b(pay and refund|2 mln|2 000 000|art\.\s*26\s*ust\.\s*2e|próg\w* 2 mln|limit\w* 2 mln)\b", re.IGNORECASE),
+        (
+            "art. 26 ust. 2e",
+            "nadwyżka ponad kwotę 2 000 000 zł",
+            "na rzecz tego samego podatnika",
+            "art. 21 ust. 1 pkt 1",
+            "art. 22 ust. 1",
+        ),
+    ),
+    (
+        re.compile(r"\b(dywidend\w*|parent-subsidiary|holdingow\w*)\b", re.IGNORECASE),
+        (
+            "art. 22 ust. 4",
+            "art. 22 ust. 4a",
+            "art. 22c",
+            "dywidendy",
+            "udziałów bezpośrednio nieprzerwanie przez okres dwóch lat",
+        ),
+    ),
+    (
+        re.compile(r"\b(odsetk\w*|interest and royalties|beneficial owner)\b", re.IGNORECASE),
+        (
+            "art. 21 ust. 3",
+            "art. 21 ust. 3c",
+            "rzeczywistym właścicielem",
+            "odsetek",
+        ),
+    ),
+    (
+        re.compile(r"\b(zarządz\w*|zarzadz\w*|usług\w* zarządz\w*|uslug\w* zarzadz\w*|management fee)\b", re.IGNORECASE),
+        (
+            "art. 21 ust. 1 pkt 2a",
+            "świadczeń doradczych księgowych badania rynku usług prawnych reklamowych zarządzania i kontroli",
+            "zyski przedsiębiorstw",
+            "zakład",
+        ),
+    ),
+    (
+        re.compile(r"\b(transgraniczn\w*|nierezydent\w*|zakład\w*|zaklad\w*|umow\w* o unikaniu podwójnego opodatkowania|upo|podmiot\w* z państw\w* trzec\w*|podmiot\w* zagraniczn\w*)\b", re.IGNORECASE),
+        (
+            "umowa o unikaniu podwójnego opodatkowania",
+            "zyski przedsiębiorstw",
+            "zakład",
+            "miejsce zamieszkania lub siedziba",
+            "nierezydent",
+        ),
+    ),
     (re.compile(r"\bpcc\b|podatek od czynności cywilnoprawnych", re.IGNORECASE), ("PCC", "podatek od czynności cywilnoprawnych")),
+    (
+        re.compile(
+            r"(\bsamoch[óo]d\w*|\bpojazd\w*|\bauto\b).{0,220}"
+            r"(\bleasing\w*|\bwykup\w*|\bdarowizn\w*|\bmałżonk\w*|\bmalzonk\w*)|"
+            r"(\bleasing\w*|\bwykup\w*|\bdarowizn\w*|\bmałżonk\w*|\bmalzonk\w*).{0,220}"
+            r"(\bsamoch[óo]d\w*|\bpojazd\w*|\bauto\b)",
+            re.IGNORECASE,
+        ),
+        (
+            "art. 7 ust. 2",
+            "przysługiwało w całości lub w części prawo do obniżenia kwoty podatku należnego",
+            "art. 15 ust. 1",
+            "podatnikami są osoby wykonujące samodzielnie działalność gospodarczą",
+            "art. 106b",
+            "podatnik jest obowiązany wystawić fakturę",
+            "art. 10 ust. 1 pkt 8",
+            "przed upływem pół roku licząc od końca miesiąca",
+            "art. 10 ust. 2 pkt 4",
+            "art. 14 ust. 2 pkt 19",
+            "rzeczy ruchome wykorzystywane na podstawie umowy leasingu",
+            "art. 23 ust. 1 pkt 46",
+            "wydatki i składki w wysokości 20 %",
+            "art. 23 ust. 1 pkt 46a",
+            "25 % poniesionych wydatków",
+            "art. 22 ust. 1d",
+            "zgodnie z art. 11 ust. 2-2b został określony przychód",
+            "art. 2 ust. 1 pkt 3",
+            "przychodów podlegających przepisom o podatku od spadków i darowizn",
+            "art. 4a",
+            "zgłoszą nabycie własności rzeczy lub praw majątkowych",
+            "art. 6 ust. 1 pkt 4",
+            "art. 9 ust. 1 pkt 1",
+            "art. 14 ust. 3 pkt 1",
+        ),
+    ),
+    (
+        re.compile(r"\bfundacj\w*\s+rodzinn\w*\b", re.IGNORECASE),
+        (
+            "fundacja rodzinna",
+            "świadczenie dla beneficjenta",
+            "ukryte zyski",
+            "art. 24q",
+        ),
+    ),
+    (
+        re.compile(r"(\bfundacj\w*\s+rodzinn\w*\b.*\b(pożyczk\w*|spółk\w*|spol[kc]\w*)\b|\b(pożyczk\w*|spółk\w*|spol[kc]\w*)\b.*\bfundacj\w*\s+rodzinn\w*\b)", re.IGNORECASE),
+        (
+            "fundacja rodzinna",
+            "pożyczki mogą być udzielane",
+            "spółkom kapitałowym, w których fundacja rodzinna posiada udziały albo akcje",
+            "beneficjentom",
+        ),
+    ),
+    (
+        re.compile(r"(\bfundacj\w*\s+rodzinn\w*\b.*\b(wypłat\w*|świadczeni\w*|beneficjent\w*)\b|\b(beneficjent\w*|syn\w* fundator\w*)\b.*\bfundacj\w*\s+rodzinn\w*\b)", re.IGNORECASE),
+        (
+            "fundacja rodzinna",
+            "świadczenie dla beneficjenta",
+            "art. 21 ust. 1 pkt 157",
+            "art. 21 ust. 49",
+            "grupy zerowej",
+        ),
+    ),
     (
         re.compile(r"(pożyczk\w*.*(?:vat|towar[óo]w i usług|art\.\s*2\s*pkt\s*4)|(?:vat|towar[óo]w i usług|art\.\s*2\s*pkt\s*4).*pożyczk\w*)", re.IGNORECASE),
         (
@@ -152,6 +278,35 @@ QUERY_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
             "art. 2 pkt 4 lit. a",
             "opodatkowanie podatkiem od towarów i usług",
             "umowa sprzedaży nieruchomości",
+        ),
+    ),
+    (
+        re.compile(
+            r"(\bgrunt\w*\b|\bdziałk\w*\b|\bdzialk\w*\b).{0,220}"
+            r"(\bpełnomocnictw\w*\b|\bpelnomocnictw\w*\b|\bdzierżaw\w*\b|\bdzierzaw\w*\b|"
+            r"\bdeweloper\w*\b|\bwarunk\w* zabudow\w*\b|\bpozwoleni\w* na budow\w*\b)|"
+            r"(\bpełnomocnictw\w*\b|\bpelnomocnictw\w*\b|\bdzierżaw\w*\b|\bdzierzaw\w*\b|"
+            r"\bdeweloper\w*\b|\bwarunk\w* zabudow\w*\b|\bpozwoleni\w* na budow\w*\b).{0,220}"
+            r"(\bgrunt\w*\b|\bdziałk\w*\b|\bdzialk\w*\b)",
+            re.IGNORECASE,
+        ),
+        (
+            "art. 15 ust. 1",
+            "art. 15 ust. 2",
+            "art. 43 ust. 1 pkt 9",
+            "art. 2 pkt 33",
+            "tereny budowlane",
+            "decyzja o warunkach zabudowy",
+            "dzierżawa",
+            "pozarolnicza działalność gospodarcza",
+            "art. 5a pkt 6",
+            "art. 10 ust. 1 pkt 3",
+            "art. 10 ust. 1 pkt 8",
+            "art. 2 pkt 4",
+            "art. 106a",
+            "art. 106b",
+            "art. 106ga",
+            "art. 106gb",
         ),
     ),
     (
@@ -363,6 +518,7 @@ DOMAIN_MARKERS: dict[str, tuple[str, ...]] = {
     "cit": ("cit", "estońsk", "estonsk", "spółk", "spolk", "holding"),
     "pit": ("pit", "ryczałt", "ryczalt", "ulga", "rezydenc"),
     "pcc": ("pcc", "czynności", "czynnosci", "aport", "współwłas", "wspolwlas"),
+    "sd": ("podatek od spadków i darowizn", "podatek od spadkow i darowizn", "sd-z2", "spadków", "spadkow", "darowizn"),
     "nieruchomości": (
         "nieruchomoś",
         "nieruchomos",
@@ -374,7 +530,7 @@ DOMAIN_MARKERS: dict[str, tuple[str, ...]] = {
         "powierzchni użytkow",
         "powierzchni uzytkow",
     ),
-    "wht": ("wht", "źródła", "zrodla", "withholding"),
+    "wht": ("wht", "źródła", "zrodla", "withholding", "beneficial", "certyfikat rezydencji", "nierezydent", "zakład", "zaklad", "upo"),
     "akcyza": ("akcyza", "akcyzow", "skład podatkowy", "sklad podatkowy"),
     "ordynacja": (
         "ordynac",
@@ -482,7 +638,34 @@ MECHANISM_RULES: dict[str, tuple[str, ...]] = {
     "dropshipping": ("dropshipping", "klient jako importer"),
     "land_sale_vat": ("sprzedaż działki", "sprzedaz dzialki"),
     "buyer_power_of_attorney": ("pełnomocnictw", "pelnomocnictw"),
-    "private_leased_vehicle_sale": ("samochód leasing", "samochod leasing", "wykup", "majątku prywat"),
+    "developer_land_sale_preparation": (
+        "deweloper",
+        "warunki zabudowy",
+        "warunków zabudowy",
+        "pozwolenie na budowę",
+        "pozwolenia na budowę",
+        "podział działki",
+        "podzial dzialki",
+        "warunki przyłączenia mediów",
+        "warunki przylaczenia mediow",
+        "dzierżawa",
+        "dzierzawa",
+        "grunt",
+        "działki",
+        "dzialki",
+    ),
+    "private_leased_vehicle_sale": ("samochód leasing", "samochod leasing", "wykup", "majątku prywat", "po leasingu"),
+    "post_leasing_vehicle_gift_sale": (
+        "samochód po leasingu",
+        "samochod po leasingu",
+        "wykup samochodu",
+        "wykup do majątku prywatnego",
+        "wykup do majatku prywatnego",
+        "darowizna małżonce",
+        "darowizna malzonce",
+        "sprzedaż przez małżonkę",
+        "sprzedaz przez malzonke",
+    ),
     "senior_relief": ("ulga dla pracujących seniorów", "ulga dla senior"),
     "senior_relief_payment_timing": (
         "pierwsza wypłata emerytury",
@@ -1779,6 +1962,36 @@ def build_ksef_foreign_sale_match_score(row: sqlite3.Row, *, query: str) -> floa
     return min(max(score, -0.35), 4.5)
 
 
+def query_targets_crossborder_treaty_analysis(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_crossborder_marker = bool(
+        re.search(
+            r"\b(transgraniczn\w*|nierezydent\w*|zagraniczn\w*|państw\w* trzec\w*|panstw\w* trzec\w*|"
+            r"zakład\w*|zaklad\w*|upo|umow\w* o unikaniu podwójnego opodatkowania|"
+            r"certyfikat\w* rezydencji|beneficial owner|rzeczywist\w* właściciel\w*)\b",
+            normalized,
+        )
+    )
+    has_income_tax_angle = bool(
+        re.search(
+            r"\b(dywidend\w*|odsetk\w*|należno\w* licencyjn\w*|nalezn\w* licencyjn\w*|"
+            r"zysk\w* przedsi\w*|usług\w* zarządz\w*|uslug\w* zarzadz\w*|holding\w*|"
+            r"stał\w* plac\w*|stale\w* miejsce|zakład\w*|zaklad\w*)\b",
+            normalized,
+        )
+    )
+    has_country_marker = bool(
+        re.search(
+            r"\b(niemc\w*|niderland\w*|holand\w*|luksemburg\w*|franc\w*|irland\w*|"
+            r"szwajcar\w*|austri\w*|wielk\w* bryt\w*|uk\b|usa\b|stan\w* zjednoczon\w*|czech\w*)\b",
+            normalized,
+        )
+    )
+    return (has_crossborder_marker and (has_income_tax_angle or has_country_marker)) or (
+        has_country_marker and has_income_tax_angle
+    )
+
+
 def query_targets_shareholder_company_asset_sale(query: str) -> bool:
     normalized = normalize_whitespace(query or "").lower()
     has_company_party = bool(
@@ -1792,6 +2005,178 @@ def query_targets_shareholder_company_asset_sale(query: str) -> bool:
         )
     )
     return has_company_party and has_transfer and has_asset
+
+
+def query_targets_developer_land_sale(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_land_sale = bool(
+        re.search(r"\b(sprzeda[żz]\w*|zby\w*|umow\w* przedwstępn\w*)\b", normalized)
+        and re.search(r"\b(grunt\w*|działk\w*|dzialk\w*|nieruchomo\w* roln\w*)\b", normalized)
+    )
+    has_preparation_marker = bool(
+        re.search(
+            r"\b(deweloper\w*|pełnomocnictw\w*|pelnomocnictw\w*|dzierżaw\w*|dzierzaw\w*|"
+            r"warunk\w* zabudow\w*|pozwoleni\w* na budow\w*|podział\w*|podzial\w*|"
+            r"przyłącz\w* medi\w*|przylacz\w* medi\w*)\b",
+            normalized,
+        )
+    )
+    asks_multi_tax = len({domain.upper() for domain in detect_domains(query)} & {"VAT", "PIT", "PCC"}) >= 2
+    return (has_land_sale and has_preparation_marker) or (has_land_sale and asks_multi_tax)
+
+
+def build_developer_land_sale_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_developer_land_sale(query):
+        return []
+
+    preferred_targets = [
+        ("VAT", "5"),
+        ("VAT", "7"),
+        ("VAT", "15"),
+        ("VAT", "43"),
+        ("VAT", "2"),
+        ("VAT", "106a"),
+        ("VAT", "106b"),
+        ("VAT", "106ga"),
+        ("VAT", "106gb"),
+        ("PIT", "5a"),
+        ("PIT", "10"),
+        ("PIT", "14"),
+        ("PCC", "1"),
+        ("PCC", "2"),
+        ("PCC", "4"),
+        ("PCC", "7"),
+    ]
+    deduped_targets: list[tuple[str, str]] = []
+    seen_targets: set[tuple[str, str]] = set()
+    for target in preferred_targets:
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        deduped_targets.append(target)
+    return deduped_targets
+
+
+def query_targets_post_leasing_vehicle_gift_sale(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_vehicle = bool(re.search(r"\b(samochod\w*|samochód\w*|pojazd\w*|auto\b)\b", normalized))
+    has_leasing_buyout = bool(re.search(r"\b(leasing\w*|wykup\w*|po leasingu|poleasingow\w*)\b", normalized))
+    has_private_asset = bool(re.search(r"\b(majątk\w* prywat\w*|majatk\w* prywat\w*|prywatn\w*)\b", normalized))
+    has_gift_or_spouse_sale = bool(
+        re.search(r"\b(darowizn\w*|małżonk\w*|malzonk\w*|żon\w*|zon\w*|męż\w*|mez\w*)\b", normalized)
+    )
+    has_invoice_or_tax = bool(re.search(r"\b(vat|pit|spadk\w*|darowizn\w*|sd-z2|faktur\w*)\b", normalized))
+    return has_vehicle and has_leasing_buyout and (has_private_asset or has_gift_or_spouse_sale) and has_invoice_or_tax
+
+
+def build_post_leasing_vehicle_gift_sale_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_post_leasing_vehicle_gift_sale(query):
+        return []
+
+    preferred_targets = [
+        ("VAT", "7"),
+        ("PIT", "10"),
+        ("SD", "4a"),
+        ("VAT", "15"),
+        ("PIT", "14"),
+        ("SD", "6"),
+        ("VAT", "106b"),
+        ("PIT", "23"),
+        ("SD", "9"),
+        ("VAT", "86"),
+        ("PIT", "22"),
+        ("SD", "14"),
+        ("VAT", "91"),
+        ("VAT", "86a"),
+        ("PIT", "2"),
+        ("SD", "1"),
+    ]
+    deduped_targets: list[tuple[str, str]] = []
+    seen_targets: set[tuple[str, str]] = set()
+    for target in preferred_targets:
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        deduped_targets.append(target)
+    return deduped_targets
+
+
+def query_targets_leased_movable_six_year_rule(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_leasing = bool(re.search(r"\b(leasing\w*|wykup\w* po leasingu|poleasingow\w*)\b", normalized))
+    has_movable_or_vehicle = bool(re.search(r"\b(rzecz\w* ruchom\w*|samochod\w*|samochód\w*|pojazd\w*|auto\b)\b", normalized))
+    has_sale_timing = bool(re.search(r"\b(sprzeda\w*|zby\w*|półroczn\w*|polroczn\w*|sześciolet\w*|szesciolet\w*|6\s*lat)\b", normalized))
+    return has_leasing and has_movable_or_vehicle and has_sale_timing
+
+
+def build_leased_movable_six_year_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_leased_movable_six_year_rule(query):
+        return []
+    return [("PIT", "10"), ("PIT", "14")]
+
+
+def query_targets_gifted_asset_cost_basis(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_gift = bool(re.search(r"\b(darowizn\w*|otrzyman\w* nieodpłatn\w*|otrzyman\w* nieodplatn\w*)\b", normalized))
+    has_sale_or_cost = bool(re.search(r"\b(sprzeda\w*|zby\w*|koszt\w*|wartość\w* rynkow\w*|wartosc\w* rynkow\w*|art\.\s*22\s*ust\.\s*1d)\b", normalized))
+    has_sd_or_pit = bool(re.search(r"\b(pit|spadk\w* i darowizn\w*|podatek od spadk\w*|art\.\s*11\s*ust\.\s*2)\b", normalized))
+    return has_gift and has_sale_or_cost and has_sd_or_pit
+
+
+def build_gifted_asset_cost_basis_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_gifted_asset_cost_basis(query):
+        return []
+    return [("PIT", "2"), ("PIT", "22"), ("SD", "1"), ("SD", "4a")]
+
+
+def query_targets_spouse_gift_sd(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_gift = bool(re.search(r"\b(darowizn\w*|sd-z2|spadk\w* i darowizn\w*)\b", normalized))
+    has_spouse_or_zero_group = bool(re.search(r"\b(małżonk\w*|malzonk\w*|żon\w*|zon\w*|męż\w*|mez\w*|grup\w* zerow\w*|zgłoszeni\w*|zgloszeni\w*)\b", normalized))
+    return has_gift and has_spouse_or_zero_group
+
+
+def build_spouse_gift_sd_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_spouse_gift_sd(query):
+        return []
+    return [("SD", "4a"), ("SD", "6"), ("SD", "9"), ("SD", "14"), ("SD", "1")]
+
+
+def query_targets_wht_crossborder_payments(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_crossborder_context = bool(
+        re.search(r"\b(wht|podatek u źr[óo]dła|withholding|holand\w*|niderland\w*|państw\w* trzec\w*|panstw\w* trzec\w*|certyfikat\w* rezydencji|upo|umow\w* międzynarodow\w*)\b", normalized)
+    )
+    has_payment_type = bool(
+        re.search(r"\b(dywidend\w*|odsetk\w*|zarządz\w*|zarzadz\w*|usług\w* zarządz\w*|uslug\w* zarzadz\w*|należno\w* licencyjn\w*|nalezn\w* licencyjn\w*)\b", normalized)
+    )
+    return has_crossborder_context and has_payment_type
+
+
+def build_wht_crossborder_payment_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_wht_crossborder_payments(query):
+        return []
+
+    normalized = normalize_whitespace(query or "").lower()
+    preferred_targets: list[tuple[str, str]] = [("CIT", "21"), ("CIT", "22"), ("CIT", "22c"), ("CIT", "26")]
+
+    if re.search(r"\b(dywidend\w*)\b", normalized):
+        preferred_targets.extend([("CIT", "22"), ("CIT", "22c"), ("CIT", "26")])
+    if re.search(r"\b(odsetk\w*|beneficial owner|rzeczywist\w* właściciel\w*)\b", normalized):
+        preferred_targets.extend([("CIT", "21"), ("CIT", "26")])
+    if re.search(r"\b(zarządz\w*|zarzadz\w*|usług\w* zarządz\w*|uslug\w* zarzadz\w*)\b", normalized):
+        preferred_targets.extend([("CIT", "21"), ("CIT", "26")])
+    if re.search(r"\b(pay and refund|2 mln|2 000 000|próg\w*|prog\w*)\b", normalized):
+        preferred_targets.append(("CIT", "26"))
+
+    deduped_targets: list[tuple[str, str]] = []
+    seen_targets: set[tuple[str, str]] = set()
+    for target in preferred_targets:
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        deduped_targets.append(target)
+    return deduped_targets
 
 
 def build_shareholder_company_asset_sale_statute_targets(query: str) -> list[tuple[str, str]]:
@@ -1964,6 +2349,7 @@ def derive_tax_domain(record: dict[str, Any]) -> str:
         ("CIT", ("[cit]", "cit", "dochodowym od osób prawnych")),
         ("PIT", ("[pit]", "pit", "dochodowym od osób fizycznych")),
         ("PCC", ("[pcc]", "pcc", "czynności cywilnoprawnych")),
+        ("SD", ("[sd]", "sd", "podatek od spadków i darowizn", "podatek od spadkow i darowizn")),
         ("NIERUCHOMOŚCI", ("[nieruchomości]", "podatek od nieruchomości", "podatki od nieruchomości", "u.p.o.l.")),
         ("AKCYZA", ("akcyza", "akcyzow")),
         ("ORDYNACJA", ("[op]", "[ordynacja]", "ordynacja", "zobowiązania podatkowe")),
@@ -2754,7 +3140,7 @@ def extract_article_key_from_text(value: str) -> str:
 def extract_statute_target_from_text(value: str) -> tuple[str, str] | None:
     if not value:
         return None
-    domain_match = re.match(r"\[(CIT|PIT|VAT|PCC|EXCISE|AKCYZA|ORDYNACJA|OP)\]", value, re.IGNORECASE)
+    domain_match = re.match(r"\[(CIT|PIT|VAT|PCC|SD|EXCISE|AKCYZA|ORDYNACJA|OP)\]", value, re.IGNORECASE)
     article_key = extract_article_key_from_text(value)
     if not domain_match or not article_key:
         return None
@@ -2809,7 +3195,7 @@ def row_tax_domains(row: sqlite3.Row) -> set[str]:
     except (json.JSONDecodeError, TypeError):
         legal_provisions = []
     for provision in legal_provisions:
-        match = re.match(r"\[(CIT|PIT|VAT|PCC|EXCISE|AKCYZA|ORDYNACJA|OP)\]", str(provision), re.IGNORECASE)
+        match = re.match(r"\[(CIT|PIT|VAT|PCC|SD|EXCISE|AKCYZA|ORDYNACJA|OP)\]", str(provision), re.IGNORECASE)
         if match:
             domain = match.group(1).upper()
             if domain == "OP":
@@ -2842,6 +3228,18 @@ def resolve_statute_tax_domains(query: str) -> set[str]:
     domains = {domain.upper() for domain in detect_domains(query)}
     if "WHT" in domains:
         domains.update({"CIT", "PIT"})
+    if query_targets_crossborder_treaty_analysis(query):
+        domains.update({"CIT", "PIT"})
+    if query_targets_developer_land_sale(query):
+        domains.update({"VAT", "PIT", "PCC"})
+    if query_targets_post_leasing_vehicle_gift_sale(query):
+        domains.update({"VAT", "PIT", "SD"})
+    if query_targets_leased_movable_six_year_rule(query):
+        domains.add("PIT")
+    if query_targets_gifted_asset_cost_basis(query):
+        domains.update({"PIT", "SD"})
+    if query_targets_spouse_gift_sd(query):
+        domains.add("SD")
     return domains
 
 
@@ -3131,6 +3529,10 @@ def build_pcc_interpretation_match_score(row: sqlite3.Row, *, query: str) -> flo
             row_domain = str(row["tax_domain"] or "").upper()
             if row_domain == "PCC" and re.search(r"art\.\s*(4|6|7|10)|art\. (4|6|7|10)-|podlega opodatkowaniu podatkiem od czynności cywilnoprawnych", candidate_text):
                 score += 1.6
+    if query_targets_developer_land_sale(query) and re.search(r"nieruchomo|grunt|działk|dzialk", candidate_text):
+        score += 0.4
+        if re.search(r"art\.\s*2\s*pkt\s*4|opodatkow\w* podatkiem od towarów i usług|zwolnion\w* od podatku od towarów i usług", candidate_text):
+            score += 0.7
     if "użytkowania gruntu" in normalized_query and "użytkowania gruntu" in candidate_text:
         score += 0.4
     if "podział" in normalized_query and "wydzielen" in normalized_query and "podział" in candidate_text and "wydzielen" in candidate_text:
@@ -3272,6 +3674,44 @@ def build_local_embedding_text(row: sqlite3.Row) -> str:
     return "\n".join(value for value, weight in fields for _ in range(weight) if value)
 
 
+def build_treaty_focus_score(row: sqlite3.Row, *, query: str) -> float:
+    if str(row["source_type"] or "") != "statute" or str(row["source_subtype"] or "") != "tax_treaty":
+        return 0.0
+    if not query_targets_crossborder_treaty_analysis(query):
+        return 0.0
+
+    normalized_query = normalize_whitespace(query).lower()
+    candidate_text = normalize_whitespace(
+        " ".join(
+            [
+                str(row["subject"] or ""),
+                str(row["publication"] or ""),
+                str(row["tax_domain"] or ""),
+                str(row["legal_provisions_json"] or ""),
+                str(row["law_tags_json"] or ""),
+                str(row["chunk_text"] or "")[:2400],
+            ]
+        )
+    ).lower()
+    score = 1.15
+
+    if re.search(r"\b(dywidend\w*)\b", normalized_query) and re.search(r"\b(dywidend\w*|art\.\s*10\b)\b", candidate_text):
+        score += 0.8
+    if re.search(r"\b(odsetk\w*)\b", normalized_query) and re.search(r"\b(odsetk\w*|art\.\s*11\b)\b", candidate_text):
+        score += 0.8
+    if re.search(r"\b(należno\w* licencyjn\w*|nalezn\w* licencyjn\w*|royalt\w*)\b", normalized_query) and re.search(r"\b(należno\w* licencyjn\w*|nalezn\w* licencyjn\w*|royalt\w*|art\.\s*12\b)\b", candidate_text):
+        score += 0.8
+    if re.search(r"\b(zakład\w*|zaklad\w*|zysk\w* przedsi\w*)\b", normalized_query) and re.search(r"\b(zakład\w*|zaklad\w*|zyski przedsiębiorstw|art\.\s*5\b|art\.\s*7\b)\b", candidate_text):
+        score += 0.9
+    if re.search(r"\b(beneficial owner|rzeczywist\w* właściciel\w*|certyfikat\w* rezydencji|nierezydent\w*)\b", normalized_query) and re.search(r"\b(miejsce zamieszkania|siedzib\w*|osob\w* uprawnion\w*|uprawnion\w* do|rezydent\w*)\b", candidate_text):
+        score += 0.45
+    if re.search(r"\b(niemc\w*|niderland\w*|holand\w*|luksemburg\w*|franc\w*|irland\w*|szwajcar\w*|austri\w*|wielk\w* bryt\w*|uk\b|usa\b|stan\w* zjednoczon\w*|czech\w*)\b", normalized_query):
+        country_hits = re.findall(r"\b(austria|czechy|francja|irlandia|luksemburg|niderlandy|niemcy|szwajcaria|usa|wielka brytania)\b", candidate_text)
+        if country_hits:
+            score += 0.55
+    return min(score, 3.6)
+
+
 def build_statute_match_score(row: sqlite3.Row, *, query: str) -> float:
     """Score statutory drafting language independently of article numbering.
 
@@ -3286,7 +3726,7 @@ def build_statute_match_score(row: sqlite3.Row, *, query: str) -> float:
     text = normalize_whitespace(str(row["chunk_text"] or "")).lower()
     text_terms = ranking_terms(text)
     normalized_query = query.lower()
-    score = 0.0
+    score = build_treaty_focus_score(row, query=query)
     article_number, article_suffix = extract_primary_article_id(row)
     if re.search(r"(?:^|\n)art\.\s*\d", str(row["chunk_text"] or ""), re.IGNORECASE):
         score += 0.35
@@ -3343,6 +3783,106 @@ def build_statute_match_score(row: sqlite3.Row, *, query: str) -> float:
         or phrase_supported_by_text(text, text_terms, "stawka podatku wynosi")
     ):
         score += 0.6
+    if query_targets_developer_land_sale(query):
+        row_domains = row_tax_domains(row)
+        if article_number == "15" and "VAT" in row_domains and re.search(
+            r"\b(podatnikami są|wykonujące samodzielnie działalność gospodarczą|wszelką działalność producentów handlowców lub usługodawców)\b",
+            text,
+        ):
+            score += 1.15
+        if article_number == "43" and "VAT" in row_domains and re.search(
+            r"\b(teren\w* budowl\w*|teren\w* niezabudowan\w*|zwalnia się od podatku)\b",
+            text,
+        ):
+            score += 1.15
+        if article_number == "2" and "VAT" in row_domains and re.search(
+            r"\b(tereny budowlane|decyzj\w* o warunkach zabudowy|miejscowym planem zagospodarowania przestrzennego)\b",
+            text,
+        ):
+            score += 1.1
+        if article_number == "10" and "PIT" in row_domains and re.search(
+            r"\b(odpłatne zbycie nieruchomości|przed upływem pięciu lat|wykonaniu działalności gospodarczej)\b",
+            text,
+        ):
+            score += 1.0
+        if article_number == "5a" and "PIT" in row_domains and re.search(
+            r"\b(pozarolnicza działalność gospodarcza|działalność zarobkowa|w sposób zorganizowany i ciągły)\b",
+            text,
+        ):
+            score += 1.0
+        if article_number == "14" and "PIT" in row_domains and re.search(
+            r"\b(przychód z działalności gospodarczej|kwoty należne)\b",
+            text,
+        ):
+            score += 0.65
+        if article_number == "2" and "PCC" in row_domains and re.search(
+            r"\b(opodatkowane podatkiem od towarów i usług|zwolnion\w* z podatku od towarów i usług|umowa sprzedaży i zamiany.*nieruchomości)\b",
+            text,
+        ):
+            score += 1.0
+        if article_number == "106b" and "VAT" in row_domains and "podatnik jest obowiązany wystawić fakturę" in text:
+            score += 0.75
+        if article_number in {"106a", "106ga", "106gb"} and "VAT" in row_domains and re.search(
+            r"\b(faktur\w* ustrukturyzowan\w*|krajow\w* system\w* e-faktur|ksef)\b",
+            text,
+        ):
+            score += 0.65
+        if re.search(r"\b(dzierżaw\w*|dzierzaw\w*|pełnomocnictw\w*|pelnomocnictw\w*|warunk\w* zabudow\w*|pozwoleni\w* na budow\w*)\b", normalized_query) and re.search(
+            r"\b(działalność gospodarcza|tereny budowlane|decyzja o warunkach zabudowy|faktura)\b",
+            text,
+        ):
+            score += 0.45
+    if query_targets_post_leasing_vehicle_gift_sale(query):
+        row_domains = row_tax_domains(row)
+        if article_number == "7" and "VAT" in row_domains and re.search(
+            r"\b(nieodpłatnie|darowizn\w*|przysługiwało.*prawo do obniżenia|prawo do obniżenia kwoty podatku należnego)\b",
+            text,
+        ):
+            score += 1.25
+        if article_number == "15" and "VAT" in row_domains and re.search(
+            r"\b(podatnikami są|działalność gospodarcza|wykonujące samodzielnie działalność)\b",
+            text,
+        ):
+            score += 0.95
+        if article_number == "86" and "VAT" in row_domains and "przysługuje prawo do obniżenia" in text:
+            score += 1.05
+        if article_number == "91" and "VAT" in row_domains and re.search(r"\b(korekt\w*|zmian\w* prawa do obniżenia)\b", text):
+            score += 0.8
+        if article_number == "106b" and "VAT" in row_domains and "podatnik jest obowiązany wystawić fakturę" in text:
+            score += 1.0
+        if article_number == "2" and "PIT" in row_domains and "podatku od spadków i darowizn" in text:
+            score += 0.9
+        if article_number == "10" and "PIT" in row_domains and re.search(
+            r"\b(innych rzeczy|pół roku|pol roku|art\.\s*14\s*ust\.\s*2\s*pkt\s*19|nie upłynęło 6 lat)\b",
+            text,
+        ):
+            score += 1.35
+        if article_number == "14" and "PIT" in row_domains and re.search(
+            r"\b(pkt\s*19|rzeczami ruchomymi|umowy.*23b|podlegających ujęciu w ewidencji)\b",
+            text,
+        ):
+            score += 1.35
+        if article_number == "22" and "PIT" in row_domains and re.search(
+            r"\b(art\.\s*11\s*ust\.\s*2|nieodpłatnych|częściowo odpłatnych|został określony przychód)\b",
+            text,
+        ):
+            score += 1.0
+        if article_number == "23" and "PIT" in row_domains and re.search(
+            r"\b(wysokości 20|wysokosci 20|25 % poniesionych wydatków|25 % poniesionych wydatkow|samochodu osobowego)\b",
+            text,
+        ):
+            score += 1.35
+        if article_number == "1" and "SD" in row_domains and "darowizny" in text:
+            score += 0.8
+        if article_number == "4a" and "SD" in row_domains and re.search(
+            r"\b(małżonka|malzonka|zgłoszą nabycie|terminie 6 miesięcy|ust\.\s*4)\b",
+            text,
+        ):
+            score += 1.35
+        if article_number == "6" and "SD" in row_domains and re.search(r"\b(darowizn\w*|obowiązek podatkowy)\b", text):
+            score += 0.8
+        if article_number in {"9", "14"} and "SD" in row_domains and re.search(r"\b(grup\w* podatkow\w*|małżonek|malzonek|kwota)\b", text):
+            score += 0.75
     return score
 
 
@@ -3676,6 +4216,37 @@ def fetch_statute_rows_by_targets(
         if limit is not None and len(deduped) >= limit:
             break
     return deduped
+
+
+def infer_chunk_tax_domain(chunk: RagChunk) -> str:
+    subject = normalize_whitespace(chunk.subject or "").lower()
+    publication = normalize_whitespace(chunk.publication or "").lower()
+    haystack = f"{subject} {publication} {chunk.source_url or ''}".lower()
+    if "towarów i usług" in haystack or "towarow i uslug" in haystack or "vat_act" in haystack:
+        return "VAT"
+    if "dochodowym od osób fizycznych" in haystack or "dochodowym od osob fizycznych" in haystack or "pit_act" in haystack:
+        return "PIT"
+    if "spadków i darowizn" in haystack or "spadkow i darowizn" in haystack or "inheritance_gift" in haystack:
+        return "SD"
+    if "czynności cywilnoprawnych" in haystack or "czynnosci cywilnoprawnych" in haystack:
+        return "PCC"
+    if "dochodowym od osób prawnych" in haystack or "dochodowym od osob prawnych" in haystack:
+        return "CIT"
+    return ""
+
+
+def order_chunks_by_statute_targets(chunks: list[RagChunk], targets: list[tuple[str, str]]) -> list[RagChunk]:
+    if not chunks or not targets:
+        return chunks
+
+    order = {(domain.upper(), article_key): position for position, (domain, article_key) in enumerate(targets)}
+
+    def sort_key(chunk: RagChunk) -> tuple[int, float, str]:
+        article_key = extract_article_key_from_text(chunk.legal_provisions[0] if chunk.legal_provisions else "")
+        domain = infer_chunk_tax_domain(chunk)
+        return order.get((domain, article_key), len(order)), -chunk.score, chunk.subject
+
+    return sorted(chunks, key=sort_key)
 
 
 def fetch_rows_by_document_ids(
@@ -4082,9 +4653,22 @@ def search_chat_chunks(
         judgment_limit = 0
         if query_targets_ksef_foreign_sale(query):
             statute_limit = min(effective_limit - 1, max(4, math.ceil(effective_limit * 0.6)))
+        elif query_targets_developer_land_sale(query):
+            statute_limit = min(effective_limit - 1, max(4, math.ceil(effective_limit * 0.6)))
+        elif query_targets_post_leasing_vehicle_gift_sale(query):
+            statute_limit = min(effective_limit - 1, max(5, math.ceil(effective_limit * 0.7)))
         else:
             statute_limit = effective_limit if not include_interpretations else max(1, effective_limit // 2)
         interpretation_limit = max(1, effective_limit - statute_limit) if include_interpretations else 0
+    if query_targets_crossborder_treaty_analysis(query) and statute_limit:
+        desired_statute_limit = min(effective_limit, max(3, statute_limit))
+        if desired_statute_limit > statute_limit:
+            shift = desired_statute_limit - statute_limit
+            statute_limit = desired_statute_limit
+            if interpretation_limit:
+                interpretation_limit = max(1, interpretation_limit - shift)
+            if include_judgments and (statute_limit + interpretation_limit + judgment_limit) > effective_limit:
+                judgment_limit = max(1, effective_limit - statute_limit - interpretation_limit)
     if interpretation_limit and query_targets_ksef_foreign_sale(query):
         interpretation_rows = fetch_rows_by_document_ids(
             KSEF_FOREIGN_SALE_INTERPRETATION_DOCUMENT_IDS,
@@ -4124,6 +4708,18 @@ def search_chat_chunks(
     preferred_targets: list[tuple[str, str]] = []
     if query_targets_ksef_foreign_sale(query):
         preferred_targets.extend(KSEF_FOREIGN_SALE_STATUTE_TARGETS)
+    if query_targets_wht_crossborder_payments(query):
+        preferred_targets.extend(build_wht_crossborder_payment_statute_targets(query))
+    if query_targets_developer_land_sale(query):
+        preferred_targets.extend(build_developer_land_sale_statute_targets(query))
+    if query_targets_post_leasing_vehicle_gift_sale(query):
+        preferred_targets.extend(build_post_leasing_vehicle_gift_sale_statute_targets(query))
+    if query_targets_leased_movable_six_year_rule(query):
+        preferred_targets.extend(build_leased_movable_six_year_statute_targets(query))
+    if query_targets_gifted_asset_cost_basis(query):
+        preferred_targets.extend(build_gifted_asset_cost_basis_statute_targets(query))
+    if query_targets_spouse_gift_sd(query):
+        preferred_targets.extend(build_spouse_gift_sd_statute_targets(query))
     if query_targets_shareholder_company_asset_sale(query):
         preferred_targets.extend(build_shareholder_company_asset_sale_statute_targets(query))
     if query_targets_small_taxpayer_foreign_vat(query):
@@ -4152,23 +4748,64 @@ def search_chat_chunks(
     hinted_statute_rows = fetch_statute_rows_by_targets(
         preferred_targets,
         config=config,
-        limit=statute_limit,
+        limit=None if (
+            query_targets_post_leasing_vehicle_gift_sale(query)
+            or query_targets_leased_movable_six_year_rule(query)
+            or query_targets_gifted_asset_cost_basis(query)
+            or query_targets_spouse_gift_sd(query)
+        ) else statute_limit,
     ) if statute_limit else []
     hinted_statutes = rank_hybrid_local_candidates(
         hinted_statute_rows,
         query=expand_search_query(query),
-        effective_limit=statute_limit,
+        effective_limit=len(hinted_statute_rows) if (
+            query_targets_post_leasing_vehicle_gift_sale(query)
+            or query_targets_leased_movable_six_year_rule(query)
+            or query_targets_gifted_asset_cost_basis(query)
+            or query_targets_spouse_gift_sd(query)
+        ) else statute_limit,
         config=config,
     ) if hinted_statute_rows else []
+    if (
+        query_targets_post_leasing_vehicle_gift_sale(query)
+        or query_targets_leased_movable_six_year_rule(query)
+        or query_targets_gifted_asset_cost_basis(query)
+        or query_targets_spouse_gift_sd(query)
+    ):
+        hinted_statutes = order_chunks_by_statute_targets(hinted_statutes, preferred_targets)
 
     merged_statutes: list[RagChunk] = []
     seen_statute_chunks: set[str] = set()
     prefer_hinted_statutes = (
         query_targets_ksef_foreign_sale(query)
+        or query_targets_wht_crossborder_payments(query)
+        or query_targets_developer_land_sale(query)
+        or query_targets_post_leasing_vehicle_gift_sale(query)
+        or query_targets_leased_movable_six_year_rule(query)
+        or query_targets_gifted_asset_cost_basis(query)
+        or query_targets_spouse_gift_sd(query)
         or query_targets_shareholder_company_asset_sale(query)
         or query_targets_small_taxpayer_foreign_vat(query)
     )
     statute_candidates = [*hinted_statutes, *statutes] if prefer_hinted_statutes else [*statutes, *hinted_statutes]
+    if (
+        query_targets_post_leasing_vehicle_gift_sale(query)
+        or query_targets_leased_movable_six_year_rule(query)
+        or query_targets_gifted_asset_cost_basis(query)
+        or query_targets_spouse_gift_sd(query)
+    ):
+        unique_statute_candidates: list[RagChunk] = []
+        duplicate_statute_candidates: list[RagChunk] = []
+        seen_article_targets: set[tuple[str, str]] = set()
+        for chunk in statute_candidates:
+            article_key = extract_article_key_from_text(chunk.legal_provisions[0] if chunk.legal_provisions else "")
+            article_target = (infer_chunk_tax_domain(chunk), article_key)
+            if article_target[0] and article_target[1] and article_target not in seen_article_targets:
+                seen_article_targets.add(article_target)
+                unique_statute_candidates.append(chunk)
+            else:
+                duplicate_statute_candidates.append(chunk)
+        statute_candidates = [*unique_statute_candidates, *duplicate_statute_candidates]
     for chunk in statute_candidates:
         if chunk.chunk_id in seen_statute_chunks:
             continue

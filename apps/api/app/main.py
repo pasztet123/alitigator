@@ -14,17 +14,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from postgrest.exceptions import APIError
 from pydantic import BaseModel, Field
 
-from app.auth import AuthenticatedUser, get_current_user
+from app.auth import AuthenticatedUser, get_current_user, is_admin_user
 from app.billing import (
     apply_topup_from_checkout_session,
-    consume_tokens_for_chat,
+    build_credit_pack_for_amount,
+    consume_credit_for_chat,
     create_checkout_session,
     ensure_profile,
-    find_token_pack,
-    get_model_token_costs,
-    get_token_balance,
-    get_token_packs,
+    find_credit_pack,
+    get_checkout_session,
+    get_credit_balance,
+    get_credit_cost_per_query,
+    get_credit_currency,
+    get_credit_packs,
+    get_credit_unit_price_gross,
+    grant_credits_to_user,
     is_stripe_configured,
+    list_profiles_with_credit_balances,
     mark_order_status,
     update_profile,
 )
@@ -86,6 +92,9 @@ Zasady odpowiedzi:
 14. Nie pisz, że „nie da się odpowiedzieć”, jeśli da się odpowiedzieć choćby częściowo. Zamiast tego napisz „na podstawie tych źródeł można stwierdzić co najmniej, że...”.
 15. W pytaniach o KSeF nie zakładaj, że miejsce dostawy lub świadczenia poza Polską automatycznie oznacza brak faktury ustrukturyzowanej. Najpierw sprawdź zakres polskich zasad fakturowania z art. 106a, obowiązek faktury z art. 106b, wyjątki z art. 106ga ust. 2, a dopiero potem sposób udostępnienia z art. 106gb.
 16. Jeżeli art. 106gb ust. 4 mówi o udostępnieniu faktury nabywcy w uzgodniony sposób, traktuj to jako regułę doręczenia/udostępnienia faktury ustrukturyzowanej, nie jako wyłączenie obowiązku KSeF.
+17. Nie wolno Ci przenosić elementów stanu faktycznego ze źródła do kazusu użytkownika. Fakty kazusu pochodzą tylko z pytania użytkownika i z dostarczonych doprecyzowań intencji, nie z treści wyroku ani interpretacji.
+18. Jeżeli wyrok lub interpretacja opisuje inny stan faktyczny, możesz wykorzystać tylko wynikającą z niego tezę albo kierunek wykładni. Zawsze wyraźnie zaznacz, które elementy są wspólne, a które różne.
+19. Nie używaj wyroku ani interpretacji do dopowiadania brakującej przesłanki ustawowej. Jeżeli przepis uzależnia wynik od konkretnego faktu, a tego faktu nie ma w pytaniu ani w źródłach, wskaż brak tej przesłanki zamiast zgadywać.
 """.strip()
 
 REDACTION_PATTERNS = {
@@ -124,6 +133,7 @@ class ChatResponse(BaseModel):
     model: str
     redactions: list[str]
     chat_id: Optional[str] = None
+    assistant_message_id: Optional[str] = None
     structured_reply: Optional["StructuredReply"] = None
 
 
@@ -222,6 +232,14 @@ class PersistedChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str
     created_at: str
+    feedback_rating: Optional[int] = None
+    feedback_comment: Optional[str] = None
+    feedback_created_at: Optional[str] = None
+
+
+class ChatMessageFeedbackRequest(BaseModel):
+    rating: int = Field(ge=1, le=5)
+    comment: Optional[str] = Field(default=None, max_length=1200)
 
 
 class ChatThreadDetail(BaseModel):
@@ -244,10 +262,10 @@ class ProfileResponse(BaseModel):
     updated_at: Optional[str] = None
 
 
-class TokenPackResponse(BaseModel):
+class CreditPackResponse(BaseModel):
     id: str
     name: str
-    token_amount: int
+    credit_amount: int
     price_gross: int
     currency: str
     description: str
@@ -257,10 +275,13 @@ class AccountResponse(BaseModel):
     user_id: str
     email: Optional[str] = None
     profile: ProfileResponse
-    token_balance: int
+    is_admin: bool = False
+    credit_balance: int
+    credit_cost_per_query: int
+    credit_unit_price_gross: int
+    credit_currency: str
     stripe_configured: bool
-    token_packs: list[TokenPackResponse]
-    model_token_costs: dict[str, int]
+    credit_packs: list[CreditPackResponse]
 
 
 class ProfileUpdateRequest(BaseModel):
@@ -269,7 +290,8 @@ class ProfileUpdateRequest(BaseModel):
 
 
 class CheckoutSessionRequest(BaseModel):
-    pack_id: str = Field(min_length=1, max_length=64)
+    credit_pack_id: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    credit_amount: Optional[int] = Field(default=None, ge=1, le=100000)
     success_url: Optional[str] = Field(default=None, max_length=2000)
     cancel_url: Optional[str] = Field(default=None, max_length=2000)
 
@@ -278,6 +300,39 @@ class CheckoutSessionResponse(BaseModel):
     order_id: str
     checkout_url: str
     checkout_session_id: str
+
+
+class CheckoutSessionStatusResponse(BaseModel):
+    checkout_session_id: str
+    payment_status: str
+    status: Optional[str] = None
+    credited: bool
+
+
+class AdminGrantCreditsRequest(BaseModel):
+    user_email: str = Field(min_length=3, max_length=320)
+    credit_amount: int = Field(ge=1, le=100000)
+    reason: Optional[str] = Field(default=None, max_length=280)
+
+
+class AdminGrantCreditsResponse(BaseModel):
+    user_id: str
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    credit_balance: int
+
+
+class AdminUserSummary(BaseModel):
+    user_id: str
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    law_firm: Optional[str] = None
+    credit_balance: int
+    created_at: Optional[str] = None
+
+
+class AdminUsersResponse(BaseModel):
+    users: list[AdminUserSummary]
 
 
 class EurekaImportRequest(BaseModel):
@@ -518,6 +573,14 @@ HINT_DOMAIN_KEYWORDS: dict[str, tuple[tuple[str, float], ...]] = {
         ("pcc", 2.8),
         ("podatek od czynności cywilnoprawnych", 2.6),
         ("podatek od czynnosci cywilnoprawnych", 2.6),
+    ),
+    "SD": (
+        ("podatek od spadków i darowizn", 3.0),
+        ("podatek od spadkow i darowizn", 3.0),
+        ("sd-z2", 2.8),
+        ("darowizna małżonce", 2.2),
+        ("darowizna malzonce", 2.2),
+        ("grupa zerowa", 1.8),
     ),
 }
 
@@ -839,6 +902,54 @@ OPENING_STATUTE_STOPWORDS = {
 
 RETRIEVAL_COVERAGE_RULES = (
     {
+        "id": "wht_core_statutes",
+        "label": "WHT: przepisy CIT o dywidendach, odsetkach, preferencjach i pay-and-refund",
+        "query_patterns": (r"\b(wht|podatek u źr[óo]dła|beneficial owner|rzeczywist\w* właściciel\w*|certyfikat\w* rezydencji|pay and refund|należyt\w* staranno\w*)\b",),
+        "chunk_patterns": (r"\b(art\.\s*21\b|art\.\s*22\b|art\.\s*22c\b|art\.\s*26\b|certyfikat rezydencji|rzeczywistym właścicielem|dochowania należytej staranności)\b",),
+    },
+    {
+        "id": "wht_treaty_axes",
+        "label": "WHT: umowa międzynarodowa / dywidendy / odsetki / zyski przedsiębiorstw / zakład",
+        "query_patterns": (r"\b(dywidend\w*|odsetk\w*|zarządz\w*|zarzadz\w*|holdingow\w*|holandi\w*|niderland\w*|umow\w* międzynarodow\w*|upo|zakład\w*|zaklad\w*)\b",),
+        "chunk_patterns": (r"\b(umow\w* o unikaniu podwójnego opodatkowania|beneficial owner|osob\w* uprawnion\w* do dywidend|odsetek|zyski przedsiębiorstw|zagraniczny zakład|zakład)\b",),
+    },
+    {
+        "id": "crossborder_treaty_default",
+        "label": "transgranicznie: czy retrieval pokrywa UPO / zakład / rezydencję",
+        "query_patterns": (r"\b(transgraniczn\w*|nierezydent\w*|podmiot\w* zagraniczn\w*|certyfikat\w* rezydencji|zakład\w*|zaklad\w*|upo)\b",),
+        "chunk_patterns": (r"\b(umow\w* o unikaniu podwójnego opodatkowania|miejsce zamieszkania lub siedziba|zakład|zyski przedsiębiorstw|certyfikat rezydencji)\b",),
+    },
+    {
+        "id": "wht_pay_and_refund_scope",
+        "label": "WHT: zakres art. 26 ust. 2e / próg / nadwyżka ponad limit",
+        "query_patterns": (r"\b(pay and refund|2 mln|2 000 000|próg\w*|prog\w*|limit\w* płatno\w*|limit\w* należno\w*)\b",),
+        "chunk_patterns": (r"\b(art\.\s*26\s*ust\.\s*2e|nadwyżk\w* ponad kwotę 2 000 000 zł|na rzecz tego samego podatnika|z tytułów wymienionych w art\.\s*21\s*ust\.\s*1\s*pkt\s*1 oraz art\.\s*22\s*ust\.\s*1)\b",),
+    },
+    {
+        "id": "family_foundation_permitted_activity",
+        "label": "fundacja rodzinna: dozwolona działalność / art. 5",
+        "query_patterns": (r"\b(fundacj\w* rodzinn\w*|beneficjent\w*|fundator\w*)\b",),
+        "chunk_patterns": (r"\b(fundacj\w* rodzinn\w*|art\.\s*5\b|dozwolon\w* działalno\w*|nabyte wyłącznie w celu dalszego zbycia|spółkom kapitałowym, w których fundacja rodzinna posiada udziały albo akcje)\b",),
+    },
+    {
+        "id": "family_foundation_pit_exemption",
+        "label": "fundacja rodzinna: PIT beneficjenta / proporcja zwolnienia",
+        "query_patterns": (r"\b(fundacj\w* rodzinn\w*).{0,120}\b(beneficjent\w*|syn\w* fundator\w*|wypłat\w*|świadczeni\w*)\b|\b(beneficjent\w*|syn\w* fundator\w*).{0,120}\b(fundacj\w* rodzinn\w*)\b",),
+        "chunk_patterns": (r"\b(art\.\s*21\s*ust\.\s*1\s*pkt\s*157|art\.\s*21\s*ust\.\s*49|grup\w* zerow\w*|zwolnien\w*.*fundacj\w* rodzin\w*)\b",),
+    },
+    {
+        "id": "real_estate_vat_first_occupancy",
+        "label": "nieruchomość: VAT przy sprzedaży / pierwsze zasiedlenie",
+        "query_patterns": (r"\b(sprzeda[żz]\w*|zby\w*)\b.{0,120}\b(nieruchomo\w*|apartament\w*|lokal\w*|mieszkani\w*|budynek\w*)\b|\b(nieruchomo\w*|apartament\w*|lokal\w*|mieszkani\w*|budynek\w*)\b.{0,120}\b(sprzeda[żz]\w*|zby\w*)\b",),
+        "chunk_patterns": (r"\b(pierwsz\w* zasiedleni\w*|art\.\s*43\s*ust\.\s*1\s*pkt\s*10|art\.\s*43\s*ust\.\s*1\s*pkt\s*10a|ulepszeni\w* nieruchomo\w*)\b",),
+    },
+    {
+        "id": "real_estate_pcc_vat_interplay",
+        "label": "nieruchomość: relacja PCC do VAT przy zwolnieniu",
+        "query_patterns": (r"\b(pcc)\b.{0,120}\b(vat|zwolnion\w*)\b.{0,120}\b(nieruchomo\w*|apartament\w*|lokal\w*|budynek\w*)\b|\b(nieruchomo\w*|apartament\w*|lokal\w*|budynek\w*)\b.{0,120}\b(pcc)\b",),
+        "chunk_patterns": (r"\b(art\.\s*2\s*pkt\s*4|sprzedaż nieruchomości|nieruchomości.*zwolnion\w* z vat|wyłączenie z opodatkowania pcc)\b",),
+    },
+    {
         "id": "treaty",
         "label": "umowa o unikaniu podwójnego opodatkowania / treaty override",
         "query_patterns": (r"\b(usa|niemc|francj|wielkiej bryt|zagraniczn|nierezydent|umow[ay] o unikaniu)\b",),
@@ -861,6 +972,34 @@ RETRIEVAL_COVERAGE_RULES = (
         "label": "certyfikat rezydencji / dokumentowanie WHT",
         "query_patterns": (r"\b(certyfikat rezydencji|pdf)\b",),
         "chunk_patterns": (r"\b(certyfikat rezydencji|art\.?\s*26|kopi[ai] certyfikatu|pdf)\b",),
+    },
+    {
+        "id": "post_leasing_vehicle_vat",
+        "label": "samochód po leasingu: VAT darowizna / prawo do odliczenia / podatnik / faktura",
+        "query_patterns": (
+            r"(\bsamoch[óo]d\w*|\bpojazd\w*|\bauto\b).{0,220}(\bleasing\w*|\bwykup\w*|\bdarowizn\w*|\bfaktur\w*)|"
+            r"(\bleasing\w*|\bwykup\w*|\bdarowizn\w*|\bfaktur\w*).{0,220}(\bsamoch[óo]d\w*|\bpojazd\w*|\bauto\b)",
+        ),
+        "chunk_patterns": (
+            r"\b(art\.?\s*7|art\.?\s*15|art\.?\s*86|art\.?\s*91|art\.?\s*106b|przysługiwało.*prawo do obniżenia|podatnik jest obowiązany wystawić fakturę)\b",
+        ),
+    },
+    {
+        "id": "post_leasing_vehicle_pit",
+        "label": "samochód po leasingu: PIT pół roku / 6 lat / 20% kosztów / koszt darowanego składnika",
+        "query_patterns": (
+            r"(\bsamoch[óo]d\w*|\bpojazd\w*|\bauto\b).{0,260}(\bleasing\w*|\bwykup\w*|\bdarowizn\w*|\bmałżonk\w*|\bmalzonk\w*)|"
+            r"(\bleasing\w*|\bwykup\w*|\bdarowizn\w*|\bmałżonk\w*|\bmalzonk\w*).{0,260}(\bsamoch[óo]d\w*|\bpojazd\w*|\bauto\b)",
+        ),
+        "chunk_patterns": (
+            r"\b(art\.?\s*10|art\.?\s*14|art\.?\s*22|art\.?\s*23|pół roku|pol roku|nie upłynęło 6 lat|rzeczami ruchomymi|wysokości 20|wysokosci 20|art\.?\s*11\s*ust\.?\s*2)\b",
+        ),
+    },
+    {
+        "id": "post_leasing_vehicle_sd",
+        "label": "darowizna małżonkowi: SD / grupa zerowa / zgłoszenie / wyjątki",
+        "query_patterns": (r"\b(darowizn\w*).{0,160}\b(małżonk\w*|malzonk\w*|żon\w*|zon\w*|męż\w*|mez\w*)\b|\b(sd-z2|spadk\w* i darowizn\w*)\b",),
+        "chunk_patterns": (r"\b(art\.?\s*4a|art\.?\s*6|art\.?\s*9|art\.?\s*14|małżonka|malzonka|zgłoszą nabycie|terminie 6 miesięcy|obowiązek zgłoszenia nie obejmuje)\b",),
     },
     {
         "id": "software_tax_classification",
@@ -890,7 +1029,7 @@ def _chunk_domain_labels(chunk: RagChunk) -> set[str]:
     provision_domains = {
         match.group(1).upper()
         for provision in chunk.legal_provisions
-        for match in [re.match(r"\[(CIT|PIT|VAT|PCC|EXCISE|AKCYZA|ORDYNACJA|OP|WHT)\]", provision, re.IGNORECASE)]
+        for match in [re.match(r"\[(CIT|PIT|VAT|PCC|SD|EXCISE|AKCYZA|ORDYNACJA|OP|WHT)\]", provision, re.IGNORECASE)]
         if match
     }
     text_domains = {domain.upper() for domain in detect_domains(" ".join(part for part in [chunk.subject, chunk.chunk_text] if part))}
@@ -966,6 +1105,7 @@ def build_retrieval_coverage_context(user_prompt: str, retrieved_chunks: list[Ra
         " nie podawaj stanowczych tez na osiach niepokrytych,"
         " nie zgaduj numerów jednostek redakcyjnych ani treści umów międzynarodowych,"
         " nie domykaj odpowiedzi szeroką syntezą wykraczającą poza materiał."
+        " Nie przenoś też do kazusu użytkownika dodatkowych faktów ze źródeł częściowo relewantnych."
         " Na osiach niepokrytych wolno tylko:"
         " (a) wskazać, że to jest kluczowy problem,"
         " (b) opisać bezpiecznie możliwe warianty,"
@@ -994,7 +1134,7 @@ def score_opening_statute_candidate(chunk: RagChunk, *, query: str) -> float:
         {
             match.group(1).upper()
             for provision in chunk.legal_provisions
-            for match in [re.match(r"\[(CIT|PIT|VAT|PCC|EXCISE|AKCYZA|ORDYNACJA|OP)\]", provision, re.IGNORECASE)]
+            for match in [re.match(r"\[(CIT|PIT|VAT|PCC|SD|EXCISE|AKCYZA|ORDYNACJA|OP)\]", provision, re.IGNORECASE)]
             if match
         }
         | {domain.upper() for domain in detect_domains(text)}
@@ -1025,7 +1165,7 @@ def extract_opening_statute_quote(retrieved_chunks: list[RagChunk], *, query: Op
         domain_matched = [
             chunk for chunk in statutes
             if (
-                {match.group(1).upper() for provision in chunk.legal_provisions for match in [re.match(r"\[(CIT|PIT|VAT|PCC|EXCISE|AKCYZA|ORDYNACJA|OP)\]", provision, re.IGNORECASE)] if match}
+                {match.group(1).upper() for provision in chunk.legal_provisions for match in [re.match(r"\[(CIT|PIT|VAT|PCC|SD|EXCISE|AKCYZA|ORDYNACJA|OP)\]", provision, re.IGNORECASE)] if match}
                 | {domain.upper() for domain in detect_domains(" ".join(part for part in [chunk.subject, chunk.chunk_text[:400]] if part))}
             ) & query_domains
         ]
@@ -1114,6 +1254,13 @@ def build_chat_system_prompt(
         + " Nie wolno Ci maskować słabego retrievalu stanowczą analizą."
         + " Jeżeli pokrycie retrievalu jest częściowe lub słabe, zawęź odpowiedź do osi naprawdę wspartych materiałem."
         + " Wtedy odpowiedź ma być bardziej zachowawcza, a nie bardziej kategoryczna."
+        + " Nie wolno Ci wprowadzać do odpowiedzi elementów stanu faktycznego, których użytkownik nie podał."
+        + " Jeżeli wyrok albo interpretacja zawiera własny stan faktyczny, potraktuj go jako tło źródła, a nie jako część kazusu użytkownika."
+        + " Przed użyciem wyroku lub interpretacji wykonaj wewnętrznie test podobieństwa:"
+        + " (a) jakie fakty są wspólne,"
+        + " (b) jakie fakty są różne,"
+        + " (c) czy te różnice blokują przeniesienie wniosku."
+        + " Jeśli różnica dotyczy kluczowej przesłanki, napisz, że źródło jest tylko częściowo relewantne i nie rozszerzaj jego tezy na cały kazus."
         + " Nie podawaj dokładnych numerów artykułów, ustępów ani twierdzeń o treści umów międzynarodowych, jeżeli nie masz ich w dostarczonym materiale."
         + " Gdy pytanie dotyczy szerokiego zagadnienia, a retrieval zwraca materiał wycinkowy, nie kończ na stwierdzeniu braków."
         + " Zamiast tego zsyntetyzuj punktowo tylko ten fragment obrazu prawnego, który da się odtworzyć z dostępnych materiałów."
@@ -1123,7 +1270,7 @@ def build_chat_system_prompt(
         + " (2) Ostrożne wnioski,"
         + " (3) Czego te źródła nie przesądzają."
         + " Jeżeli pytanie dotyczy więcej niż jednego podatku albo użytkownik wymienia konkretne podatki,"
-        + " podziel analizę jednoznacznie według podatków i nazwij sekcje wprost, np. VAT, CIT, PIT, PCC."
+        + " podziel analizę jednoznacznie według podatków i nazwij sekcje wprost, np. VAT, CIT, PIT, PCC, SD."
         + " W takich miejscach używaj czytelnych śródtytułów markdown, np. '### VAT' oraz krótkich pogrubionych etykiet, np. '**Kto ponosi skutek:**'."
         + " Nie mieszaj skutków różnych podatków w jednym akapicie, jeżeli da się je rozdzielić."
         + " Dla każdego podatku odpowiedz osobno przynajmniej na trzy kwestie:"
@@ -1133,10 +1280,38 @@ def build_chat_system_prompt(
         + " W takiej sytuacji albo zadaj krótkie pytanie doprecyzowujące w sekcji 'Potrzebne doprecyzowanie',"
         + " albo rozpisz co najmniej dwa wyraźne warianty, np. 'Wariant 1: jeśli transakcja podlega VAT...' oraz 'Wariant 2: jeśli transakcja nie podlega VAT...'."
         + " Gdy pytanie zostało już zadane i masz odpowiadać merytorycznie, preferuj rozpisanie wariantów zamiast urywania analizy."
+        + " Jeżeli wynik zależy od ustawowej przesłanki podmiotowej lub przedmiotowej,"
+        + " nazwij ją wprost i oceń osobno, czy materiał pozwala stwierdzić jej spełnienie."
+        + " Nie zastępuj tej przesłanki luźnym podobieństwem ekonomicznym ani samym powiązaniem osobowym."
         + " Jeżeli pytanie dotyczy sprzedaży, nabycia, aportu, najmu albo innych czynności mogących angażować kilka podatków,"
         + " dopilnuj, aby każdy wskazany przez użytkownika podatek dostał osobny, rozwinięty fragment odpowiedzi."
         + " Jeżeli użytkownik pyta o skutki podatkowe transakcji, odpowiedź ma być raczej pełniejsza niż skrótowa."
         + " Rozwijaj praktyczne konsekwencje dla każdej strony transakcji, zamiast kończyć na jednym ogólnym zdaniu."
+        + " W pytaniach o fundację rodzinną nie zakładaj automatycznie, że pożyczka dla spółki jest dozwolona tylko dlatego, że beneficjent jest z nią personalnie związany."
+        + " Jeżeli w materiale nie ma potwierdzenia, że fundacja jest wspólnikiem lub akcjonariuszem tej spółki, wskaż to jako brakującą przesłankę."
+        + " W pytaniach o sprzedaż mienia przez fundację rodzinną oceń osobno, czy materiał pozwala stwierdzić, że mienie nie zostało nabyte wyłącznie w celu dalszego zbycia."
+        + " W pytaniach o świadczenia dla beneficjenta fundacji rodzinnej nie zakładaj pełnego zwolnienia PIT bez sprawdzenia, czy źródła potwierdzają zakres zwolnienia i ewentualną proporcję przypisaną fundatorowi."
+        + " W pytaniach o mieszane wykorzystanie nieruchomości dla VAT nie utożsamiaj automatycznie proporcji sprzedaży z prewspółczynnikiem."
+        + " Użyj prewspółczynnika tylko wtedy, gdy źródła rzeczywiście wskazują na mieszanie działalności gospodarczej z użyciem pozostającym poza działalnością gospodarczą."
+        + " W pytaniach o PCC przy nieruchomości nie uogólniaj, że każde zwolnienie z VAT wyłącza PCC."
+        + " Jeżeli materiał nie potwierdza wyjątku dla nieruchomości, zaznacz to jako istotną lukę zamiast podawać regułę ogólną bez zastrzeżenia."
+        + " Przy sprzedaży niezabudowanego gruntu nie używaj testu pierwszego zasiedlenia."
+        + " Najpierw sprawdź, czy materiał pokrywa analizę terenu budowlanego, przeznaczenia pod zabudowę oraz relację art. 43 ust. 1 pkt 9 do definicji terenu budowlanego."
+        + " Jeżeli w stanie faktycznym pojawiają się warunki zabudowy, pozwolenie na budowę, podział działki albo przygotowanie gruntu pod inwestycję, oceń wyraźnie znaczenie tych faktów dla zwolnienia VAT przy gruncie niezabudowanym."
+        + " Nie przenoś automatycznie wniosku, że status podatnika VAT oznacza także działalność gospodarczą w PIT."
+        + " W takim kazusie oceń osobno przesłanki PIT, w szczególności zorganizowanie, ciągłość, działanie we własnym imieniu, skalę oraz powtarzalność."
+        + " Jeżeli źródło VAT i źródło PIT opierają się na podobnym, ale nie tożsamym stanie faktycznym, zaznacz ograniczenie transferu między podatkami zamiast formułować jeden wspólny wniosek."
+        + " Gdy sprzedaż gruntu poprzedza dzierżawa oraz udzielenie pełnomocnictwa deweloperowi do uzyskania decyzji administracyjnych, potraktuj te fakty jako istotne dla oceny VAT,"
+        + " ale nie pomijaj różnic takich jak liczba działek, skala przedsięwzięcia, liczba nabywców i to, kto faktycznie ponosi koszty przygotowania inwestycji."
+        + " W pytaniach o WHT analizuj oddzielnie każdą kategorię płatności, np. dywidendę, odsetki i usługi zarządzania."
+        + " Nie wolno Ci automatycznie przenosić przesłanek lub tez z jednej kategorii należności na inną tylko dlatego, że wszystkie występują w jednym kazusie."
+        + " Wyraźnie rozdzielaj: (a) zwolnienie ustawowe, (b) stawkę lub wyłączenie z UPO, (c) klauzule antyabuzywne lub odmowę preferencji."
+        + " Jeżeli wyrok dotyczy beneficial owner przy odsetkach, nie pisz automatycznie, że identyczny warunek wynika wprost z przepisu o dywidendach albo usługach, chyba że masz to w materiale źródłowym."
+        + " Przy mechanizmie pay and refund najpierw ustal dokładnie, które typy należności wchodzą do zakresu przepisu, a które nie."
+        + " Następnie wskaż, czy próg liczy się łącznie dla relewantnych płatności do tego samego podatnika, czy podatek pobiera się od całej kwoty czy tylko od nadwyżki ponad limit, oraz czy kolejność wypłat ma znaczenie."
+        + " Nie używaj sformułowania 'wszystkie płatności' bez wcześniejszego sprawdzenia zakresu przepisu."
+        + " Jeżeli pytanie dotyczy transakcji transgranicznej, nierezydenta, zakładu, certyfikatu rezydencji albo płatności do podmiotu zagranicznego, domyślnie sprawdź także, czy potrzebna jest analiza właściwej UPO."
+        + " Jeżeli w takich pytaniach retrieval nie dostarcza UPO albo materiału o zakładzie i rezydencji, zaznacz to jako istotną lukę zamiast kończyć odpowiedź wyłącznie na ustawie krajowej."
         + " Nie rozbudowuj sekcji Ryzyka i luki ponad to, co konieczne."
         + " Jeżeli jakieś źródło jest marginalne, uboczne albo zawiera obiter dictum, nadal wykorzystaj jego treść,"
         + " ale wyraźnie oznacz ograniczoną wagę tej wypowiedzi."
@@ -1145,6 +1320,17 @@ def build_chat_system_prompt(
         + " art. 106gb ust. 4. Nie wyprowadzaj braku KSeF wyłącznie z tego, że miejsce dostawy lub świadczenia jest poza Polską."
         + " Jeżeli źródła pokazują, że polskie przepisy fakturowe mają zastosowanie do transakcji poza terytorium kraju,"
         + " rozróżnij obowiązek wystawienia faktury ustrukturyzowanej od sposobu jej udostępnienia nabywcy."
+        + " Nie uzależniaj obowiązku KSeF wyłącznie od tego, czy podatnik jest czynnym podatnikiem VAT."
+        + " Najpierw ustal, czy działa jako podatnik VAT przy danej transakcji, czy ma obowiązek wystawić fakturę, a dopiero potem oceniaj wejście do KSeF i ewentualne przepisy przejściowe."
+        + " W pytaniach o samochód wykupiony po leasingu do majątku prywatnego i późniejszą darowiznę albo sprzedaż nie pomijaj specjalnych osi:"
+        + " w PIT sprawdź art. 14 ust. 2 pkt 19 oraz art. 10 ust. 2 pkt 4 przed użyciem prywatnego półrocznego terminu,"
+        + " a przy prywatnym samochodzie używanym częściowo w działalności odróżnij limit 20% z art. 23 ust. 1 pkt 46 od limitu 75% wynikającego z art. 23 ust. 1 pkt 46a."
+        + " Nie opieraj kwalifikacji środka trwałego wyłącznie na braku technicznego wpisu do ewidencji; sprawdź, czy składnik podlegał ujęciu i jak był faktycznie używany."
+        + " Przy sprzedaży rzeczy otrzymanej w darowiźnie nie przyjmuj automatycznie wartości rynkowej z dnia darowizny jako kosztu; najpierw sprawdź, czy przy nieodpłatnym nabyciu powstał przychód z art. 11 ust. 2-2b, czy darowizna była poza PIT jako podlegająca podatkowi od spadków i darowizn."
+        + " W VAT odróżnij faktyczne nieodliczenie VAT od ustawowego braku prawa do odliczenia; dla art. 7 ust. 2 znaczenie ma prawo do odliczenia, a nie samo to, czy podatnik z niego skorzystał."
+        + " Przy fakturze od małżonka nieprowadzącego działalności najpierw ustal, czy osoba działa jako podatnik VAT w tej konkretnej sprzedaży, a dopiero potem pisz o obowiązku fakturowania."
+        + " W podatku od spadków i darowizn przy darowiźnie między małżonkami sprawdź zwolnienie z art. 4a, termin zgłoszenia, wyjątki od zgłoszenia oraz relację do kwoty z art. 9."
+        + " Zasygnalizuj też cywilnoprawną kwestię majątku wspólnego małżonków, jeżeli pytanie mówi tylko o 'majątku prywatnym'."
         + opening_instruction
         + hint_instruction
         + retrieval_preferences_instruction
@@ -1177,6 +1363,8 @@ def is_chat_storage_ready() -> bool:
         if exc.json().get("code") == "PGRST205":
             return False
         raise
+    except httpx.HTTPError:
+        return False
 
     return True
 
@@ -1254,7 +1442,7 @@ def upsert_thread_metadata(chat_id: str, *, user_id: str, title: str, last_messa
     client.table("chat_threads").upsert(payload).execute()
 
 
-def persist_chat_exchange(chat_id: str, *, user_id: str, messages: list[dict[str, str]], reply: str) -> None:
+def persist_pending_chat_messages(chat_id: str, *, user_id: str, messages: list[dict[str, str]]) -> None:
     client = require_supabase_service_client()
     existing_response = (
         client.table("chat_messages")
@@ -1278,15 +1466,6 @@ def persist_chat_exchange(chat_id: str, *, user_id: str, messages: list[dict[str
             ]
         ).execute()
 
-    client.table("chat_messages").insert(
-        {
-            "id": str(uuid4()),
-            "chat_id": chat_id,
-            "role": "assistant",
-            "content": reply,
-        }
-    ).execute()
-
     latest_user_message = next((message["content"] for message in reversed(messages) if message["role"] == "user"), "")
     current_thread = fetch_thread_row(chat_id, user_id=user_id)
     existing_title = normalize_thread_title(current_thread.get("title"))
@@ -1299,8 +1478,49 @@ def persist_chat_exchange(chat_id: str, *, user_id: str, messages: list[dict[str
         chat_id,
         user_id=user_id,
         title=thread_title,
+        last_message_preview=build_last_message_preview(latest_user_message),
+    )
+
+
+def persist_chat_exchange(chat_id: str, *, user_id: str, messages: list[dict[str, str]], reply: str) -> dict:
+    client = require_supabase_service_client()
+    persist_pending_chat_messages(chat_id, user_id=user_id, messages=messages)
+
+    assistant_message_id = str(uuid4())
+    assistant_response = client.table("chat_messages").insert(
+        {
+            "id": assistant_message_id,
+            "chat_id": chat_id,
+            "role": "assistant",
+            "content": reply,
+        }
+    ).execute()
+
+    current_thread = fetch_thread_row(chat_id, user_id=user_id)
+    existing_title = normalize_thread_title(current_thread.get("title"))
+    upsert_thread_metadata(
+        chat_id,
+        user_id=user_id,
+        title=existing_title,
         last_message_preview=build_last_message_preview(reply),
     )
+
+    assistant_rows = assistant_response.data or []
+    if not assistant_rows:
+        # Some PostgREST/Supabase setups acknowledge inserts without returning a representation.
+        fallback_response = (
+            client.table("chat_messages")
+            .select("id,role,content,created_at,feedback_rating,feedback_comment,feedback_created_at")
+            .eq("id", assistant_message_id)
+            .eq("chat_id", chat_id)
+            .limit(1)
+            .execute()
+        )
+        assistant_rows = fallback_response.data or []
+    if not assistant_rows:
+        raise HTTPException(status_code=500, detail="Failed to load persisted assistant reply")
+
+    return assistant_rows[0]
 
 
 @app.get("/api/health", response_model=HealthResponse)
@@ -1326,14 +1546,28 @@ def list_models() -> ModelsResponse:
 
 def build_account_response(user: AuthenticatedUser) -> AccountResponse:
     profile_row = ensure_profile(user)
+    billing_available = True
+
+    try:
+        credit_balance = get_credit_balance(user.id)
+    except HTTPException as exc:
+        if exc.status_code == 503:
+            billing_available = False
+            credit_balance = 0
+        else:
+            raise
+
     return AccountResponse(
         user_id=user.id,
         email=user.email,
         profile=ProfileResponse(**profile_row),
-        token_balance=get_token_balance(user.id),
-        stripe_configured=is_stripe_configured(),
-        token_packs=[TokenPackResponse(**pack.__dict__) for pack in get_token_packs()],
-        model_token_costs=get_model_token_costs(),
+        is_admin=is_admin_user(user),
+        credit_balance=credit_balance,
+        credit_cost_per_query=get_credit_cost_per_query(),
+        credit_unit_price_gross=get_credit_unit_price_gross(),
+        credit_currency=get_credit_currency(),
+        stripe_configured=billing_available and is_stripe_configured(),
+        credit_packs=[CreditPackResponse(**pack.__dict__) for pack in get_credit_packs()],
     )
 
 
@@ -1362,13 +1596,91 @@ def create_billing_checkout_session(
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> CheckoutSessionResponse:
     ensure_profile(current_user)
+    if request.credit_amount is not None:
+        pack = build_credit_pack_for_amount(request.credit_amount)
+    elif request.credit_pack_id:
+        pack = find_credit_pack(request.credit_pack_id)
+    else:
+        raise HTTPException(status_code=400, detail="Podaj liczbe kredytow albo identyfikator pakietu.")
+
     checkout = create_checkout_session(
         user=current_user,
-        pack=find_token_pack(request.pack_id),
+        pack=pack,
         success_url=request.success_url,
         cancel_url=request.cancel_url,
     )
     return CheckoutSessionResponse(**checkout)
+
+
+@app.get("/api/billing/checkout-session/{session_id}", response_model=CheckoutSessionStatusResponse)
+def get_billing_checkout_session_status(
+    session_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> CheckoutSessionStatusResponse:
+    session = get_checkout_session(session_id)
+    metadata = session.get("metadata") or {}
+    session_user_id = str(metadata.get("user_id") or session.get("client_reference_id") or "").strip()
+
+    if session_user_id != current_user.id and not is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Ta sesja Stripe nie nalezy do zalogowanego uzytkownika.")
+
+    payment_status = str(session.get("payment_status") or "")
+    checkout_status = session.get("status")
+    credited = payment_status == "paid"
+
+    if credited:
+        apply_topup_from_checkout_session(session)
+
+    return CheckoutSessionStatusResponse(
+        checkout_session_id=str(session.get("id") or session_id),
+        payment_status=payment_status,
+        status=str(checkout_status) if checkout_status is not None else None,
+        credited=credited,
+    )
+
+
+@app.post("/api/admin/credits/grant", response_model=AdminGrantCreditsResponse)
+def grant_admin_credits(
+    request: AdminGrantCreditsRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> AdminGrantCreditsResponse:
+    if not is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Tylko admin moze przyznawac kredyty.")
+
+    result = grant_credits_to_user(
+        admin_user=current_user,
+        target_email=request.user_email,
+        credit_amount=request.credit_amount,
+        reason=request.reason,
+    )
+    profile = result["profile"]
+    return AdminGrantCreditsResponse(
+        user_id=str(profile["id"]),
+        email=profile.get("email"),
+        full_name=profile.get("full_name"),
+        credit_balance=int(result["credit_balance"]),
+    )
+
+
+@app.get("/api/admin/users", response_model=AdminUsersResponse)
+def list_admin_users(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> AdminUsersResponse:
+    if not is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Tylko admin moze przegladac liste uzytkownikow.")
+
+    users = [
+        AdminUserSummary(
+            user_id=str(profile["id"]),
+            email=profile.get("email"),
+            full_name=profile.get("full_name"),
+            law_firm=profile.get("law_firm"),
+            credit_balance=int(profile.get("credit_balance") or 0),
+            created_at=profile.get("created_at"),
+        )
+        for profile in list_profiles_with_credit_balances()
+    ]
+    return AdminUsersResponse(users=users)
 
 
 @app.post("/api/billing/webhooks/stripe")
@@ -1476,7 +1788,7 @@ def get_chat_thread(chat_id: str, current_user: AuthenticatedUser = Depends(get_
     client = require_supabase_service_client()
     response = (
         client.table("chat_messages")
-        .select("id,role,content,created_at")
+        .select("id,role,content,created_at,feedback_rating,feedback_comment,feedback_created_at")
         .eq("chat_id", chat_id)
         .order("created_at")
         .execute()
@@ -1525,6 +1837,38 @@ def update_chat_thread(
     return map_thread_summary(rows[0])
 
 
+@app.post("/api/chats/{chat_id}/messages/{message_id}/feedback", response_model=PersistedChatMessage)
+def save_chat_message_feedback(
+    chat_id: str,
+    message_id: str,
+    request: ChatMessageFeedbackRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> PersistedChatMessage:
+    ensure_chat_storage_ready()
+    ensure_profile(current_user)
+    fetch_thread_row(chat_id, user_id=current_user.id)
+    client = require_supabase_service_client()
+    response = (
+        client.table("chat_messages")
+        .update(
+            {
+                "feedback_rating": request.rating,
+                "feedback_comment": (request.comment or "").strip() or None,
+                "feedback_created_at": utc_now_iso(),
+            }
+        )
+        .eq("id", message_id)
+        .eq("chat_id", chat_id)
+        .eq("role", "assistant")
+        .execute()
+    )
+    rows = response.data or []
+    if not rows:
+        raise HTTPException(status_code=404, detail="Nie znaleziono odpowiedzi do ocenienia.")
+
+    return PersistedChatMessage(**rows[0])
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(
     request: ChatRequest,
@@ -1559,6 +1903,9 @@ async def chat(
         (message["content"] for message in reversed(sanitized_messages) if message["role"] == "user"),
         "",
     )
+    if chat_storage_available:
+        persist_pending_chat_messages(chat_id, user_id=current_user.id, messages=sanitized_messages)
+
     intent_hint_context = build_hint_context(request.intent_hints)
     retrieval_preferences_context = build_retrieval_preferences_context(request.retrieval_preferences)
     effective_user_prompt = build_effective_user_prompt(latest_user_message, request.intent_hints)
@@ -1573,8 +1920,9 @@ async def chat(
     if not api_key:
         demo_reply = build_demo_reply(latest_user_message, retrieved_chunks, retrieval_prompt=effective_user_prompt)
         structured_reply = parse_structured_reply(demo_reply)
+        persisted_assistant_message = None
         if chat_storage_available:
-            persist_chat_exchange(
+            persisted_assistant_message = persist_chat_exchange(
                 chat_id,
                 user_id=current_user.id,
                 messages=sanitized_messages,
@@ -1586,6 +1934,7 @@ async def chat(
             model=model,
             redactions=sorted(set(redactions)),
             chat_id=chat_id if chat_storage_available else None,
+            assistant_message_id=(persisted_assistant_message or {}).get("id"),
             structured_reply=structured_reply,
         )
 
@@ -1652,15 +2001,16 @@ async def chat(
     structured_reply = parse_structured_reply(reply)
 
     request_id = str(uuid4())
-    consume_tokens_for_chat(
+    consume_credit_for_chat(
         user_id=current_user.id,
         model=model,
         chat_id=chat_id,
         request_id=request_id,
     )
 
+    persisted_assistant_message = None
     if chat_storage_available:
-        persist_chat_exchange(
+        persisted_assistant_message = persist_chat_exchange(
             chat_id,
             user_id=current_user.id,
             messages=sanitized_messages,
@@ -1673,6 +2023,7 @@ async def chat(
         model=model,
         redactions=sorted(set(redactions)),
         chat_id=chat_id if chat_storage_available else None,
+        assistant_message_id=(persisted_assistant_message or {}).get("id"),
         structured_reply=structured_reply,
     )
 

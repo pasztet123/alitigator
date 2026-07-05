@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import './App.css'
@@ -14,6 +14,9 @@ type Message = {
   role: Role
   content: string
   created_at?: string
+  feedback_rating?: number | null
+  feedback_comment?: string | null
+  feedback_created_at?: string | null
   structured_reply?: StructuredReply
 }
 
@@ -34,7 +37,13 @@ type ChatResponse = {
   model: string
   redactions: string[]
   chat_id?: string
+  assistant_message_id?: string | null
   structured_reply?: StructuredReply | null
+}
+
+type ChatMessageFeedbackRequest = {
+  rating: number
+  comment?: string | null
 }
 
 type RetrievalPreferences = {
@@ -99,6 +108,7 @@ type ThreadDetail = ThreadSummary & {
 }
 
 type LocalThreadMessages = Record<string, Message[]>
+type FeedbackDrafts = Record<string, string>
 
 type Profile = {
   id: string
@@ -110,10 +120,10 @@ type Profile = {
   updated_at?: string | null
 }
 
-type TokenPack = {
+type CreditPack = {
   id: string
   name: string
-  token_amount: number
+  credit_amount: number
   price_gross: number
   currency: string
   description: string
@@ -123,10 +133,40 @@ type AccountResponse = {
   user_id: string
   email?: string | null
   profile: Profile
-  token_balance: number
+  is_admin: boolean
+  credit_balance: number
+  credit_cost_per_query: number
+  credit_unit_price_gross: number
+  credit_currency: string
   stripe_configured: boolean
-  token_packs: TokenPack[]
-  model_token_costs: Record<string, number>
+  credit_packs: CreditPack[]
+}
+
+type AdminGrantCreditsResponse = {
+  user_id: string
+  email?: string | null
+  full_name?: string | null
+  credit_balance: number
+}
+
+type AdminUserSummary = {
+  user_id: string
+  email?: string | null
+  full_name?: string | null
+  law_firm?: string | null
+  credit_balance: number
+  created_at?: string | null
+}
+
+type AdminUsersResponse = {
+  users: AdminUserSummary[]
+}
+
+type CheckoutSessionStatusResponse = {
+  checkout_session_id: string
+  payment_status: string
+  status?: string | null
+  credited: boolean
 }
 
 type AuthMode = 'signin' | 'signup'
@@ -616,9 +656,42 @@ function App() {
   const [retrievalScope, setRetrievalScope] = useState<RetrievalScope>('full_argumentation')
 
   const [account, setAccount] = useState<AccountResponse | null>(null)
-  const [profileDraft, setProfileDraft] = useState({ full_name: '', law_firm: '' })
-  const [isProfileSaving, setIsProfileSaving] = useState(false)
-  const [checkoutBusyPackId, setCheckoutBusyPackId] = useState<string | null>(null)
+  const [checkoutCreditAmount, setCheckoutCreditAmount] = useState('5')
+  const [isCheckoutSubmitting, setIsCheckoutSubmitting] = useState(false)
+  const [adminGrantDraft, setAdminGrantDraft] = useState({ user_email: '', credit_amount: '1', reason: '' })
+  const [isAdminGrantSubmitting, setIsAdminGrantSubmitting] = useState(false)
+  const [adminGrantInfo, setAdminGrantInfo] = useState('')
+  const [adminUsers, setAdminUsers] = useState<AdminUserSummary[]>([])
+  const [isAdminUsersLoading, setIsAdminUsersLoading] = useState(false)
+  const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false)
+  const [feedbackDrafts, setFeedbackDrafts] = useState<FeedbackDrafts>({})
+  const [feedbackSavingMessageId, setFeedbackSavingMessageId] = useState<string | null>(null)
+  const activeWorkspaceRef = useRef({
+    draft: '',
+    hasMessages: false,
+    isSending: false,
+    selectedChatId: null as string | null,
+  })
+
+  useEffect(() => {
+    activeWorkspaceRef.current = {
+      draft,
+      hasMessages: messages.length > 0,
+      isSending,
+      selectedChatId,
+    }
+  }, [draft, isSending, messages.length, selectedChatId])
+
+  async function refreshAdminUsers(activeSession: Session) {
+    const response = await apiFetch('/api/admin/users', activeSession)
+    if (!response.ok) {
+      throw new Error(await readErrorResponse(response))
+    }
+
+    const payload = await response.json() as AdminUsersResponse
+    setAdminUsers(payload.users)
+    return payload.users
+  }
 
   async function fetchPromptHints({
     draftText,
@@ -657,11 +730,42 @@ function App() {
 
     const payload = await response.json() as AccountResponse
     setAccount(payload)
-    setProfileDraft({
-      full_name: payload.profile.full_name ?? '',
-      law_firm: payload.profile.law_firm ?? '',
-    })
     return payload
+  }
+
+  async function reconcileCheckoutReturn(activeSession: Session) {
+    const currentUrl = new URL(window.location.href)
+    const checkoutResult = currentUrl.searchParams.get('checkout')
+    const sessionId = currentUrl.searchParams.get('session_id')
+
+    if (checkoutResult !== 'success' || !sessionId) {
+      if (checkoutResult === 'cancel') {
+        setAuthInfo('Zakup został anulowany.')
+      }
+      return
+    }
+
+    try {
+      const response = await apiFetch(`/api/billing/checkout-session/${encodeURIComponent(sessionId)}`, activeSession)
+      if (!response.ok) {
+        throw new Error(await readErrorResponse(response))
+      }
+
+      const payload = await response.json() as CheckoutSessionStatusResponse
+      await refreshAccount(activeSession)
+
+      if (payload.credited) {
+        setAuthInfo('Płatność zakończona. Kredyty są już dodane do konta.')
+      } else {
+        setAuthInfo('Płatność została przyjęta. Odświeżam saldo konta.')
+      }
+    } catch (checkoutError) {
+      setError(checkoutError instanceof Error ? checkoutError.message : 'Nie udało się potwierdzić płatności Stripe.')
+    } finally {
+      currentUrl.searchParams.delete('checkout')
+      currentUrl.searchParams.delete('session_id')
+      window.history.replaceState({}, document.title, `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`)
+    }
   }
 
   function resetWorkspaceState() {
@@ -679,8 +783,14 @@ function App() {
     setIsHintsLoading(false)
     setHintMode('fallback')
     setAccount(null)
-    setProfileDraft({ full_name: '', law_firm: '' })
+    setCheckoutCreditAmount('5')
+    setAdminGrantDraft({ user_email: '', credit_amount: '1', reason: '' })
+    setAdminGrantInfo('')
+    setAdminUsers([])
+    setIsAdminPanelOpen(false)
     setLastRedactions([])
+    setFeedbackDrafts({})
+    setFeedbackSavingMessageId(null)
   }
 
   useEffect(() => {
@@ -768,7 +878,14 @@ function App() {
             setActiveThreads(threadsPayload.active)
             setArchivedThreads(threadsPayload.archived)
             const firstThread = threadsPayload.active[0] ?? threadsPayload.archived[0]
-            if (firstThread) {
+            const workspace = activeWorkspaceRef.current
+            const canAutoSelectThread = (
+              !workspace.selectedChatId
+              && !workspace.hasMessages
+              && !workspace.draft.trim()
+              && !workspace.isSending
+            )
+            if (firstThread && canAutoSelectThread) {
               setSelectedChatId(firstThread.id)
             }
           }
@@ -776,6 +893,23 @@ function App() {
 
         if (!isCancelled) {
           setAccount(accountPayload)
+        }
+
+        if (!isCancelled) {
+          await reconcileCheckoutReturn(activeSession)
+        }
+
+        if (accountPayload.is_admin) {
+          setIsAdminUsersLoading(true)
+          try {
+            await refreshAdminUsers(activeSession)
+          } finally {
+            if (!isCancelled) {
+              setIsAdminUsersLoading(false)
+            }
+          }
+        } else if (!isCancelled) {
+          setAdminUsers([])
         }
       } catch (bootstrapError) {
         if (!isCancelled) {
@@ -969,6 +1103,50 @@ function App() {
     }
   }
 
+  async function handleAssistantFeedback(messageId: string, payload: ChatMessageFeedbackRequest) {
+    if (!session || !selectedChatId || isLocalThreadId(selectedChatId)) {
+      return
+    }
+
+    setFeedbackSavingMessageId(messageId)
+    setError('')
+
+    try {
+      const response = await apiFetch(`/api/chats/${selectedChatId}/messages/${messageId}/feedback`, session, {
+        method: 'POST',
+        body: JSON.stringify({
+          rating: payload.rating,
+          comment: payload.comment?.trim() || null,
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(await readErrorResponse(response))
+      }
+
+      const savedMessage = await response.json() as Message
+      setMessages((currentMessages) =>
+        currentMessages.map((message) => (message.id === messageId ? { ...message, ...savedMessage } : message)),
+      )
+      setLocalThreadMessages((currentThreads) => {
+        if (!selectedChatId || !currentThreads[selectedChatId]) {
+          return currentThreads
+        }
+
+        return {
+          ...currentThreads,
+          [selectedChatId]: currentThreads[selectedChatId].map((message) =>
+            message.id === messageId ? { ...message, ...savedMessage } : message,
+          ),
+        }
+      })
+    } catch (feedbackError) {
+      setError(feedbackError instanceof Error ? feedbackError.message : 'Nie udało się zapisać oceny odpowiedzi.')
+    } finally {
+      setFeedbackSavingMessageId(null)
+    }
+  }
+
   async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!supabaseBrowserClient) {
@@ -1143,47 +1321,22 @@ function App() {
       })
   }
 
-  async function handleProfileSave(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
+  async function handleCheckout() {
     if (!session) {
       return
     }
 
-    setIsProfileSaving(true)
-    setError('')
+    const normalizedCreditAmount = Math.max(1, Math.min(100000, Number.parseInt(checkoutCreditAmount, 10) || 1))
 
-    try {
-      const response = await apiFetch('/api/account/profile', session, {
-        method: 'PATCH',
-        body: JSON.stringify(profileDraft),
-      })
-
-      if (!response.ok) {
-        throw new Error(await readErrorResponse(response))
-      }
-
-      await refreshAccount(session)
-    } catch (profileError) {
-      setError(profileError instanceof Error ? profileError.message : 'Nie udało się zapisać profilu.')
-    } finally {
-      setIsProfileSaving(false)
-    }
-  }
-
-  async function handleCheckout(pack: TokenPack) {
-    if (!session) {
-      return
-    }
-
-    setCheckoutBusyPackId(pack.id)
+    setIsCheckoutSubmitting(true)
     setError('')
 
     try {
       const response = await apiFetch('/api/billing/checkout-session', session, {
         method: 'POST',
         body: JSON.stringify({
-          pack_id: pack.id,
-          success_url: `${window.location.origin}?checkout=success`,
+          credit_amount: normalizedCreditAmount,
+          success_url: `${window.location.origin}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
           cancel_url: `${window.location.origin}?checkout=cancel`,
         }),
       })
@@ -1197,7 +1350,87 @@ function App() {
     } catch (checkoutError) {
       setError(checkoutError instanceof Error ? checkoutError.message : 'Nie udało się rozpocząć płatności.')
     } finally {
-      setCheckoutBusyPackId(null)
+      setIsCheckoutSubmitting(false)
+    }
+  }
+
+  async function handleAdminGrantCredits(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!session) {
+      return
+    }
+
+    const parsedAmount = Number.parseInt(adminGrantDraft.credit_amount, 10)
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+      setError('Podaj dodatnia liczbe kredytow.')
+      return
+    }
+
+    setIsAdminGrantSubmitting(true)
+    setError('')
+    setAdminGrantInfo('')
+
+    try {
+      const response = await apiFetch('/api/admin/credits/grant', session, {
+        method: 'POST',
+        body: JSON.stringify({
+          user_email: adminGrantDraft.user_email.trim(),
+          credit_amount: parsedAmount,
+          reason: adminGrantDraft.reason.trim() || null,
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(await readErrorResponse(response))
+      }
+
+      const payload = await response.json() as AdminGrantCreditsResponse
+      setAdminGrantInfo(
+        `Przyznano ${parsedAmount} kredytów dla ${payload.email ?? payload.user_id}. Nowe saldo: ${payload.credit_balance}.`,
+      )
+      setAdminGrantDraft({ user_email: '', credit_amount: '1', reason: '' })
+      await refreshAccount(session)
+      await refreshAdminUsers(session)
+    } catch (grantError) {
+      setError(grantError instanceof Error ? grantError.message : 'Nie udało się przyznać kredytów.')
+    } finally {
+      setIsAdminGrantSubmitting(false)
+    }
+  }
+
+  async function handleQuickGrant(user: AdminUserSummary, creditAmount: number) {
+    if (!session) {
+      return
+    }
+
+    setIsAdminGrantSubmitting(true)
+    setError('')
+    setAdminGrantInfo('')
+
+    try {
+      const response = await apiFetch('/api/admin/credits/grant', session, {
+        method: 'POST',
+        body: JSON.stringify({
+          user_email: user.email,
+          credit_amount: creditAmount,
+          reason: `Szybki grant z panelu admina (+${creditAmount})`,
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(await readErrorResponse(response))
+      }
+
+      const payload = await response.json() as AdminGrantCreditsResponse
+      setAdminGrantInfo(
+        `Przyznano ${creditAmount} kredytów dla ${payload.email ?? payload.user_id}. Nowe saldo: ${payload.credit_balance}.`,
+      )
+      await refreshAccount(session)
+      await refreshAdminUsers(session)
+    } catch (grantError) {
+      setError(grantError instanceof Error ? grantError.message : 'Nie udało się przyznać kredytów.')
+    } finally {
+      setIsAdminGrantSubmitting(false)
     }
   }
 
@@ -1270,10 +1503,13 @@ function App() {
 
       const data = await response.json() as ChatResponse
       const assistantMessage = {
-        id: crypto.randomUUID(),
+        id: data.assistant_message_id ?? crypto.randomUUID(),
         role: 'assistant' as const,
         content: data.reply,
         structured_reply: data.structured_reply ?? undefined,
+        feedback_rating: null,
+        feedback_comment: null,
+        feedback_created_at: null,
       }
       const resolvedChatId = data.chat_id ?? pendingChatId
       const now = new Date().toISOString()
@@ -1365,8 +1601,21 @@ function App() {
   const answeredHintCount = Object.keys(intentHintAnswers).length
   const totalHintCount = MAX_HINT_QUESTION_COUNT
   const remainingHintCount = Math.max(totalHintCount - answeredHintCount, 0)
-  const userDisplayName = account?.profile.full_name || session?.user.user_metadata.full_name || session?.user.email || 'Konto'
-  const currentModelCost = account?.model_token_costs[selectedModel] ?? 0
+  const latestAssistantMessageId = [...messages].reverse().find((message) => message.role === 'assistant')?.id ?? null
+  const userDisplayName =
+    account?.profile.full_name
+    || session?.user.user_metadata?.full_name
+    || session?.user.email
+    || 'Konto'
+  const creditCostPerQuery = account?.credit_cost_per_query ?? 1
+  const creditUnitPriceGross = account?.credit_unit_price_gross ?? 200
+  const creditCurrency = account?.credit_currency ?? 'pln'
+  const normalizedCheckoutCreditAmount = Math.max(1, Math.min(100000, Number.parseInt(checkoutCreditAmount, 10) || 1))
+  const checkoutTotalGross = normalizedCheckoutCreditAmount * creditUnitPriceGross
+  const isAdminUser = Boolean(
+    account?.is_admin
+      || session?.user.email?.trim().toLowerCase() === 'stanislawwadolowski123@gmail.com',
+  )
 
   if (!isSupabaseConfigured) {
     return (
@@ -1377,7 +1626,7 @@ function App() {
           <h1>Supabase nie jest jeszcze podpięty</h1>
           <p>
             Uzupełnij `VITE_SUPABASE_URL` i `VITE_SUPABASE_PUBLISHABLE_KEY`, żeby uruchomić logowanie,
-            profile i rozliczanie tokenów.
+            profile i rozliczanie kredytów.
           </p>
         </section>
       </main>
@@ -1406,15 +1655,15 @@ function App() {
             </span>
             <div className="brand-meta">
               <strong>Alitigator</strong>
-              <p>Research podatkowy z kontem użytkownika, historią i pakietami tokenów.</p>
+              <p>Research podatkowy z kontem użytkownika, historią i pakietami kredytów.</p>
             </div>
           </div>
           <div className="hero-copy">
             <p className="eyebrow">Konta i billing</p>
-            <h1>Zaloguj się, żeby pracować na własnym saldzie tokenów</h1>
+            <h1>Zaloguj się, żeby pracować na własnym saldzie kredytów</h1>
             <p>
-              W tej wersji każdy użytkownik ma własny profil, historię wątków i saldo tokenów, które
-              backend rozlicza przed odpowiedzią modelu.
+              W tej wersji każdy użytkownik ma własny profil, historię wątków i saldo kredytów, które
+              backend rozlicza po jednym kredycie za każde zapytanie.
             </p>
           </div>
         </section>
@@ -1595,65 +1844,82 @@ function App() {
           <div className="status-chip status-chip-wide">
             <span className="status-icon"><StatusGlyph kind="account" /></span>
             <span>
-              <strong>{account?.email ?? session.user.email}</strong>
+              {isAdminUser ? (
+                <button
+                  type="button"
+                  className="admin-email-trigger"
+                  onClick={() => setIsAdminPanelOpen((current) => !current)}
+                  aria-expanded={isAdminPanelOpen}
+                >
+                  {account?.email ?? session.user.email}
+                </button>
+              ) : (
+                <strong>{account?.email ?? session.user.email}</strong>
+              )}
               <small>Konto aktywne</small>
             </span>
           </div>
 
-          <form className="profile-form" onSubmit={handleProfileSave}>
-            <label className="profile-field">
-              <span>Imię i nazwisko</span>
-              <input
-                value={profileDraft.full_name}
-                onChange={(event) => setProfileDraft((current) => ({ ...current, full_name: event.target.value }))}
-                placeholder="np. Anna Kowalska"
-              />
-            </label>
-            <label className="profile-field">
-              <span>Kancelaria</span>
-              <input
-                value={profileDraft.law_firm}
-                onChange={(event) => setProfileDraft((current) => ({ ...current, law_firm: event.target.value }))}
-                placeholder="np. Kancelaria Tax & Co"
-              />
-            </label>
-            <button type="submit" className="secondary-button" disabled={isProfileSaving}>
-              {isProfileSaving ? 'Zapisuję…' : 'Zapisz profil'}
-            </button>
-          </form>
-
           <div className="billing-card">
             <div className="billing-card-header">
               <p className="eyebrow">Saldo</p>
-              <strong>{formatTokenCount(account?.token_balance ?? 0)} tokenów</strong>
-              <p>Aktualny koszt wybranego modelu: {formatTokenCount(currentModelCost)} tokenów za odpowiedź.</p>
+              <strong>{formatTokenCount(account?.credit_balance ?? 0)} kredytów</strong>
+              <p>1 kredyt = {formatPrice(creditUnitPriceGross, creditCurrency)}. Każde zapytanie kosztuje {formatTokenCount(creditCostPerQuery)} kredyt.</p>
             </div>
 
-            <div className="billing-pack-list">
-              {(account?.token_packs ?? []).map((pack) => (
+            <div className="billing-purchase-panel">
+              <div className="billing-quantity-row">
                 <button
-                  key={pack.id}
                   type="button"
-                  className="billing-pack"
-                  onClick={() => void handleCheckout(pack)}
-                  disabled={checkoutBusyPackId === pack.id || !account?.stripe_configured}
+                  className="billing-stepper-button"
+                  onClick={() => setCheckoutCreditAmount(String(Math.max(1, normalizedCheckoutCreditAmount - 1)))}
+                  disabled={isCheckoutSubmitting}
                 >
-                  <span>
-                    <strong>{pack.name}</strong>
-                    <small>{formatTokenCount(pack.token_amount)} tokenów</small>
-                  </span>
-                  <span>
-                    <strong>{formatPrice(pack.price_gross, pack.currency)}</strong>
-                    <small>{pack.description}</small>
-                  </span>
+                  -
                 </button>
-              ))}
+                <label className="billing-quantity-field">
+                  <span>Liczba kredytów</span>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    inputMode="numeric"
+                    value={checkoutCreditAmount}
+                    onChange={(event) => setCheckoutCreditAmount(event.target.value)}
+                    disabled={isCheckoutSubmitting}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="billing-stepper-button"
+                  onClick={() => setCheckoutCreditAmount(String(normalizedCheckoutCreditAmount + 1))}
+                  disabled={isCheckoutSubmitting}
+                >
+                  +
+                </button>
+              </div>
+
+              <div className="billing-summary-row">
+                <div>
+                  <strong>{formatTokenCount(normalizedCheckoutCreditAmount)} kredytów</strong>
+                  <small>Stała cena bez pakietów i progów.</small>
+                </div>
+                <strong>{formatPrice(checkoutTotalGross, creditCurrency)}</strong>
+              </div>
+
+              <button
+                type="button"
+                className="secondary-button billing-checkout-button"
+                onClick={() => void handleCheckout()}
+                disabled={isCheckoutSubmitting || !account?.stripe_configured}
+              >
+                {isCheckoutSubmitting ? 'Przekierowuję do Stripe…' : 'Kup kredyty'}
+              </button>
             </div>
 
             {!account?.stripe_configured ? (
               <p className="helper-text small-text">
-                Stripe nie jest jeszcze skonfigurowany po stronie backendu. Katalog pakietów już działa,
-                ale checkout będzie aktywny dopiero po ustawieniu sekretów.
+                Stripe nie jest jeszcze skonfigurowany po stronie backendu. Zakupy będą aktywne po ustawieniu sekretów i webhooka.
               </p>
             ) : null}
           </div>
@@ -1679,8 +1945,8 @@ function App() {
             <div className="status-chip">
               <span className="status-icon"><StatusGlyph kind="credits" /></span>
               <span>
-                <strong>{formatTokenCount(account?.token_balance ?? 0)}</strong>
-                <small>Tokeny</small>
+                <strong>{formatTokenCount(account?.credit_balance ?? 0)}</strong>
+                <small>Kredyty</small>
               </span>
             </div>
             <div className="status-chip">
@@ -1713,10 +1979,58 @@ function App() {
                 <article key={message.id} className={`message message-${message.role}`}>
                   <p className="message-role">{message.role === 'assistant' ? 'aLitigator' : 'Ty'}</p>
                   {message.role === 'assistant' ? (
-                    <AssistantMessageBody
-                      content={message.content}
-                      structuredReply={message.structured_reply}
-                    />
+                    <>
+                      <AssistantMessageBody
+                        content={message.content}
+                        structuredReply={message.structured_reply}
+                      />
+                      {message.feedback_rating ? (
+                        <div className="message-feedback-card">
+                          <p className="message-feedback-label">
+                            Ocena jakości: <strong>{message.feedback_rating}/5</strong>
+                          </p>
+                          {message.feedback_comment ? (
+                            <p className="message-feedback-note">{message.feedback_comment}</p>
+                          ) : null}
+                        </div>
+                      ) : message.id === latestAssistantMessageId ? (
+                        <div className="message-feedback-card">
+                          <div className="message-feedback-header">
+                            <p className="message-feedback-label">Oceń jakość tej odpowiedzi</p>
+                            <small>Pomoże nam poprawiać kolejne odpowiedzi i retrieval.</small>
+                          </div>
+                          <div className="message-feedback-actions" role="group" aria-label="Ocena jakości odpowiedzi">
+                            {[1, 2, 3, 4, 5].map((rating) => (
+                              <button
+                                key={rating}
+                                type="button"
+                                className="message-feedback-score"
+                                disabled={feedbackSavingMessageId === message.id}
+                                onClick={() => void handleAssistantFeedback(message.id, {
+                                  rating,
+                                  comment: feedbackDrafts[message.id] ?? '',
+                                })}
+                              >
+                                {rating}
+                              </button>
+                            ))}
+                          </div>
+                          <label className="message-feedback-comment">
+                            <span>Komentarz opcjonalny</span>
+                            <textarea
+                              value={feedbackDrafts[message.id] ?? ''}
+                              onChange={(event) => setFeedbackDrafts((currentDrafts) => ({
+                                ...currentDrafts,
+                                [message.id]: event.target.value,
+                              }))}
+                              rows={3}
+                              maxLength={1200}
+                              placeholder="Co było trafne, czego zabrakło, co było za mało precyzyjne?"
+                            />
+                          </label>
+                        </div>
+                      ) : null}
+                    </>
                   ) : (
                     <p className="message-content">{message.content}</p>
                   )}
@@ -1768,8 +2082,8 @@ function App() {
               <div className="status-chip">
                 <span className="status-icon"><StatusGlyph kind="credits" /></span>
                 <span>
-                  <strong>{formatTokenCount(currentModelCost)}</strong>
-                  <small>Koszt odpowiedzi</small>
+                  <strong>{formatTokenCount(creditCostPerQuery)}</strong>
+                  <small>Kredyt / zapytanie</small>
                 </span>
               </div>
             </div>
@@ -1852,7 +2166,7 @@ function App() {
 
             <div className="composer-actions">
               <p className="helper-text small-text">
-                Odpowiedź zostanie rozliczona na koncie po stronie backendu według cennika modelu.
+                Kazde wyslane zapytanie pobiera z konta 1 kredyt po stronie backendu.
               </p>
               <button type="submit" className="submit-button" disabled={isSending || isSidebarBusy}>
                 {isSending ? 'Analizuję…' : 'Wyślij'}
@@ -1862,6 +2176,151 @@ function App() {
           <p className="helper-text small-text app-version-footer">Wersja {APP_VERSION}</p>
         </footer>
       </section>
+
+      {isAdminUser && isAdminPanelOpen ? (
+        <div className="admin-panel-overlay" role="dialog" aria-modal="true" aria-label="Panel administratora">
+          <section className="admin-panel-modal">
+            <div className="admin-panel-header">
+              <div className="admin-panel-heading">
+                <p className="eyebrow">Admin</p>
+                <h2>Panel kredytów</h2>
+                <p className="admin-panel-intro">
+                  Podgląd salda użytkowników i ręczne przyznawanie kredytów bez checkoutu.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => setIsAdminPanelOpen(false)}
+              >
+                Zamknij
+              </button>
+            </div>
+
+            {adminGrantInfo ? <p className="helper-text helper-text-positive">{adminGrantInfo}</p> : null}
+
+            <div className="admin-panel-grid">
+              <div className="admin-panel-section">
+                <div className="admin-panel-section-header">
+                  <div>
+                    <p className="eyebrow">Użytkownicy</p>
+                    <h3>Zarejestrowane konta</h3>
+                  </div>
+                  <span className="admin-panel-badge">{adminUsers.length}</span>
+                </div>
+
+                <div className="admin-user-list">
+                  {isAdminUsersLoading ? (
+                    <div className="admin-empty-state">
+                      <p className="helper-text small-text">Wczytuję użytkowników…</p>
+                    </div>
+                  ) : null}
+                  {!isAdminUsersLoading && adminUsers.length === 0 ? (
+                    <div className="admin-empty-state">
+                      <p className="helper-text small-text">Brak użytkowników do wyświetlenia.</p>
+                    </div>
+                  ) : null}
+                  {adminUsers.map((user) => (
+                    <article key={user.user_id} className="admin-user-card">
+                      <div className="admin-user-copy">
+                        <strong>{user.full_name || user.email || user.user_id}</strong>
+                        <small>{user.email || 'Brak e-maila'}</small>
+                        <small>{user.law_firm || 'Bez kancelarii'}</small>
+                      </div>
+                      <div className="admin-user-balance">
+                        <strong>{formatTokenCount(user.credit_balance)}</strong>
+                        <small>kredytów</small>
+                      </div>
+                      <div className="admin-user-actions">
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={isAdminGrantSubmitting || !user.email}
+                          onClick={() => void handleQuickGrant(user, 1)}
+                        >
+                          +1
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={isAdminGrantSubmitting || !user.email}
+                          onClick={() => void handleQuickGrant(user, 5)}
+                        >
+                          +5
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={isAdminGrantSubmitting || !user.email}
+                          onClick={() => void handleQuickGrant(user, 10)}
+                        >
+                          +10
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          disabled={isAdminGrantSubmitting || !user.email}
+                          onClick={() => setAdminGrantDraft((current) => ({
+                            ...current,
+                            user_email: user.email ?? current.user_email,
+                          }))}
+                        >
+                          Własna kwota
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </div>
+
+              <div className="admin-panel-section admin-panel-section-form">
+                <div className="admin-panel-section-header">
+                  <div>
+                    <p className="eyebrow">Akcja</p>
+                    <h3>Przyznaj kredyty</h3>
+                  </div>
+                  <span className="admin-panel-badge admin-panel-badge-accent">Manual</span>
+                </div>
+
+                <form className="admin-grant-form" onSubmit={handleAdminGrantCredits}>
+                  <label className="profile-field">
+                    <span>E-mail użytkownika</span>
+                    <input
+                      type="email"
+                      value={adminGrantDraft.user_email}
+                      onChange={(event) => setAdminGrantDraft((current) => ({ ...current, user_email: event.target.value }))}
+                      placeholder="anna@kancelaria.pl"
+                      required
+                    />
+                  </label>
+                  <label className="profile-field">
+                    <span>Liczba kredytów</span>
+                    <input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={adminGrantDraft.credit_amount}
+                      onChange={(event) => setAdminGrantDraft((current) => ({ ...current, credit_amount: event.target.value }))}
+                      required
+                    />
+                  </label>
+                  <label className="profile-field">
+                    <span>Powód</span>
+                    <input
+                      value={adminGrantDraft.reason}
+                      onChange={(event) => setAdminGrantDraft((current) => ({ ...current, reason: event.target.value }))}
+                      placeholder="np. grant testowy / reklamacja"
+                    />
+                  </label>
+                  <button type="submit" className="secondary-button" disabled={isAdminGrantSubmitting}>
+                    {isAdminGrantSubmitting ? 'Przyznaję…' : 'Przyznaj kredyty'}
+                  </button>
+                </form>
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   )
 }

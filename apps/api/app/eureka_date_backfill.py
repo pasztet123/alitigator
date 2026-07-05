@@ -54,15 +54,19 @@ def parse_iso_date(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
-def iter_dates(start: date, end: date) -> list[str]:
-    if start > end:
+def iter_dates(start: date, end: date, *, descending: bool = False) -> list[str]:
+    if not descending and start > end:
         raise ValueError("start date must be less than or equal to end date")
+    if descending and start < end:
+        raise ValueError("for descending mode start date must be greater than or equal to end date")
 
     current = start
     values: list[str] = []
-    while current <= end:
+    step = -1 if descending else 1
+    comparator = (lambda current_date: current_date >= end) if descending else (lambda current_date: current_date <= end)
+    while comparator(current):
         values.append(current.isoformat())
-        current += timedelta(days=1)
+        current += timedelta(days=step)
     return values
 
 
@@ -86,6 +90,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state-path", default=str(DEFAULT_STATE_PATH))
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--overwrite-state", action="store_true")
+    parser.add_argument("--descending", action="store_true")
     parser.add_argument("--allow-failed-details", action="store_true")
     parser.add_argument("--stop-on-empty-page", action="store_true", default=True)
     parser.add_argument("--skip-error-dates", action="store_true")
@@ -95,7 +100,7 @@ def parse_args() -> argparse.Namespace:
 async def run_backfill(args: argparse.Namespace) -> dict[str, Any]:
     start_date = parse_iso_date(args.start_date)
     end_date = parse_iso_date(args.end_date)
-    all_dates = iter_dates(start_date, end_date)
+    all_dates = iter_dates(start_date, end_date, descending=args.descending)
 
     base_config = FetchConfig(
         page_size=max(1, args.page_size),

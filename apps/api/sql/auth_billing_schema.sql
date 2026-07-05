@@ -101,6 +101,37 @@ before update on public.credit_orders
 for each row
 execute function public.touch_updated_at();
 
+create table if not exists public.chat_threads (
+    id uuid primary key default gen_random_uuid(),
+    title text not null default 'Nowy wątek',
+    archived boolean not null default false,
+    last_message_preview text not null default '',
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    user_id uuid references auth.users(id) on delete cascade
+);
+
+create table if not exists public.chat_messages (
+    id uuid primary key default gen_random_uuid(),
+    chat_id uuid not null references public.chat_threads(id) on delete cascade,
+    role text not null check (role in ('user', 'assistant')),
+    content text not null,
+    feedback_rating smallint check (feedback_rating between 1 and 5),
+    feedback_comment text,
+    feedback_created_at timestamptz,
+    created_at timestamptz not null default now()
+);
+
+alter table if exists public.chat_messages add column if not exists feedback_rating smallint;
+alter table if exists public.chat_messages add column if not exists feedback_comment text;
+alter table if exists public.chat_messages add column if not exists feedback_created_at timestamptz;
+
+alter table if exists public.chat_messages
+    drop constraint if exists chat_messages_feedback_rating_check;
+alter table if exists public.chat_messages
+    add constraint chat_messages_feedback_rating_check
+    check (feedback_rating is null or feedback_rating between 1 and 5);
+
 alter table if exists public.chat_threads add column if not exists user_id uuid references auth.users(id) on delete cascade;
 alter table if exists public.chat_threads add column if not exists archived boolean not null default false;
 alter table if exists public.chat_threads add column if not exists last_message_preview text not null default '';
@@ -109,6 +140,12 @@ alter table if exists public.chat_threads add column if not exists updated_at ti
 
 create index if not exists chat_threads_user_id_updated_at_idx
 on public.chat_threads(user_id, updated_at desc);
+create index if not exists chat_threads_updated_at_idx
+on public.chat_threads(updated_at desc);
+create index if not exists chat_threads_archived_updated_at_idx
+on public.chat_threads(archived, updated_at desc);
+create index if not exists chat_messages_chat_id_created_at_idx
+on public.chat_messages(chat_id, created_at asc);
 
 alter table if exists public.profiles enable row level security;
 alter table if exists public.credit_ledger enable row level security;

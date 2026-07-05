@@ -189,8 +189,21 @@ create table if not exists public.chat_messages (
     chat_id uuid not null references public.chat_threads(id) on delete cascade,
     role text not null check (role in ('user', 'assistant')),
     content text not null,
+    feedback_rating smallint check (feedback_rating between 1 and 5),
+    feedback_comment text,
+    feedback_created_at timestamptz,
     created_at timestamptz not null default now()
 );
+
+alter table if exists public.chat_messages add column if not exists feedback_rating smallint;
+alter table if exists public.chat_messages add column if not exists feedback_comment text;
+alter table if exists public.chat_messages add column if not exists feedback_created_at timestamptz;
+
+alter table if exists public.chat_messages
+    drop constraint if exists chat_messages_feedback_rating_check;
+alter table if exists public.chat_messages
+    add constraint chat_messages_feedback_rating_check
+    check (feedback_rating is null or feedback_rating between 1 and 5);
 
 create index if not exists chat_threads_updated_at_idx on public.chat_threads(updated_at desc);
 create index if not exists chat_threads_archived_updated_at_idx on public.chat_threads(archived, updated_at desc);

@@ -42,13 +42,13 @@ Ta wersja zawiera:
 
 - logowanie i rejestrację przez Supabase Auth
 - profile użytkowników i historię wątków przypisaną do `user_id`
-- ledger tokenów po stronie backendu
-- przygotowany checkout Stripe do sprzedaży doładowań tokenów
+- ledger kredytów po stronie backendu
+- przygotowany checkout Stripe do sprzedaży doładowań kredytów
 - backendowy proxy do Claude
 - podstawowe maskowanie danych wrażliwych
 - RAG lokalny i opcjonalny storage w Supabase
 
-## Konta, tokeny i Stripe
+## Konta, kredyty i Stripe
 
 Nowy schemat pod konta i billing znajduje się w:
 
@@ -68,11 +68,12 @@ Backend udostępnia teraz:
 - `PATCH /api/account/profile`
 - `POST /api/billing/checkout-session`
 - `POST /api/billing/webhooks/stripe`
+- `POST /api/admin/credits/grant`
 
 Ważne założenie MVP:
 
-- sprzedajemy pakiety tokenów, a backend rozlicza odpowiedź modelu stałą stawką per model z `ALITIGATOR_MODEL_TOKEN_COSTS_JSON`
-- to jest warstwa billingowa gotowa pod Stripe i konto użytkownika; dokładne meteringi input/output tokenów można dołożyć później bez przebudowy schematu
+- sprzedajemy pakiety kredytów, a backend rozlicza każde zapytanie stałą stawką `ALITIGATOR_CREDIT_COST_PER_QUERY`
+- to jest warstwa billingowa gotowa pod Stripe i konto użytkownika; dokładniejsze meteringi można dołożyć później bez przebudowy podstawowego flow
 
 ### Konfiguracja Supabase i Stripe
 
@@ -81,6 +82,7 @@ Ważne założenie MVP:
 2. Ustaw backendowe sekrety w `apps/api/.env`:
    - `SUPABASE_URL`
    - `SUPABASE_SECRET_KEY`
+   - opcjonalnie `ALITIGATOR_ADMIN_EMAILS=admin@twojadomena.pl`
    - `STRIPE_SECRET_KEY`
    - `STRIPE_WEBHOOK_SECRET`
    - `ALITIGATOR_STRIPE_SUCCESS_URL`
@@ -88,13 +90,21 @@ Ważne założenie MVP:
 3. Ustaw frontend:
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_PUBLISHABLE_KEY`
-4. Dostosuj katalog pakietów i cennik modeli:
-   - `ALITIGATOR_TOKEN_PACKS_JSON`
-   - `ALITIGATOR_MODEL_TOKEN_COSTS_JSON`
+4. Ustaw cenę kredytów:
+   - `ALITIGATOR_CREDIT_UNIT_PRICE_GROSS` (domyślnie `200`, czyli 2,00 zł za 1 kredyt)
+   - `ALITIGATOR_CREDIT_CURRENCY` (domyślnie `pln`)
+   - opcjonalnie `ALITIGATOR_CREDIT_PACKS_JSON` dla starszych klientów korzystających z pakietów
+   - `ALITIGATOR_CREDIT_COST_PER_QUERY`
 
 Stripe webhook powinien wskazywać na:
 
 - `POST /api/billing/webhooks/stripe`
+
+Ręczne granty kredytów:
+
+- backend traktuje użytkownika jako admina, jeśli jego e-mail jest na liście `ALITIGATOR_ADMIN_EMAILS`
+- admin może przyznać kredyty bez Stripe przez `POST /api/admin/credits/grant`
+- w UI pojawia się wtedy prosty formularz do dopisywania kredytów po e-mailu użytkownika
 
 ### Lokalny webhook przez Stripe CLI
 

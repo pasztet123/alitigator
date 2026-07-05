@@ -38,6 +38,8 @@ def main() -> int:
     parser.add_argument("--truncate", action="store_true")
     parser.add_argument("--document-batch-size", type=int, default=500)
     parser.add_argument("--chunk-batch-size", type=int, default=2000)
+    parser.add_argument("--progress-every-documents", type=int, default=100)
+    parser.add_argument("--start-after-document-id", default="")
     parser.add_argument("--rebuild-indexes", action="store_true", default=True)
     args = parser.parse_args()
 
@@ -76,10 +78,18 @@ def main() -> int:
             mysql_connection_handle.commit()
 
             sqlite_documents = sqlite_connection.cursor()
-            sqlite_documents.execute("SELECT * FROM documents ORDER BY document_id")
+            start_after_document_id = args.start_after_document_id.strip()
+            if start_after_document_id:
+                sqlite_documents.execute(
+                    "SELECT * FROM documents WHERE document_id > ? ORDER BY document_id",
+                    (start_after_document_id,),
+                )
+            else:
+                sqlite_documents.execute("SELECT * FROM documents ORDER BY document_id")
 
             migrated_documents = 0
             migrated_chunks = 0
+            progress_documents = 0
             while True:
                 document_rows = sqlite_documents.fetchmany(args.document_batch_size)
                 if not document_rows:
@@ -158,66 +168,70 @@ def main() -> int:
                 mysql_connection_handle.commit()
                 migrated_documents += len(document_rows)
 
-                document_ids = [row["document_id"] for row in document_rows]
-                placeholders = ", ".join("?" for _ in document_ids)
-                sqlite_chunks = sqlite_connection.cursor()
-                sqlite_chunks.execute(
-                    f"""
-                    SELECT c.chunk_id, c.document_id, c.chunk_index, c.chunk_text, c.chunk_chars, d.*
-                    FROM chunks c
-                    JOIN documents d ON d.document_id = c.document_id
-                    WHERE c.document_id IN ({placeholders})
-                    ORDER BY c.document_id, c.chunk_index
-                    """,
-                    document_ids,
-                )
-
-                while True:
-                    chunk_rows = sqlite_chunks.fetchmany(args.chunk_batch_size)
-                    if not chunk_rows:
-                        break
-                    mysql_cursor.executemany(
-                        f"""
-                        INSERT INTO `{chunks_table}` (
-                            chunk_id, document_id, chunk_index, chunk_text, chunk_chars,
-                            search_text, question_text, facts_text, tax_domain
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON DUPLICATE KEY UPDATE
-                            document_id = VALUES(document_id),
-                            chunk_index = VALUES(chunk_index),
-                            chunk_text = VALUES(chunk_text),
-                            chunk_chars = VALUES(chunk_chars),
-                            search_text = VALUES(search_text),
-                            question_text = VALUES(question_text),
-                            facts_text = VALUES(facts_text),
-                            tax_domain = VALUES(tax_domain)
+                for document_row in document_rows:
+                    sqlite_chunks = sqlite_connection.cursor()
+                    sqlite_chunks.execute(
+                        """
+                        SELECT c.chunk_id, c.document_id, c.chunk_index, c.chunk_text, c.chunk_chars, d.*
+                        FROM chunks c
+                        JOIN documents d ON d.document_id = c.document_id
+                        WHERE c.document_id = ?
+                        ORDER BY c.chunk_index
                         """,
-                        [
-                            (
-                                row["chunk_id"],
-                                row["document_id"],
-                                row["chunk_index"],
-                                row["chunk_text"],
-                                row["chunk_chars"],
-                                build_search_text(row, row["chunk_text"]),
-                                row["question_text"],
-                                row["facts_text"],
-                                row["tax_domain"],
-                            )
-                            for row in chunk_rows
-                        ],
+                        (document_row["document_id"],),
                     )
-                    mysql_connection_handle.commit()
-                    migrated_chunks += len(chunk_rows)
 
-                print(
-                    {
-                        "documents_migrated": migrated_documents,
-                        "chunks_migrated": migrated_chunks,
-                        "last_document_id": document_ids[-1],
-                    },
-                    flush=True,
-                )
+                    while True:
+                        chunk_rows = sqlite_chunks.fetchmany(args.chunk_batch_size)
+                        if not chunk_rows:
+                            break
+                        mysql_cursor.executemany(
+                            f"""
+                            INSERT INTO `{chunks_table}` (
+                                chunk_id, document_id, chunk_index, chunk_text, chunk_chars,
+                                search_text, question_text, facts_text, tax_domain
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ON DUPLICATE KEY UPDATE
+                                document_id = VALUES(document_id),
+                                chunk_index = VALUES(chunk_index),
+                                chunk_text = VALUES(chunk_text),
+                                chunk_chars = VALUES(chunk_chars),
+                                search_text = VALUES(search_text),
+                                question_text = VALUES(question_text),
+                                facts_text = VALUES(facts_text),
+                                tax_domain = VALUES(tax_domain)
+                            """,
+                            [
+                                (
+                                    row["chunk_id"],
+                                    row["document_id"],
+                                    row["chunk_index"],
+                                    row["chunk_text"],
+                                    row["chunk_chars"],
+                                    build_search_text(row, row["chunk_text"]),
+                                    row["question_text"],
+                                    row["facts_text"],
+                                    row["tax_domain"],
+                                )
+                                for row in chunk_rows
+                            ],
+                        )
+                        mysql_connection_handle.commit()
+                        migrated_chunks += len(chunk_rows)
+
+                    progress_documents += 1
+                    if (
+                        args.progress_every_documents > 0
+                        and progress_documents % args.progress_every_documents == 0
+                    ):
+                        print(
+                            {
+                                "documents_migrated": migrated_documents,
+                                "chunks_migrated": migrated_chunks,
+                                "last_document_id": document_row["document_id"],
+                            },
+                            flush=True,
+                        )
 
             print("Rebuilding chunk indexes...", flush=True)
             for statement in (

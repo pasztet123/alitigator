@@ -8,6 +8,7 @@ from typing import Any, Optional
 from datetime import datetime, timezone
 from uuid import uuid4
 
+import httpx
 from fastapi import HTTPException
 from postgrest.exceptions import APIError
 
@@ -16,47 +17,44 @@ from app.supabase_client import get_supabase_service_client
 
 
 @dataclass(frozen=True)
-class TokenPack:
+class CreditPack:
     id: str
     name: str
-    token_amount: int
+    credit_amount: int
     price_gross: int
     currency: str
     description: str
 
 
-DEFAULT_TOKEN_PACKS = [
+DEFAULT_CREDIT_PACKS = [
     {
-        "id": "starter-25k",
-        "name": "Starter 25k",
-        "token_amount": 25000,
-        "price_gross": 4900,
+        "id": "solo-1",
+        "name": "1 kredyt",
+        "credit_amount": 1,
+        "price_gross": 200,
         "currency": "pln",
-        "description": "Pakiet startowy do pojedynczych researchy i konsultacji.",
+        "description": "1 kredyt do wykorzystania w aplikacji.",
     },
     {
-        "id": "pro-120k",
-        "name": "Pro 120k",
-        "token_amount": 120000,
-        "price_gross": 19900,
+        "id": "mini-5",
+        "name": "5 kredytow",
+        "credit_amount": 5,
+        "price_gross": 1000,
         "currency": "pln",
-        "description": "Najlepszy do regularnej pracy zespolu kancelarii.",
+        "description": "5 kredytow do wykorzystania w aplikacji.",
     },
     {
-        "id": "team-350k",
-        "name": "Team 350k",
-        "token_amount": 350000,
-        "price_gross": 49900,
+        "id": "pro-20",
+        "name": "20 kredytow",
+        "credit_amount": 20,
+        "price_gross": 4000,
         "currency": "pln",
-        "description": "Wiekszy zapas do intensywnej pracy nad opiniami i pismami.",
+        "description": "20 kredytow do wykorzystania w aplikacji.",
     },
 ]
-
-DEFAULT_MODEL_TOKEN_COSTS = {
-    "claude-haiku-4-5-20251001": 2500,
-    "claude-sonnet-4-6": 9000,
-    "claude-opus-4-8": 18000,
-}
+DEFAULT_CREDIT_COST_PER_QUERY = 1
+DEFAULT_CREDIT_UNIT_PRICE_GROSS = 200
+DEFAULT_CREDIT_CURRENCY = "pln"
 
 
 def _parse_json_env(name: str, fallback: Any) -> Any:
@@ -71,15 +69,19 @@ def _parse_json_env(name: str, fallback: Any) -> Any:
 
 
 @lru_cache(maxsize=1)
-def get_token_packs() -> list[TokenPack]:
-    parsed = _parse_json_env("ALITIGATOR_TOKEN_PACKS_JSON", DEFAULT_TOKEN_PACKS)
-    packs: list[TokenPack] = []
+def get_credit_packs() -> list[CreditPack]:
+    parsed = _parse_json_env(
+        "ALITIGATOR_CREDIT_PACKS_JSON",
+        _parse_json_env("ALITIGATOR_TOKEN_PACKS_JSON", DEFAULT_CREDIT_PACKS),
+    )
+    packs: list[CreditPack] = []
     for item in parsed:
+        credit_amount = item.get("credit_amount", item.get("token_amount"))
         packs.append(
-            TokenPack(
+            CreditPack(
                 id=str(item["id"]).strip(),
                 name=str(item["name"]).strip(),
-                token_amount=max(1, int(item["token_amount"])),
+                credit_amount=max(1, int(credit_amount)),
                 price_gross=max(1, int(item["price_gross"])),
                 currency=str(item.get("currency", "pln")).strip().lower() or "pln",
                 description=str(item.get("description", "")).strip(),
@@ -89,21 +91,38 @@ def get_token_packs() -> list[TokenPack]:
     return packs
 
 
-@lru_cache(maxsize=1)
-def get_model_token_costs() -> dict[str, int]:
-    parsed = _parse_json_env("ALITIGATOR_MODEL_TOKEN_COSTS_JSON", DEFAULT_MODEL_TOKEN_COSTS)
-    return {str(model): max(0, int(cost)) for model, cost in parsed.items()}
+def get_credit_cost_per_query() -> int:
+    return max(1, int(os.getenv("ALITIGATOR_CREDIT_COST_PER_QUERY", str(DEFAULT_CREDIT_COST_PER_QUERY))))
 
 
-def get_model_token_cost(model: str) -> int:
-    return get_model_token_costs().get(model, get_model_token_costs().get("claude-sonnet-4-6", 9000))
+def get_credit_unit_price_gross() -> int:
+    return max(1, int(os.getenv("ALITIGATOR_CREDIT_UNIT_PRICE_GROSS", str(DEFAULT_CREDIT_UNIT_PRICE_GROSS))))
 
 
-def find_token_pack(pack_id: str) -> TokenPack:
-    for pack in get_token_packs():
+def get_credit_currency() -> str:
+    currency = str(os.getenv("ALITIGATOR_CREDIT_CURRENCY", DEFAULT_CREDIT_CURRENCY)).strip().lower()
+    return currency or DEFAULT_CREDIT_CURRENCY
+
+
+def find_credit_pack(pack_id: str) -> CreditPack:
+    for pack in get_credit_packs():
         if pack.id == pack_id:
             return pack
-    raise HTTPException(status_code=404, detail="Nie znaleziono wybranego pakietu tokenow.")
+    raise HTTPException(status_code=404, detail="Nie znaleziono wybranego pakietu kredytow.")
+
+
+def build_credit_pack_for_amount(credit_amount: int) -> CreditPack:
+    normalized_credit_amount = max(1, int(credit_amount))
+    price_gross = normalized_credit_amount * get_credit_unit_price_gross()
+    suffix = "kredyt" if normalized_credit_amount == 1 else "kredytow"
+    return CreditPack(
+        id=f"custom-{normalized_credit_amount}",
+        name=f"{normalized_credit_amount} {suffix}",
+        credit_amount=normalized_credit_amount,
+        price_gross=price_gross,
+        currency=get_credit_currency(),
+        description=f"{normalized_credit_amount} {suffix} do wykorzystania w aplikacji.",
+    )
 
 
 def is_stripe_configured() -> bool:
@@ -133,6 +152,79 @@ def require_supabase_client():
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _get_supabase_auth_admin_config() -> tuple[str, str]:
+    supabase_url = str(os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
+    supabase_secret_key = str(os.getenv("SUPABASE_SECRET_KEY") or "").strip()
+    if not supabase_url or not supabase_secret_key:
+        raise HTTPException(status_code=503, detail="Supabase auth nie jest skonfigurowany.")
+    return supabase_url, supabase_secret_key
+
+
+def _list_auth_users() -> list[dict[str, Any]]:
+    supabase_url, supabase_secret_key = _get_supabase_auth_admin_config()
+    users: list[dict[str, Any]] = []
+    page = 1
+    per_page = 200
+
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            while True:
+                response = client.get(
+                    f"{supabase_url}/auth/v1/admin/users",
+                    params={"page": page, "per_page": per_page},
+                    headers={
+                        "apikey": supabase_secret_key,
+                        "Authorization": f"Bearer {supabase_secret_key}",
+                    },
+                )
+                if response.status_code >= 400:
+                    raise HTTPException(
+                        status_code=502,
+                        detail="Supabase auth zwrocil blad podczas pobierania listy uzytkownikow.",
+                    )
+
+                payload = response.json()
+                page_users = payload.get("users") if isinstance(payload, dict) else None
+                if not isinstance(page_users, list):
+                    break
+
+                users.extend(user for user in page_users if isinstance(user, dict))
+                if len(page_users) < per_page:
+                    break
+                page += 1
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Nie udalo sie pobrac listy uzytkownikow z Supabase auth.",
+        ) from exc
+
+    return users
+
+
+def _upsert_profile_from_auth_payload(auth_user: dict[str, Any]) -> Optional[dict[str, Any]]:
+    user_id = str(auth_user.get("id") or "").strip()
+    email = str(auth_user.get("email") or "").strip() or None
+    if not user_id:
+        return None
+
+    metadata = auth_user.get("user_metadata") or {}
+    full_name = metadata.get("full_name")
+    client = require_supabase_client()
+    try:
+        response = client.table("profiles").upsert(
+            {
+                "id": user_id,
+                "email": email,
+                "full_name": str(full_name).strip() if full_name else None,
+            }
+        ).execute()
+    except APIError as exc:
+        _raise_supabase_http_error(exc)
+
+    rows = response.data or []
+    return rows[0] if rows else None
 
 
 def _raise_supabase_http_error(exc: APIError) -> None:
@@ -194,6 +286,42 @@ def get_profile(user_id: str) -> dict[str, Any]:
     return rows[0]
 
 
+def get_profile_by_email(email: str) -> dict[str, Any]:
+    normalized_email = email.strip().lower()
+    if not normalized_email:
+        raise HTTPException(status_code=400, detail="E-mail uzytkownika jest wymagany.")
+
+    client = require_supabase_client()
+    try:
+        response = (
+            client.table("profiles")
+            .select("*")
+            .ilike("email", normalized_email)
+            .limit(1)
+            .execute()
+        )
+    except APIError as exc:
+        _raise_supabase_http_error(exc)
+
+    rows = response.data or []
+    if rows:
+        return rows[0]
+
+    for auth_user in _list_auth_users():
+        auth_email = str(auth_user.get("email") or "").strip().lower()
+        if auth_email != normalized_email:
+            continue
+
+        profile = _upsert_profile_from_auth_payload(auth_user)
+        if profile:
+            return profile
+        break
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="Nie znaleziono uzytkownika o podanym e-mailu.")
+    return rows[0]
+
+
 def update_profile(user_id: str, *, full_name: Optional[str], law_firm: Optional[str]) -> dict[str, Any]:
     client = require_supabase_client()
     payload = {
@@ -211,12 +339,17 @@ def update_profile(user_id: str, *, full_name: Optional[str], law_firm: Optional
     return rows[0]
 
 
-def get_token_balance(user_id: str) -> int:
+def get_credit_balance(user_id: str) -> int:
     client = require_supabase_client()
     try:
         response = client.table("credit_ledger").select("amount").eq("user_id", user_id).execute()
     except APIError as exc:
         _raise_supabase_http_error(exc)
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Supabase billing jest chwilowo niedostepny.",
+        ) from exc
     rows = response.data or []
     return sum(int(row.get("amount") or 0) for row in rows)
 
@@ -259,32 +392,146 @@ def create_ledger_entry(
     return rows[0] if rows else None
 
 
-def ensure_sufficient_tokens(user_id: str, required_tokens: int) -> None:
-    if required_tokens <= 0:
+def grant_credits_to_user(
+    *,
+    admin_user: AuthenticatedUser,
+    target_email: str,
+    credit_amount: int,
+    reason: Optional[str] = None,
+) -> dict[str, Any]:
+    if credit_amount <= 0:
+        raise HTTPException(status_code=400, detail="Liczba kredytow musi byc dodatnia.")
+
+    target_profile = get_profile_by_email(target_email)
+    target_user_id = str(target_profile["id"])
+    entry = create_ledger_entry(
+        user_id=target_user_id,
+        amount=credit_amount,
+        entry_type="adjustment",
+        source_type="admin_grant",
+        source_id=str(uuid4()),
+        description=reason.strip() if reason and reason.strip() else f"Grant admina od {admin_user.email or admin_user.id}",
+        metadata={
+            "granted_by_user_id": admin_user.id,
+            "granted_by_email": admin_user.email,
+            "target_email": target_profile.get("email"),
+            "reason": reason.strip() if reason else None,
+        },
+    )
+    return {
+        "profile": target_profile,
+        "credit_balance": get_credit_balance(target_user_id),
+        "ledger_entry": entry,
+    }
+
+
+def list_profiles_with_credit_balances() -> list[dict[str, Any]]:
+    client = require_supabase_client()
+
+    try:
+        profiles_response = client.table("profiles").select("*").order("created_at", desc=False).execute()
+    except APIError as exc:
+        _raise_supabase_http_error(exc)
+
+    try:
+        ledger_response = client.table("credit_ledger").select("user_id,amount").execute()
+    except APIError as exc:
+        message = str(getattr(exc, "message", "") or "")
+        code = str(getattr(exc, "code", "") or "")
+        details = str(getattr(exc, "details", "") or "")
+        hint = str(getattr(exc, "hint", "") or "")
+        combined = " ".join(part for part in [message, details, hint] if part).lower()
+        if code == "PGRST205" or "could not find the table" in combined:
+            ledger_rows = []
+        else:
+            _raise_supabase_http_error(exc)
+            ledger_rows = []
+
+    profiles = profiles_response.data or []
+    if "ledger_rows" not in locals():
+        ledger_rows = ledger_response.data or []
+    auth_users = _list_auth_users()
+    balances: dict[str, int] = {}
+    for row in ledger_rows:
+        user_id = str(row.get("user_id") or "").strip()
+        if not user_id:
+            continue
+        balances[user_id] = balances.get(user_id, 0) + int(row.get("amount") or 0)
+
+    profiles_by_id = {
+        str(profile.get("id") or "").strip(): profile
+        for profile in profiles
+        if str(profile.get("id") or "").strip()
+    }
+    result: list[dict[str, Any]] = []
+    seen_user_ids: set[str] = set()
+
+    for auth_user in auth_users:
+        user_id = str(auth_user.get("id") or "").strip()
+        if not user_id:
+            continue
+
+        profile = profiles_by_id.get(user_id, {})
+        metadata = auth_user.get("user_metadata") or {}
+        seen_user_ids.add(user_id)
+        result.append(
+            {
+                **profile,
+                "id": user_id,
+                "email": profile.get("email") or auth_user.get("email"),
+                "full_name": profile.get("full_name") or metadata.get("full_name"),
+                "created_at": profile.get("created_at") or auth_user.get("created_at"),
+                "credit_balance": balances.get(user_id, 0),
+            }
+        )
+
+    for profile in profiles:
+        user_id = str(profile.get("id") or "").strip()
+        if not user_id or user_id in seen_user_ids:
+            continue
+        result.append(
+            {
+                **profile,
+                "credit_balance": balances.get(user_id, 0),
+            }
+        )
+
+    result.sort(
+        key=lambda profile: (
+            str(profile.get("created_at") or ""),
+            str(profile.get("email") or ""),
+            str(profile.get("id") or ""),
+        )
+    )
+    return result
+
+
+def ensure_sufficient_credits(user_id: str, required_credits: int) -> None:
+    if required_credits <= 0:
         return
 
-    balance = get_token_balance(user_id)
-    if balance < required_tokens:
+    balance = get_credit_balance(user_id)
+    if balance < required_credits:
         raise HTTPException(
             status_code=402,
             detail=(
-                f"Za malo tokenow. Potrzeba {required_tokens}, a na koncie jest {balance}. "
-                "Doladuj pakiet i sprobuj ponownie."
+                f"Za malo kredytow. Potrzeba {required_credits}, a na koncie jest {balance}. "
+                "Doladuj kredyty i sprobuj ponownie."
             ),
         )
 
 
-def consume_tokens_for_chat(*, user_id: str, model: str, chat_id: str, request_id: str) -> None:
-    token_cost = get_model_token_cost(model)
-    ensure_sufficient_tokens(user_id, token_cost)
+def consume_credit_for_chat(*, user_id: str, model: str, chat_id: str, request_id: str) -> None:
+    credit_cost = get_credit_cost_per_query()
+    ensure_sufficient_credits(user_id, credit_cost)
     create_ledger_entry(
         user_id=user_id,
-        amount=-token_cost,
+        amount=-credit_cost,
         entry_type="usage",
         source_type="chat_completion",
         source_id=request_id,
-        description=f"Koszt odpowiedzi modelu {model} w watku {chat_id}",
-        metadata={"model": model, "chat_id": chat_id},
+        description=f"Koszt zapytania w watku {chat_id}",
+        metadata={"model": model, "chat_id": chat_id, "credit_cost": credit_cost},
     )
 
 
@@ -302,7 +549,7 @@ def _load_stripe_module():
 def create_checkout_session(
     *,
     user: AuthenticatedUser,
-    pack: TokenPack,
+    pack: CreditPack,
     success_url: Optional[str] = None,
     cancel_url: Optional[str] = None,
 ) -> dict[str, str]:
@@ -335,7 +582,7 @@ def create_checkout_session(
     else:
         price_data["product_data"] = {
             "name": pack.name,
-            "description": pack.description or f"Doladowanie {pack.token_amount} tokenow do aLitigatora",
+            "description": pack.description or f"Doladowanie {pack.credit_amount} kredytow do aLitigatora",
         }
 
     session = stripe.checkout.Session.create(
@@ -348,7 +595,7 @@ def create_checkout_session(
             "order_id": order_id,
             "user_id": user.id,
             "pack_id": pack.id,
-            "token_amount": str(pack.token_amount),
+            "credit_amount": str(pack.credit_amount),
         },
         line_items=[
             {
@@ -364,14 +611,14 @@ def create_checkout_session(
             "user_id": user.id,
             "pack_id": pack.id,
             "pack_name": pack.name,
-            "token_amount": pack.token_amount,
+            "token_amount": pack.credit_amount,
             "currency": pack.currency,
             "unit_amount": pack.price_gross,
             "stripe_customer_id": stripe_customer_id,
             "stripe_checkout_session_id": session["id"],
             "checkout_url": session["url"],
             "status": "pending",
-            "metadata": {"description": pack.description},
+            "metadata": {"description": pack.description, "credit_amount": pack.credit_amount},
         }
     ).execute()
 
@@ -405,21 +652,27 @@ def apply_topup_from_checkout_session(session: dict[str, Any]) -> None:
         raise HTTPException(status_code=404, detail="Nie znaleziono zamowienia Stripe do rozliczenia.")
 
     order = rows[0]
-    token_amount = int(order.get("token_amount") or metadata.get("token_amount") or 0)
-    if token_amount <= 0:
-        raise HTTPException(status_code=400, detail="Zamowienie Stripe nie ma poprawnej liczby tokenow.")
+    credit_amount = int(
+        order.get("token_amount")
+        or metadata.get("credit_amount")
+        or metadata.get("token_amount")
+        or 0
+    )
+    if credit_amount <= 0:
+        raise HTTPException(status_code=400, detail="Zamowienie Stripe nie ma poprawnej liczby kredytow.")
 
     create_ledger_entry(
         user_id=user_id,
-        amount=token_amount,
+        amount=credit_amount,
         entry_type="topup",
         source_type="stripe_checkout",
         source_id=str(session.get("id")),
-        description=f"Doladowanie pakietem {order.get('pack_name') or order.get('pack_id')}",
+        description=f"Doladowanie kredytow pakietem {order.get('pack_name') or order.get('pack_id')}",
         metadata={
             "order_id": order_id,
             "stripe_payment_intent_id": session.get("payment_intent"),
             "stripe_customer_id": session.get("customer"),
+            "credit_amount": credit_amount,
         },
     )
 
@@ -431,3 +684,22 @@ def apply_topup_from_checkout_session(session: dict[str, Any]) -> None:
             "stripe_payment_intent_id": session.get("payment_intent"),
         }
     ).eq("id", order_id).execute()
+
+
+def get_checkout_session(session_id: str) -> dict[str, Any]:
+    normalized_session_id = session_id.strip()
+    if not normalized_session_id:
+        raise HTTPException(status_code=400, detail="Brakuje identyfikatora sesji Stripe.")
+
+    if not is_stripe_configured():
+        raise HTTPException(status_code=503, detail="Stripe nie jest jeszcze skonfigurowany.")
+
+    stripe = _load_stripe_module()
+    stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+
+    try:
+        session = stripe.checkout.Session.retrieve(normalized_session_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Nie udalo sie pobrac sesji Stripe.") from exc
+
+    return dict(session)

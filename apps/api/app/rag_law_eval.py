@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app.rag import inspect_search
+from app.rag import inspect_search, search_chat_chunks
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,6 +37,11 @@ def parse_args() -> argparse.Namespace:
         "--tax-domain",
         help="Optional explicit legal domain (for example VAT) used to scope statute retrieval.",
     )
+    parser.add_argument(
+        "--chat-retrieval",
+        action="store_true",
+        help="Evaluate the application chat retrieval mixer instead of raw statute inspect_search.",
+    )
     return parser.parse_args()
 
 
@@ -57,41 +62,81 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
         if case_id in ids:
             raise ValueError(f"Duplicate case id: {case_id}")
         ids.add(case_id)
-        cases.append({"id": case_id, "question": question, "expected_legal_provisions": expected, "notes": case.get("notes")})
+        required = [
+            str(value).strip().lower()
+            for value in case.get("required_legal_provisions") or []
+            if str(value).strip()
+        ]
+        cases.append(
+            {
+                "id": case_id,
+                "question": question,
+                "expected_legal_provisions": expected,
+                "required_legal_provisions": required,
+                "notes": case.get("notes"),
+            }
+        )
     return cases
 
 
-def evaluate_case(case: dict[str, Any], limit: int, tax_domain: str | None = None) -> dict[str, Any]:
-    inspection = inspect_search(
-        case["question"],
-        limit=limit,
-        source_types={"statute"},
-        enforce_query_domain=True,
-        tax_domains={tax_domain} if tax_domain else None,
-    )
-    actual = [provision.lower() for chunk in inspection.chunks for provision in chunk.legal_provisions]
+def evaluate_case(case: dict[str, Any], limit: int, tax_domain: str | None = None, *, chat_retrieval: bool = False) -> dict[str, Any]:
+    if chat_retrieval:
+        chunks = search_chat_chunks(
+            case["question"],
+            limit=limit,
+            include_interpretations=False,
+            include_judgments=False,
+        )
+        inspection = None
+    else:
+        inspection = inspect_search(
+            case["question"],
+            limit=limit,
+            source_types={"statute"},
+            enforce_query_domain=True,
+            tax_domains={tax_domain} if tax_domain else None,
+        )
+        chunks = inspection.chunks
+    actual = [provision.lower() for chunk in chunks for provision in chunk.legal_provisions]
     expected = case["expected_legal_provisions"]
     first_rank = next((rank for rank, value in enumerate(actual, start=1) if value in expected), None)
-    raw_candidate_pool = inspection.raw_candidate_pool
+    raw_candidate_pool = inspection.raw_candidate_pool if inspection else []
     raw_provisions = [
         provision.lower()
         for hit in raw_candidate_pool
         for provision in hit.get("legal_provisions", [])
     ]
     raw_first_rank = next((rank for rank, value in enumerate(raw_provisions, start=1) if value in expected), None)
+    required = case.get("required_legal_provisions") or []
+    required_hits = {provision for provision in required if provision in actual}
+    raw_required_hits = {provision for provision in required if provision in raw_provisions}
+    required_passed = not required or len(required_hits) == len(required)
     return {
         **case,
-        "passed": first_rank is not None,
+        "passed": (first_rank is not None) and required_passed,
         "first_hit_rank": first_rank,
         "hit_top1": first_rank == 1,
         "hit_top3": first_rank is not None and first_rank <= 3,
         "hit_top6": first_rank is not None and first_rank <= 6,
         "raw_first_hit_rank": raw_first_rank,
         "expected_in_raw_candidate_pool": raw_first_rank is not None,
-        "lost_in_rerank": raw_first_rank is not None and first_rank is None,
+        "required_passed": required_passed,
+        "required_hits": sorted(required_hits),
+        "missing_required": [provision for provision in required if provision not in required_hits],
+        "raw_required_hits": sorted(raw_required_hits),
+        "lost_in_rerank": raw_first_rank is not None and ((first_rank is None) or not required_passed),
         "actual_legal_provisions": actual,
         "raw_candidate_pool": raw_candidate_pool,
-        "top_hits": inspection.hits,
+        "top_hits": inspection.hits if inspection else [
+            {
+                "rank": rank,
+                "subject": chunk.subject,
+                "source_type": chunk.source_type,
+                "legal_provisions": chunk.legal_provisions,
+                "source_url": chunk.source_url,
+            }
+            for rank, chunk in enumerate(chunks, start=1)
+        ],
     }
 
 
@@ -108,13 +153,14 @@ def main() -> None:
         if args.max_cases < 1:
             raise ValueError("--max-cases must be positive")
         cases = cases[:args.max_cases]
-    results = [evaluate_case(case, args.limit, args.tax_domain) for case in cases]
+    results = [evaluate_case(case, args.limit, args.tax_domain, chat_retrieval=args.chat_retrieval) for case in cases]
     summary = {
         "kind": "legal_provision_retrieval",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "cases_path": str(args.cases),
         "complete": True,
         "case_count": len(results),
+        "chat_retrieval": bool(args.chat_retrieval),
         "passed": sum(result["passed"] for result in results),
         "failed": sum(not result["passed"] for result in results),
         "top1_hits": sum(result["hit_top1"] for result in results),

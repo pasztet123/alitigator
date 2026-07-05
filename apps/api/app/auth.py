@@ -17,6 +17,16 @@ class AuthenticatedUser:
     full_name: Optional[str]
 
 
+def is_admin_user(user: AuthenticatedUser) -> bool:
+    configured = os.getenv("ALITIGATOR_ADMIN_EMAILS", "")
+    allowed_emails = {
+        email.strip().lower()
+        for email in configured.split(",")
+        if email.strip()
+    }
+    return bool(user.email and user.email.strip().lower() in allowed_emails)
+
+
 def _extract_bearer_token(authorization: Optional[str]) -> str:
     if not authorization:
         raise HTTPException(status_code=401, detail="Brak naglowka Authorization.")

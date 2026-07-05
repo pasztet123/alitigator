@@ -1,0 +1,44 @@
+[
+  {
+    "id": "post-leasing-vehicle-001-full-vat-pit-sd",
+    "question": "Przedsiębiorca wykupuje samochód osobowy po leasingu bezpośrednio do majątku prywatnego, nie odlicza VAT, nie ujmuje pojazdu w ewidencji środków trwałych, przez dwa miesiące sporadycznie dojeżdża nim do klientów, następnie daruje samochód małżonce, a małżonka po ośmiu miesiącach sprzedaje go przedsiębiorcy, który chce fakturę. Jakie skutki wystąpią w VAT, PIT i podatku od spadków i darowizn?",
+    "expected_legal_provisions": ["art. 7", "art. 10", "art. 14", "art. 23", "art. 4a"],
+    "required_legal_provisions": ["art. 7", "art. 10", "art. 14", "art. 23", "art. 4a"],
+    "notes": "Wieloosiowy case regresyjny: darowizna po leasingu, prawo do odliczenia VAT, prywatny półroczny termin, specjalna reguła leasingowa PIT, 20% kosztów prywatnego auta i SD-Z2."
+  },
+  {
+    "id": "post-leasing-vehicle-002-pit-six-year-rule",
+    "question": "Które przepisy PIT trzeba sprawdzić przy sprzedaży rzeczy ruchomej wykupionej po leasingu operacyjnym do majątku prywatnego: półroczny termin czy sześcioletnia reguła dla składników używanych na podstawie leasingu?",
+    "expected_legal_provisions": ["art. 10", "art. 14"],
+    "required_legal_provisions": ["art. 10", "art. 14"],
+    "notes": "Pilnuje art. 14 ust. 2 pkt 19 i art. 10 ust. 2 pkt 4."
+  },
+  {
+    "id": "post-leasing-vehicle-003-private-car-cost-limit",
+    "question": "Jaki limit kosztów PIT dotyczy prywatnego samochodu osobowego stanowiącego własność przedsiębiorcy, niewprowadzonego do majątku firmowego, ale wykorzystywanego również w działalności?",
+    "expected_legal_provisions": ["art. 23"],
+    "required_legal_provisions": ["art. 23"],
+    "notes": "Pilnuje 20% z art. 23 ust. 1 pkt 46, a nie 75% z pkt 46a."
+  },
+  {
+    "id": "post-leasing-vehicle-004-gifted-asset-cost-basis",
+    "question": "Czy przy sprzedaży samochodu otrzymanego w darowiźnie można automatycznie przyjąć wartość rynkową z dnia darowizny jako koszt PIT, skoro darowizna podlega podatkowi od spadków i darowizn?",
+    "expected_legal_provisions": ["art. 2", "art. 22"],
+    "required_legal_provisions": ["art. 2", "art. 22"],
+    "notes": "Pilnuje relacji art. 2 ust. 1 pkt 3 PIT i art. 22 ust. 1d PIT."
+  },
+  {
+    "id": "post-leasing-vehicle-005-spouse-gift-sd",
+    "question": "Jakie przepisy podatku od spadków i darowizn trzeba sprawdzić przy darowiźnie samochodu między małżonkami, w tym zwolnienie, termin zgłoszenia i wyjątki od zgłoszenia?",
+    "expected_legal_provisions": ["art. 4a", "art. 6", "art. 9", "art. 14"],
+    "required_legal_provisions": ["art. 4a", "art. 6", "art. 9", "art. 14"],
+    "notes": "Pilnuje pełnego zwolnienia dla małżonka i wyjątków od SD-Z2."
+  },
+  {
+    "id": "post-leasing-vehicle-006-vat-gift-and-invoice",
+    "question": "Jakie przepisy VAT są kluczowe dla darowizny samochodu wykupionego po leasingu do majątku prywatnego oraz późniejszej sprzedaży przez małżonkę nieprowadzącą działalności, gdy nabywca chce fakturę?",
+    "expected_legal_provisions": ["art. 7", "art. 15", "art. 86", "art. 106b"],
+    "required_legal_provisions": ["art. 7", "art. 15", "art. 86", "art. 106b"],
+    "notes": "Pilnuje prawa do odliczenia, statusu podatnika przy transakcji i obowiązku faktury."
+  }
+]

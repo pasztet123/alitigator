@@ -6,3 +6,7 @@ pymysql==1.1.1
 supabase==2.16.0
 sentence-transformers==3.4.1
 stripe==12.5.0
+pypdf==6.14.2
+pymupdf==1.26.5
+rapidocr_onnxruntime==1.4.4
+pypdfium2==5.11.0

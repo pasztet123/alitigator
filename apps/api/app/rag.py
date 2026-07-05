@@ -2007,6 +2007,67 @@ def query_targets_shareholder_company_asset_sale(query: str) -> bool:
     return has_company_party and has_transfer and has_asset
 
 
+def query_targets_estonian_cit_transformation_share_cost(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_transformation = bool(
+        re.search(
+            r"(przekształc\w*.*sp[óo]łk\w* komandytow\w*.*sp[óo]łk\w* z o\.?o\.?|"
+            r"sp[óo]łk\w* komandytow\w*.*przekształc\w*.*sp[óo]łk\w* z o\.?o\.?|"
+            r"transformacj\w* sp[óo]łk\w* komandytow\w*|"
+            r"następstw\w* praw\w*.*sp[óo]łk\w* komandytow\w*|"
+            r"sukcesj\w* podatkow\w*.*przekształc\w*)",
+            normalized,
+        )
+    )
+    has_estonian_cit = bool(
+        re.search(
+            r"\b(esto[ńn]sk\w*\s+cit|rycza[łl]t\w*\s+od\s+dochod\w*\s+sp[óo]łek|"
+            r"ukryte\s+zysk\w*|niepodzielon\w*\s+zysk\w*|doch[óo]d\s+z\s+przekszta[łl]cenia)\b",
+            normalized,
+        )
+    )
+    has_share_cost = bool(
+        re.search(
+            r"\b(sprzeda[żz]\w*.*udzia[łl]\w*|udzia[łl]\w*.*sprzeda[żz]\w*|"
+            r"koszt\w*.*udzia[łl]\w*|nowe\s+obj[ęe]cie\s+udzia[łl]\w*|"
+            r"warto[śs][ćc]\s+nominaln\w*\s+udzia[łl]\w*|"
+            r"og[óo]ł\s+praw\s+i\s+obowi[ąa]zk[óo]w)\b",
+            normalized,
+        )
+    )
+    has_pcc = bool(re.search(r"\b(pcc|podatek od czynności cywilnoprawnych)\b", normalized))
+    return has_transformation and (has_estonian_cit or has_share_cost or has_pcc)
+
+
+def build_transformation_share_cost_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_estonian_cit_transformation_share_cost(query):
+        return []
+
+    preferred_targets: list[tuple[str, str]] = [
+        ("CIT", "7aa"),
+        ("CIT", "28j"),
+        ("CIT", "28k"),
+        ("CIT", "28m"),
+        ("PCC", "1"),
+        ("ORDYNACJA", "93a"),
+        ("PCC", "3"),
+        ("PCC", "6"),
+        ("PCC", "7"),
+        ("PIT", "22"),
+        ("PIT", "23"),
+        ("PIT", "24"),
+        ("CIT", "1"),
+    ]
+    deduped_targets: list[tuple[str, str]] = []
+    seen_targets: set[tuple[str, str]] = set()
+    for target in preferred_targets:
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        deduped_targets.append(target)
+    return deduped_targets
+
+
 def query_targets_developer_land_sale(query: str) -> bool:
     normalized = normalize_whitespace(query or "").lower()
     has_land_sale = bool(
@@ -2184,6 +2245,13 @@ def build_shareholder_company_asset_sale_statute_targets(query: str) -> list[tup
         return []
 
     normalized = normalize_whitespace(query or "").lower()
+    has_estonian_cit = bool(
+        re.search(
+            r"\b(esto[ńn]sk\w*\s+cit|rycza[łl]t\w*\s+od\s+dochod\w*\s+sp[óo]łek|ukryte\s+zysk\w*|"
+            r"niepodzielon\w*\s+zysk\w*|doch[óo]d\s+z\s+przekszta[łl]cenia)\b",
+            normalized,
+        )
+    )
     query_domains = {domain.upper() for domain in detect_domains(query)}
     requested_domains = query_domains or {"VAT", "CIT", "PIT", "PCC"}
     mentions_real_estate = bool(re.search(r"\b(nieruchomo\w*|lokal\w*|mieszkani\w*|mieszkan\w*|budynek\w*|grunt\w*)\b", normalized))
@@ -2193,9 +2261,15 @@ def build_shareholder_company_asset_sale_statute_targets(query: str) -> list[tup
 
     preferred_targets: list[tuple[str, str]] = []
     if "CIT" in requested_domains:
-        preferred_targets.extend([("CIT", "11c"), ("CIT", "14")])
+        if has_estonian_cit:
+            preferred_targets.extend([("CIT", "28m"), ("CIT", "11a"), ("CIT", "11c"), ("CIT", "7aa"), ("CIT", "28j"), ("CIT", "28k")])
+        else:
+            preferred_targets.extend([("CIT", "11c"), ("CIT", "14")])
     if "PIT" in requested_domains:
-        preferred_targets.extend([("PIT", "11"), ("PIT", "17"), ("PIT", "24")])
+        if has_estonian_cit:
+            preferred_targets.extend([("PIT", "24"), ("PIT", "22"), ("PIT", "23")])
+        else:
+            preferred_targets.extend([("PIT", "11"), ("PIT", "17"), ("PIT", "24")])
     if "PCC" in requested_domains:
         preferred_targets.extend([("PCC", "1"), ("PCC", "2"), ("PCC", "4"), ("PCC", "6"), ("PCC", "7")])
     if "VAT" in requested_domains:
@@ -2232,6 +2306,13 @@ def build_shareholder_company_asset_sale_match_score(row: sqlite3.Row, *, query:
     normalized_query = normalize_whitespace(query or "").lower()
     query_domains = {domain.upper() for domain in detect_domains(query)}
     candidate_domains = row_tax_domains(row)
+    has_estonian_cit = bool(
+        re.search(
+            r"\b(esto[ńn]sk\w*\s+cit|rycza[łl]t\w*\s+od\s+dochod\w*\s+sp[óo]łek|ukryte\s+zysk\w*|"
+            r"niepodzielon\w*\s+zysk\w*|doch[óo]d\s+z\s+przekszta[łl]cenia)\b",
+            normalized_query,
+        )
+    )
     query_mentions_vehicle = bool(re.search(r"\b(samochod\w*|samochód\w*|pojazd\w*|auto\b)\b", normalized_query))
     query_mentions_real_estate = bool(re.search(r"\b(nieruchomo\w*|lokal\w*|mieszkani\w*|mieszkan\w*|budynek\w*|grunt\w*)\b", normalized_query))
     score = 0.0
@@ -2258,7 +2339,12 @@ def build_shareholder_company_asset_sale_match_score(row: sqlite3.Row, *, query:
         score += 0.45
 
     article_key = extract_primary_article_key(row)
-    if article_key in {"11", "11a", "11c", "11d", "11e", "11t", "12", "14", "15", "16", "16g", "17", "24", "28m", "29a", "32", "43", "1", "2", "4", "6", "7"}:
+    if has_estonian_cit:
+        if article_key in {"28m", "28j", "28k", "11a", "11c", "7aa"}:
+            score += 1.2
+        if article_key in {"14", "17", "24", "29a", "32", "43", "1", "2", "4", "6", "7"}:
+            score -= 0.55
+    elif article_key in {"11", "11a", "11c", "11d", "11e", "11t", "12", "14", "15", "16", "16g", "17", "24", "28m", "29a", "32", "43", "1", "2", "4", "6", "7"}:
         score += 0.9
     if article_key in {"8b", "18", "18ef", "18eg", "26c", "28j", "28k", "28h", "86a"}:
         score -= 1.1
@@ -2271,6 +2357,55 @@ def build_shareholder_company_asset_sale_match_score(row: sqlite3.Row, *, query:
     if str(row["source_type"] or "") == "statute":
         if query_domains and candidate_domains and not (candidate_domains & query_domains):
             score -= 0.8
+
+    return score
+
+
+def build_transformation_share_cost_match_score(row: sqlite3.Row, *, query: str) -> float:
+    if not query_targets_estonian_cit_transformation_share_cost(query):
+        return 0.0
+
+    candidate_text = normalize_whitespace(
+        " ".join(
+            [
+                str(row["subject"] or ""),
+                str(row["question_text"] or ""),
+                str(row["issues_json"] or ""),
+                str(row["keywords_json"] or ""),
+                str(row["legal_provisions_json"] or ""),
+                str(row["chunk_text"] or "")[:2600],
+            ]
+        )
+    ).lower()
+    normalized_query = normalize_whitespace(query or "").lower()
+    query_domains = {domain.upper() for domain in detect_domains(query)}
+    candidate_domains = row_tax_domains(row)
+    score = 0.0
+
+    if any(term in candidate_text for term in ("przekształc", "transformacj", "sukcesj", "następstw", "nastepstw")):
+        score += 0.95
+    if any(term in candidate_text for term in ("estońsk", "estonsk", "ryczałt", "ryczalt", "ukryte zyski", "niepodzielone zyski", "dochód z przekształcenia", "dochod z przeksztalcenia")):
+        score += 1.1
+    if any(term in candidate_text for term in ("udzia", "ogół praw i obowiązków", "ogol praw i obowiazkow", "wspólnik", "wspolnik", "koszt", "nabycie", "objęcie", "objecie")):
+        score += 0.75
+    if any(term in candidate_text for term in ("pcc", "czynności cywilnoprawnych", "czynnosci cywilnoprawnych", "art. 93a", "art. 7aa", "art. 28m")):
+        score += 1.0
+
+    article_key = extract_primary_article_key(row)
+    if article_key in {"7aa", "28j", "28k", "28m", "93a", "24", "22", "23", "1", "3", "6", "7"}:
+        score += 1.2
+    if article_key in {"11c", "14", "29a", "32", "43"} and "ukryte zyski" not in candidate_text:
+        score -= 0.45
+
+    if query_domains and candidate_domains and not (candidate_domains & query_domains):
+        score -= 0.7
+
+    if "art. 7aa" in normalized_query and "art. 7aa" in candidate_text:
+        score += 0.35
+    if "art. 28m" in normalized_query and "art. 28m" in candidate_text:
+        score += 0.35
+    if "pcc" in normalized_query and "pcc" in candidate_text:
+        score += 0.25
 
     return score
 
@@ -3152,6 +3287,36 @@ def extract_statute_target_from_text(value: str) -> tuple[str, str] | None:
     return domain, article_key
 
 
+def build_statute_target_order(targets: list[tuple[str, str]]) -> dict[tuple[str, str], int]:
+    order: dict[tuple[str, str], int] = {}
+    for position, (domain, article_key) in enumerate(targets):
+        order.setdefault((domain.upper(), article_key), position)
+    return order
+
+
+def row_matching_statute_target(row: sqlite3.Row, targets: list[tuple[str, str]]) -> tuple[str, str] | None:
+    if not targets:
+        return None
+    order = build_statute_target_order(targets)
+    try:
+        legal_provisions = [str(value) for value in json.loads(row["legal_provisions_json"] or "[]")]
+    except (TypeError, json.JSONDecodeError):
+        legal_provisions = []
+    domain = str(row["tax_domain"] or "").upper()
+    best_target: tuple[str, str] | None = None
+    best_position = len(order)
+    for provision in legal_provisions:
+        article_key = extract_article_key_from_text(provision)
+        if not article_key:
+            continue
+        candidate = (domain, article_key)
+        candidate_position = order.get(candidate, len(order))
+        if candidate_position < best_position:
+            best_target = candidate
+            best_position = candidate_position
+    return best_target
+
+
 def detect_procedural_article_targets(query: str) -> tuple[set[str], set[str]]:
     family_prefixes: set[str] = set()
     exact_articles: set[str] = set()
@@ -3240,6 +3405,8 @@ def resolve_statute_tax_domains(query: str) -> set[str]:
         domains.update({"PIT", "SD"})
     if query_targets_spouse_gift_sd(query):
         domains.add("SD")
+    if query_targets_estonian_cit_transformation_share_cost(query):
+        domains.update({"CIT", "PIT", "PCC", "ORDYNACJA"})
     return domains
 
 
@@ -3541,10 +3708,10 @@ def build_pcc_interpretation_match_score(row: sqlite3.Row, *, query: str) -> flo
 
 
 def diversify_top_document_window(
-    ranked_rows: list[tuple[sqlite3.Row, float, float, float, float, float, float, float]],
+    ranked_rows: list[tuple[sqlite3.Row, float, float, float, float, float, float, float, float]],
     *,
     effective_limit: int,
-) -> list[tuple[sqlite3.Row, float, float, float, float, float, float, float]]:
+) -> list[tuple[sqlite3.Row, float, float, float, float, float, float, float, float]]:
     if len(ranked_rows) <= effective_limit:
         return ranked_rows
 
@@ -3552,8 +3719,8 @@ def diversify_top_document_window(
     if len({str(item[0]["document_id"]) for item in top_window}) == len(top_window):
         return ranked_rows
 
-    diversified: list[tuple[sqlite3.Row, float, float, float, float, float, float, float]] = []
-    deferred: list[tuple[sqlite3.Row, float, float, float, float, float, float, float]] = []
+    diversified: list[tuple[sqlite3.Row, float, float, float, float, float, float, float, float]] = []
+    deferred: list[tuple[sqlite3.Row, float, float, float, float, float, float, float, float]] = []
     seen_documents: set[str] = set()
     for item in ranked_rows:
         document_id = str(item[0]["document_id"])
@@ -3992,9 +4159,8 @@ def fetch_local_candidate_rows(
                 WHERE source_type = 'statute'
                   AND ({' OR '.join(direct_clauses)})
                 ORDER BY document_id ASC
-                LIMIT ?
                 """,
-                (*direct_values, candidate_limit),
+                tuple(direct_values),
             ).fetchall()
             direct_document_ids = [str(row["document_id"]) for row in direct_document_rows]
             if direct_document_ids:
@@ -4198,9 +4364,12 @@ def fetch_statute_rows_by_targets(
     finally:
         connection.close()
 
-    order = {(domain.upper(), article_key): position for position, (domain, article_key) in enumerate(targets)}
+    order = build_statute_target_order(targets)
 
     def row_sort_key(row: sqlite3.Row) -> tuple[int, str]:
+        matched_target = row_matching_statute_target(row, targets)
+        if matched_target:
+            return order.get(matched_target, len(order)), str(row["subject"] or "")
         article_key = extract_primary_article_key(row)
         domain = str(row["tax_domain"] or "").upper()
         return order.get((domain, article_key), len(order)), str(row["subject"] or "")
@@ -4239,12 +4408,17 @@ def order_chunks_by_statute_targets(chunks: list[RagChunk], targets: list[tuple[
     if not chunks or not targets:
         return chunks
 
-    order = {(domain.upper(), article_key): position for position, (domain, article_key) in enumerate(targets)}
+    order = build_statute_target_order(targets)
 
     def sort_key(chunk: RagChunk) -> tuple[int, float, str]:
-        article_key = extract_article_key_from_text(chunk.legal_provisions[0] if chunk.legal_provisions else "")
         domain = infer_chunk_tax_domain(chunk)
-        return order.get((domain, article_key), len(order)), -chunk.score, chunk.subject
+        best_position = len(order)
+        for provision in chunk.legal_provisions:
+            article_key = extract_article_key_from_text(provision)
+            if not article_key:
+                continue
+            best_position = min(best_position, order.get((domain, article_key), len(order)))
+        return best_position, -chunk.score, chunk.subject
 
     return sorted(chunks, key=sort_key)
 
@@ -4360,6 +4534,7 @@ def rank_hybrid_local_candidates(
             build_pcc_interpretation_match_score(row, query=query),
             build_ksef_foreign_sale_match_score(row, query=query),
             build_shareholder_company_asset_sale_match_score(row, query=query),
+            build_transformation_share_cost_match_score(row, query=query),
             build_small_taxpayer_foreign_vat_match_score(row, query=query),
         )
         for row, semantic_score in zip(
@@ -4372,7 +4547,7 @@ def rank_hybrid_local_candidates(
     }
     semantic_ranks = {
         str(row["chunk_id"]): rank
-        for rank, (row, _, _, _, _, _, _, _) in enumerate(
+        for rank, (row, _, _, _, _, _, _, _, _) in enumerate(
             sorted(
                 semantic_scores,
                 key=lambda item: (item[1], -int(item[0]["chunk_index"]), str(item[0]["chunk_id"])),
@@ -4393,12 +4568,14 @@ def rank_hybrid_local_candidates(
             + (config.judgment_match_weight * build_judgment_metadata_match_score(item[0], query=query))
             + (0.25 * build_statute_match_score(item[0], query=query))
             + (0.35 * build_article_family_match_score(item[0], query=query))
-            + build_subject_phrase_match_score(item[0], query=query)
-            + build_interpretation_section_match_score(item[0])
-            + item[4]
-            + item[5],
-            item[6] + item[7],
+                + build_subject_phrase_match_score(item[0], query=query)
+                + build_interpretation_section_match_score(item[0])
+                + item[4]
+                + item[5],
+            item[6] + item[7] + item[8],
+            item[8],
             item[7],
+            item[6],
             item[5],
             item[4],
             -item[1],
@@ -4413,16 +4590,16 @@ def rank_hybrid_local_candidates(
     # This preserves broad recall while spending the expensive model budget on
     # legal near-misses that can realistically reach the final top-k.
     shortlist = preliminary_rows[: max(effective_limit, config.cross_encoder_candidate_limit)]
-    judgment_only_shortlist = all(str(row["source_type"] or "") == "judgment" for row, _, _, _, _, _, _, _ in shortlist)
+    judgment_only_shortlist = all(str(row["source_type"] or "") == "judgment" for row, _, _, _, _, _, _, _, _ in shortlist)
     cross_scores = None if judgment_only_shortlist else compute_cross_encoder_scores(
-        [row for row, _, _, _, _, _, _, _ in shortlist], query=query, config=config
+        [row for row, _, _, _, _, _, _, _, _ in shortlist], query=query, config=config
     )
     if cross_scores is None:
         ranked_rows = preliminary_rows
     else:
         cross_ranks = {
             str(row["chunk_id"]): rank
-            for rank, ((row, _, _, _, _, _, _, _), _) in enumerate(
+            for rank, ((row, _, _, _, _, _, _, _, _), _) in enumerate(
                 sorted(
                     zip(shortlist, cross_scores),
                     key=lambda item: (item[1], str(item[0][0]["chunk_id"])),
@@ -4432,8 +4609,8 @@ def rank_hybrid_local_candidates(
             )
         }
         cross_weight = min(max(config.cross_encoder_weight, 0.0), 1.0)
-        def cross_encoder_sort_key(item: tuple[sqlite3.Row, float, float, float, float, float, float, float]) -> tuple[float, int]:
-            row, _, legal_match_score, mechanism_match_score, pcc_match_score, ksef_match_score, shareholder_sale_match_score, small_taxpayer_foreign_vat_match_score = item
+        def cross_encoder_sort_key(item: tuple[sqlite3.Row, float, float, float, float, float, float, float, float]) -> tuple[float, int]:
+            row, _, legal_match_score, mechanism_match_score, pcc_match_score, ksef_match_score, shareholder_sale_match_score, transformation_share_cost_match_score, small_taxpayer_foreign_vat_match_score = item
             chunk_id = str(row["chunk_id"])
             statute_match_score = build_statute_match_score(row, query=query)
             family_match_score = build_article_family_match_score(row, query=query)
@@ -4453,6 +4630,7 @@ def rank_hybrid_local_candidates(
                 + pcc_match_score
                 + ksef_match_score
                 + shareholder_sale_match_score
+                + transformation_share_cost_match_score
                 + small_taxpayer_foreign_vat_match_score
             )
             # A reciprocal rank with an arbitrary 20-point offset flattened the
@@ -4483,13 +4661,13 @@ def rank_hybrid_local_candidates(
         raw_leader = semantic_scores[0]
         raw_leader_document_id = str(raw_leader[0]["document_id"])
         final_window = list(ranked_rows[:effective_limit])
-        final_document_ids = {str(row["document_id"]) for row, _, _, _, _, _, _, _ in final_window}
+        final_document_ids = {str(row["document_id"]) for row, _, _, _, _, _, _, _, _ in final_window}
         if raw_leader_document_id not in final_document_ids:
             if len(final_window) < effective_limit:
                 final_window.append(raw_leader)
             else:
                 document_counts: dict[str, int] = {}
-                for row, _, _, _, _, _, _, _ in final_window:
+                for row, _, _, _, _, _, _, _, _ in final_window:
                     document_id = str(row["document_id"])
                     document_counts[document_id] = document_counts.get(document_id, 0) + 1
                 replacement_index = len(final_window) - 1
@@ -4500,7 +4678,7 @@ def rank_hybrid_local_candidates(
                         break
                 final_window[replacement_index] = raw_leader
 
-            retained_chunk_ids = {str(row["chunk_id"]) for row, _, _, _, _, _, _, _ in final_window}
+            retained_chunk_ids = {str(row["chunk_id"]) for row, _, _, _, _, _, _, _, _ in final_window}
             ranked_rows = final_window + [
                 item for item in ranked_rows if str(item[0]["chunk_id"]) not in retained_chunk_ids
             ]
@@ -4508,13 +4686,13 @@ def rank_hybrid_local_candidates(
     raw_leader = semantic_scores[0]
     raw_leader_document_id = str(raw_leader[0]["document_id"])
     final_window = list(ranked_rows[:effective_limit])
-    final_document_ids = {str(row["document_id"]) for row, _, _, _, _, _, _, _ in final_window}
+    final_document_ids = {str(row["document_id"]) for row, _, _, _, _, _, _, _, _ in final_window}
     if raw_leader_document_id not in final_document_ids:
         if len(final_window) < effective_limit:
             final_window.append(raw_leader)
         else:
             document_counts: dict[str, int] = {}
-            for row, _, _, _, _, _, _, _ in final_window:
+            for row, _, _, _, _, _, _, _, _ in final_window:
                 document_id = str(row["document_id"])
                 document_counts[document_id] = document_counts.get(document_id, 0) + 1
             replacement_index = len(final_window) - 1
@@ -4525,7 +4703,7 @@ def rank_hybrid_local_candidates(
                     break
             final_window[replacement_index] = raw_leader
 
-        retained_chunk_ids = {str(row["chunk_id"]) for row, _, _, _, _, _, _, _ in final_window}
+        retained_chunk_ids = {str(row["chunk_id"]) for row, _, _, _, _, _, _, _, _ in final_window}
         ranked_rows = final_window + [
             item for item in ranked_rows if str(item[0]["chunk_id"]) not in retained_chunk_ids
         ]
@@ -4553,6 +4731,7 @@ def rank_hybrid_local_candidates(
                 + pcc_match_score
                 + ksef_match_score
                 + shareholder_sale_match_score
+                + transformation_share_cost_match_score
                 + small_taxpayer_foreign_vat_match_score
             ),
             chunk_text=str(row["chunk_text"]),
@@ -4570,7 +4749,7 @@ def rank_hybrid_local_candidates(
             source_pages=[int(value) for value in json.loads(row["source_pages_json"] or "[]")],
             legal_provisions=[str(value) for value in json.loads(row["legal_provisions_json"] or "[]")],
         )
-        for row, _, legal_match_score, mechanism_match_score, pcc_match_score, ksef_match_score, shareholder_sale_match_score, small_taxpayer_foreign_vat_match_score in ranked_rows[:effective_limit]
+        for row, _, legal_match_score, mechanism_match_score, pcc_match_score, ksef_match_score, shareholder_sale_match_score, transformation_share_cost_match_score, small_taxpayer_foreign_vat_match_score in ranked_rows[:effective_limit]
     ]
 
 
@@ -4657,6 +4836,8 @@ def search_chat_chunks(
             statute_limit = min(effective_limit - 1, max(4, math.ceil(effective_limit * 0.6)))
         elif query_targets_post_leasing_vehicle_gift_sale(query):
             statute_limit = min(effective_limit - 1, max(5, math.ceil(effective_limit * 0.7)))
+        elif query_targets_estonian_cit_transformation_share_cost(query):
+            statute_limit = min(effective_limit - 1, max(6, math.ceil(effective_limit * 0.75)))
         else:
             statute_limit = effective_limit if not include_interpretations else max(1, effective_limit // 2)
         interpretation_limit = max(1, effective_limit - statute_limit) if include_interpretations else 0
@@ -4720,6 +4901,8 @@ def search_chat_chunks(
         preferred_targets.extend(build_gifted_asset_cost_basis_statute_targets(query))
     if query_targets_spouse_gift_sd(query):
         preferred_targets.extend(build_spouse_gift_sd_statute_targets(query))
+    if query_targets_estonian_cit_transformation_share_cost(query):
+        preferred_targets.extend(build_transformation_share_cost_statute_targets(query))
     if query_targets_shareholder_company_asset_sale(query):
         preferred_targets.extend(build_shareholder_company_asset_sale_statute_targets(query))
     if query_targets_small_taxpayer_foreign_vat(query):
@@ -4753,6 +4936,7 @@ def search_chat_chunks(
             or query_targets_leased_movable_six_year_rule(query)
             or query_targets_gifted_asset_cost_basis(query)
             or query_targets_spouse_gift_sd(query)
+            or query_targets_estonian_cit_transformation_share_cost(query)
         ) else statute_limit,
     ) if statute_limit else []
     hinted_statutes = rank_hybrid_local_candidates(
@@ -4763,6 +4947,7 @@ def search_chat_chunks(
             or query_targets_leased_movable_six_year_rule(query)
             or query_targets_gifted_asset_cost_basis(query)
             or query_targets_spouse_gift_sd(query)
+            or query_targets_estonian_cit_transformation_share_cost(query)
         ) else statute_limit,
         config=config,
     ) if hinted_statute_rows else []
@@ -4771,6 +4956,7 @@ def search_chat_chunks(
         or query_targets_leased_movable_six_year_rule(query)
         or query_targets_gifted_asset_cost_basis(query)
         or query_targets_spouse_gift_sd(query)
+        or query_targets_estonian_cit_transformation_share_cost(query)
     ):
         hinted_statutes = order_chunks_by_statute_targets(hinted_statutes, preferred_targets)
 
@@ -4784,18 +4970,47 @@ def search_chat_chunks(
         or query_targets_leased_movable_six_year_rule(query)
         or query_targets_gifted_asset_cost_basis(query)
         or query_targets_spouse_gift_sd(query)
+        or query_targets_estonian_cit_transformation_share_cost(query)
         or query_targets_shareholder_company_asset_sale(query)
         or query_targets_small_taxpayer_foreign_vat(query)
     )
-    statute_candidates = [*hinted_statutes, *statutes] if prefer_hinted_statutes else [*statutes, *hinted_statutes]
+    if query_targets_estonian_cit_transformation_share_cost(query) and hinted_statutes:
+        statute_candidates = list(hinted_statutes)
+    else:
+        statute_candidates = [*hinted_statutes, *statutes] if prefer_hinted_statutes else [*statutes, *hinted_statutes]
+    if query_targets_estonian_cit_transformation_share_cost(query):
+        critical_93a_rows = fetch_statute_rows_by_targets(
+            [("ORDYNACJA", "93a")],
+            config=config,
+            limit=None,
+        )
+        critical_93a_statutes = rank_hybrid_local_candidates(
+            critical_93a_rows,
+            query=expand_search_query(query),
+            effective_limit=len(critical_93a_rows),
+            config=config,
+        ) if critical_93a_rows else []
+        if critical_93a_statutes:
+            critical_93a = critical_93a_statutes[0]
+            statute_candidates = [
+                critical_93a,
+                *[
+                    chunk
+                    for chunk in statute_candidates
+                    if not (
+                        infer_chunk_tax_domain(chunk) == "ORDYNACJA"
+                        and extract_article_key_from_text(chunk.legal_provisions[0] if chunk.legal_provisions else "") == "93a"
+                    )
+                ],
+            ]
     if (
         query_targets_post_leasing_vehicle_gift_sale(query)
         or query_targets_leased_movable_six_year_rule(query)
         or query_targets_gifted_asset_cost_basis(query)
         or query_targets_spouse_gift_sd(query)
+        or query_targets_estonian_cit_transformation_share_cost(query)
     ):
         unique_statute_candidates: list[RagChunk] = []
-        duplicate_statute_candidates: list[RagChunk] = []
         seen_article_targets: set[tuple[str, str]] = set()
         for chunk in statute_candidates:
             article_key = extract_article_key_from_text(chunk.legal_provisions[0] if chunk.legal_provisions else "")
@@ -4803,9 +5018,38 @@ def search_chat_chunks(
             if article_target[0] and article_target[1] and article_target not in seen_article_targets:
                 seen_article_targets.add(article_target)
                 unique_statute_candidates.append(chunk)
-            else:
-                duplicate_statute_candidates.append(chunk)
-        statute_candidates = [*unique_statute_candidates, *duplicate_statute_candidates]
+        if query_targets_estonian_cit_transformation_share_cost(query):
+            statute_candidates = unique_statute_candidates
+        else:
+            duplicate_statute_candidates: list[RagChunk] = []
+            for chunk in statute_candidates:
+                article_key = extract_article_key_from_text(chunk.legal_provisions[0] if chunk.legal_provisions else "")
+                article_target = (infer_chunk_tax_domain(chunk), article_key)
+                if not article_target[0] or not article_target[1] or article_target in seen_article_targets:
+                    duplicate_statute_candidates.append(chunk)
+            statute_candidates = [*unique_statute_candidates, *duplicate_statute_candidates]
+    if query_targets_estonian_cit_transformation_share_cost(query):
+        critical_93a_rows = fetch_statute_rows_by_targets([("ORDYNACJA", "93a")], config=config, limit=1)
+        if critical_93a_rows:
+            critical_93a_statutes = rank_hybrid_local_candidates(
+                critical_93a_rows,
+                query=expand_search_query(query),
+                effective_limit=1,
+                config=config,
+            )
+            if critical_93a_statutes:
+                critical_93a = critical_93a_statutes[0]
+                statute_candidates = [
+                    critical_93a,
+                    *[
+                        chunk
+                        for chunk in statute_candidates
+                        if not (
+                            infer_chunk_tax_domain(chunk) == "ORDYNACJA"
+                            and extract_article_key_from_text(chunk.legal_provisions[0] if chunk.legal_provisions else "") == "93a"
+                        )
+                    ],
+                ]
     for chunk in statute_candidates:
         if chunk.chunk_id in seen_statute_chunks:
             continue
@@ -4927,6 +5171,7 @@ def inspect_search(
                 "article_family_match_score": build_article_family_match_score(row, query=expanded_query),
                 "statute_match_score": build_statute_match_score(row, query=expanded_query),
                 "shareholder_company_asset_sale_match_score": build_shareholder_company_asset_sale_match_score(row, query=expanded_query),
+                "transformation_share_cost_match_score": build_transformation_share_cost_match_score(row, query=expanded_query),
                 "small_taxpayer_foreign_vat_match_score": build_small_taxpayer_foreign_vat_match_score(row, query=expanded_query),
                 "preview": str(row["chunk_text"] or "")[:280].strip(),
             }

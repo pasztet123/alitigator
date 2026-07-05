@@ -1,0 +1,40 @@
+[
+  {
+    "id": "cit-transformation-share-cost-001",
+    "question": "Spółka komandytowa zostaje przekształcona w spółkę z o.o. W majątku są nieruchomości, znak towarowy wytworzony we własnym zakresie i niepodzielone zyski. Po przekształceniu spółka wybiera estoński CIT. Następnie sprzedaje wspólnikowi samochód poniżej wartości rynkowej, wynajmuje od niego nieruchomość i spłaca pożyczkę udzieloną wcześniej spółce komandytowej. Jakie przepisy są kluczowe dla skutków przekształcenia, ukrytych zysków, PCC oraz kosztu podatkowego udziałów?",
+    "expected_legal_provisions": [
+      "art. 7aa",
+      "art. 28m",
+      "art. 93a",
+      "art. 24",
+      "art. 22",
+      "art. 23",
+      "art. 1",
+      "art. 3",
+      "art. 6",
+      "art. 7"
+    ],
+    "required_legal_provisions": [
+      "art. 7aa",
+      "art. 28m",
+      "art. 93a",
+      "art. 1"
+    ],
+    "notes": "Główny regres dla przekształcenia sp.k. -> sp. z o.o., estońskiego CIT, PCC i kosztu udziałów."
+  },
+  {
+    "id": "cit-transformation-share-cost-002",
+    "question": "Czy sprzedaż samochodu wspólnikowi poniżej ceny rynkowej, czynsz najmu nieruchomości od wspólnika i odsetki od pożyczki po wejściu w estoński CIT mogą stanowić ukryte zyski? Jakie przepisy z CIT są w takiej sytuacji najważniejsze?",
+    "expected_legal_provisions": [
+      "art. 28m",
+      "art. 11a",
+      "art. 11c",
+      "art. 28j",
+      "art. 28k"
+    ],
+    "required_legal_provisions": [
+      "art. 28m"
+    ],
+    "notes": "Regres na ukryte zyski i rynkowy najem w ryczałcie od dochodów spółek."
+  }
+]

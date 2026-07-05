@@ -154,6 +154,7 @@ const HINT_DEBOUNCE_MS = 900
 const MIN_DRAFT_LENGTH_FOR_HINTS = 24
 const ACTIVE_HINT_COUNT = 3
 const MAX_HINT_QUESTION_COUNT = 5
+const APP_VERSION = '0.6.0'
 const ASSISTANT_SECTION_TITLES = [
   'Teza',
   'Analiza',
@@ -1858,6 +1859,7 @@ function App() {
               </button>
             </div>
           </form>
+          <p className="helper-text small-text app-version-footer">Wersja {APP_VERSION}</p>
         </footer>
       </section>
     </main>

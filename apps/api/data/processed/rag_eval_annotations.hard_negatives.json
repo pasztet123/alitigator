@@ -1,0 +1,752 @@
+{
+  "schema_version": 1,
+  "description": "Human-curated hard-negative labels for baseline retrieval misses.",
+  "annotations": [
+    {
+      "id": "vat-ksef-uslugi-zwolnione-bez-zadania",
+      "expected_signature": "0113-KDIPT1-2.4012.402.2026.1.KT",
+      "tax_domains": [
+        "VAT"
+      ],
+      "primary_mechanisms": [
+        "vat_exempt_supply",
+        "invoice_issuance_obligation",
+        "invoice_on_customer_request",
+        "ksef_issuance_obligation",
+        "ksef_obligation_dependent_on_invoice_obligation"
+      ],
+      "supporting_mechanisms": [
+        "exempt_service_documentation",
+        "no_customer_invoice_request",
+        "structured_invoice",
+        "invoice_request_deadline",
+        "voluntary_invoice_issuance",
+        "invoice_for_exempt_supply",
+        "seller_documentation_obligations",
+        "absence_of_automatic_invoice_obligation"
+      ],
+      "disambiguators": [
+        "whether_invoice_must_be_issued",
+        "customer_did_not_request_invoice",
+        "ksef_as_invoice_issuance_channel",
+        "exemption_does_not_equal_invoice_obligation"
+      ],
+      "negative_matches": [
+        "medical_service_vat_exemption",
+        "subjective_vat_exemption",
+        "vat_exemption_eligibility",
+        "invoice_visualization",
+        "invoice_outside_ksef"
+      ]
+    },
+    {
+      "id": "pit-ograniczony-obowiazek-podatkowy-praca-za-granica",
+      "expected_signature": "0112-KDIL2-1.4011.248.2026.1.TR",
+      "tax_domains": [
+        "PIT"
+      ],
+      "primary_mechanisms": [
+        "tax_residency",
+        "limited_tax_liability",
+        "unlimited_tax_liability",
+        "center_of_vital_interests",
+        "183_day_residence_test",
+        "foreign_employment_income"
+      ],
+      "supporting_mechanisms": [
+        "personal_interest_center",
+        "economic_interest_center",
+        "place_of_residence_for_tax_purposes",
+        "foreign_source_income",
+        "polish_source_income",
+        "income_tax_treaty",
+        "treaty_residence_tie_breaker",
+        "source_state_taxation",
+        "residence_state_taxation",
+        "polish_citizenship_not_determinative",
+        "temporary_presence_in_poland",
+        "permanent_home",
+        "habitual_abode"
+      ],
+      "disambiguators": [
+        "no_center_of_interests_in_poland",
+        "less_than_183_days_in_poland",
+        "whether_foreign_income_is_reported_in_poland",
+        "scope_of_polish_tax_obligation"
+      ],
+      "negative_matches": [
+        "return_relief",
+        "abolition_relief",
+        "temporary_assignment_abroad",
+        "foreign_tax_credit",
+        "change_of_tax_residence_to_poland"
+      ]
+    },
+    {
+      "id": "vat-odliczenie-faktura-wystawiona-poza-ksef",
+      "expected_signature": "0114-KDIP4-1.4012.250.2026.2.MK",
+      "tax_domains": [
+        "VAT"
+      ],
+      "primary_mechanisms": [
+        "invoice_outside_ksef",
+        "input_vat_deduction",
+        "formal_invoice_defect",
+        "material_right_to_deduct",
+        "seller_ksef_noncompliance",
+        "buyer_deduction_right"
+      ],
+      "supporting_mechanisms": [
+        "paper_invoice",
+        "pdf_invoice",
+        "structured_invoice_received_later",
+        "invoice_documenting_real_transaction",
+        "invoice_authenticity",
+        "invoice_integrity",
+        "invoice_legibility",
+        "negative_conditions_for_vat_deduction",
+        "jpk_v7_correction",
+        "duplicate_invoice_document",
+        "duplicate_vat_deduction_prevention",
+        "invoice_delivery",
+        "tax_point_independent_from_invoice_format",
+        "formal_error_not_affecting_deduction",
+        "supplier_compliance_failure"
+      ],
+      "disambiguators": [
+        "buyer_not_responsible_for_seller_format_error",
+        "same_transaction_documented_twice",
+        "later_ksef_version",
+        "whether_jpk_correction_is_required",
+        "format_error_vs_fictitious_transaction"
+      ],
+      "negative_matches": [
+        "empty_invoice",
+        "fictitious_invoice",
+        "invoice_visualization",
+        "invoice_data_mismatch",
+        "invoice_not_received",
+        "duplicate_tax_deduction"
+      ]
+    },
+    {
+      "id": "pit-termomodernizacja-dom-w-budowie-rozne-lata",
+      "expected_signature": "0115-KDIT3.4011.173.2026.3.AWO",
+      "tax_domains": [
+        "PIT"
+      ],
+      "primary_mechanisms": [
+        "thermomodernization_relief",
+        "existing_residential_building_requirement",
+        "building_under_construction",
+        "completion_of_building",
+        "deduction_of_expenses_from_multiple_years"
+      ],
+      "supporting_mechanisms": [
+        "single_family_residential_building",
+        "ownership_requirement",
+        "co_ownership_requirement",
+        "eligible_thermomodernization_expenses",
+        "construction_vs_thermomodernization",
+        "building_completion_date",
+        "expense_incurrence_date",
+        "deduction_timing",
+        "three_year_project_completion_period",
+        "invoice_requirement",
+        "vat_taxpayer_invoice",
+        "unused_relief_carryforward",
+        "annual_tax_return_deduction",
+        "subsequent_completion_of_construction"
+      ],
+      "disambiguators": [
+        "building_was_not_completed_when_first_expense_was_incurred",
+        "expenses_in_two_tax_years",
+        "later_obtaining_existing_building_status",
+        "whether_construction_expenses_can_become_thermomodernization_expenses"
+      ],
+      "negative_matches": [
+        "housing_relief",
+        "construction_relief",
+        "renovation_relief",
+        "energy_efficiency_grant",
+        "new_building_construction_cost"
+      ]
+    },
+    {
+      "id": "pit-ulga-na-powrot-bez-zmiany-rezydencji",
+      "expected_signature": "0115-KDIT1.4011.39.2026.2.MT",
+      "tax_domains": [
+        "PIT"
+      ],
+      "primary_mechanisms": [
+        "return_relief",
+        "transfer_of_tax_residence_to_poland",
+        "prior_foreign_tax_residence",
+        "physical_return_vs_tax_residence_change",
+        "center_of_vital_interests"
+      ],
+      "supporting_mechanisms": [
+        "place_of_residence_for_tax_purposes",
+        "unlimited_tax_liability_in_poland",
+        "required_non_residence_period",
+        "residence_abroad_evidence",
+        "tax_residence_certificate",
+        "citizenship_condition",
+        "polish_card_condition",
+        "prior_residence_in_selected_country",
+        "relief_eligibility_period",
+        "four_year_exemption_period",
+        "employment_income_exemption",
+        "business_income_exemption",
+        "social_relationships_in_poland",
+        "economic_relationships_in_poland",
+        "continuity_of_polish_tax_residence"
+      ],
+      "disambiguators": [
+        "physical_arrival_is_not_enough",
+        "taxpayer_may_have_remained_polish_resident",
+        "whether_residence_was_previously_transferred_abroad",
+        "change_of_residence_as_material_condition"
+      ],
+      "negative_matches": [
+        "limited_tax_liability",
+        "foreign_employment_income",
+        "abolition_relief",
+        "temporary_return_to_poland",
+        "mere_change_of_address"
+      ]
+    },
+    {
+      "id": "pcc-zniesienie-wspolwlasnosci-splata-zbywca",
+      "expected_signature": "0111-KDIB2-1.4014.24.2026.3.DKG",
+      "tax_domains": [
+        "PCC"
+      ],
+      "primary_mechanisms": [
+        "termination_of_co_ownership",
+        "equalization_payment",
+        "acquisition_above_existing_share",
+        "pcc_taxpayer_identification",
+        "pcc_on_co_ownership_termination"
+      ],
+      "supporting_mechanisms": [
+        "real_estate_co_ownership",
+        "transfer_of_ownership_share",
+        "payment_to_outgoing_co_owner",
+        "acquiring_co_owner",
+        "disposing_co_owner",
+        "taxable_base",
+        "market_value_of_acquired_excess",
+        "civil_law_transaction_catalog",
+        "non_gratuitous_co_ownership_termination",
+        "gratuitous_co_ownership_termination",
+        "notarial_deed",
+        "tax_collection_by_notary",
+        "difference_between_sale_and_co_ownership_termination"
+      ],
+      "disambiguators": [
+        "who_pays_pcc",
+        "recipient_of_payment_vs_acquirer",
+        "tax_burden_on_party_acquiring_excess_share",
+        "payment_received_is_not_itself_taxable_base_for_recipient"
+      ],
+      "negative_matches": [
+        "sale_of_real_estate_share",
+        "inheritance_division",
+        "marital_property_division",
+        "gift_of_real_estate_share",
+        "income_tax_on_payment_received"
+      ]
+    },
+    {
+      "id": "vat-ksef-wizualizacja-pdf-rozna-od-xml",
+      "expected_signature": "0114-KDIP1-3.4012.86.2026.1.JG",
+      "tax_domains": [
+        "VAT"
+      ],
+      "primary_mechanisms": [
+        "ksef_structured_invoice",
+        "xml_as_authoritative_invoice",
+        "invoice_visualization",
+        "pdf_invoice_rendering",
+        "visualization_different_from_xml"
+      ],
+      "supporting_mechanisms": [
+        "human_readable_invoice_format",
+        "machine_readable_invoice_format",
+        "invoice_schema",
+        "fa_xml_schema",
+        "visualization_not_separate_invoice",
+        "binding_invoice_content",
+        "non_binding_visual_layer",
+        "invoice_data_consistency",
+        "additional_information_in_visualization",
+        "omitted_information_in_visualization",
+        "qr_code_on_visualization",
+        "invoice_identification_number",
+        "ksef_invoice_access",
+        "document_representation"
+      ],
+      "disambiguators": [
+        "xml_contains_legally_binding_data",
+        "pdf_is_only_a_representation",
+        "difference_in_layout_vs_difference_in_content",
+        "whether_pdf_creates_separate_tax_document"
+      ],
+      "negative_matches": [
+        "invoice_outside_ksef",
+        "paper_invoice",
+        "duplicate_invoice",
+        "empty_invoice",
+        "input_vat_deduction"
+      ]
+    },
+    {
+      "id": "vat-sprzedaz-prywatnego-samochodu-po-leasingu",
+      "expected_signature": "0112-KDIL1-1.4012.268.2026.6.EB",
+      "tax_domains": [
+        "VAT"
+      ],
+      "primary_mechanisms": [
+        "post_leasing_vehicle_buyout",
+        "private_asset",
+        "sale_of_private_vehicle",
+        "acting_as_vat_taxpayer",
+        "disposal_outside_economic_activity"
+      ],
+      "supporting_mechanisms": [
+        "operating_lease",
+        "buyout_to_private_property",
+        "vehicle_not_entered_into_fixed_asset_register",
+        "vehicle_not_used_in_business",
+        "no_input_vat_deduction_on_buyout",
+        "no_input_vat_deduction_on_expenses",
+        "private_property_management",
+        "economic_activity_for_vat",
+        "supply_of_goods",
+        "taxpayer_status_for_specific_transaction",
+        "withdrawal_from_business_assets",
+        "sale_after_leasing",
+        "personal_use",
+        "business_use_history"
+      ],
+      "disambiguators": [
+        "taxpayer_status_is_transaction_specific",
+        "being_registered_for_vat_is_not_enough",
+        "private_buyout_vs_business_buyout",
+        "no_business_use_after_buyout"
+      ],
+      "negative_matches": [
+        "sale_of_business_fixed_asset",
+        "withdrawal_of_vehicle_from_business",
+        "vat_adjustment_period",
+        "income_tax_on_post_leasing_sale",
+        "vehicle_expense_deduction"
+      ]
+    },
+    {
+      "id": "pit-ulga-mieszkaniowa-raty-kredytu-zaciagnietego-przed-sprzedaza",
+      "expected_signature": "0115-KDIT1.4011.217.2026.2.ASZ",
+      "tax_domains": [
+        "PIT"
+      ],
+      "primary_mechanisms": [
+        "housing_relief",
+        "repayment_of_housing_loan",
+        "loan_taken_before_property_sale",
+        "use_of_sale_proceeds",
+        "own_housing_purposes"
+      ],
+      "supporting_mechanisms": [
+        "loan_principal_repayment",
+        "loan_interest_payment",
+        "mortgage_loan",
+        "loan_for_acquisition_of_property",
+        "loan_for_construction",
+        "loan_for_renovation",
+        "loan_taken_before_obtaining_sale_income",
+        "eligible_bank_or_credit_institution",
+        "three_year_expenditure_deadline",
+        "sale_before_five_year_period",
+        "income_from_sale_of_real_estate",
+        "documenting_expenditure",
+        "refinancing_loan",
+        "loan_consolidation",
+        "double_tax_benefit_prohibition",
+        "financing_of_sold_property",
+        "financing_of_new_property"
+      ],
+      "disambiguators": [
+        "loan_date_before_sale",
+        "repayment_made_after_sale_from_sale_proceeds",
+        "principal_and_interest_as_separate_expenses",
+        "whether_loan_financed_own_housing_purpose"
+      ],
+      "negative_matches": [
+        "mortgage_cancellation",
+        "loan_write_off",
+        "purchase_of_new_property_without_loan",
+        "housing_relief_for_temporary_rental",
+        "consumer_loan_repayment"
+      ]
+    },
+    {
+      "id": "vat-sprzedaz-dzialki-pelnomocnictwo-dla-kupujacego",
+      "expected_signature": "0113-KDIPT1-3.4012.266.2026.2.EG",
+      "tax_domains": [
+        "VAT"
+      ],
+      "primary_mechanisms": [
+        "sale_of_land",
+        "vat_taxpayer_status_for_land_sale",
+        "buyer_power_of_attorney",
+        "prior_land_lease",
+        "active_management_of_private_property"
+      ],
+      "supporting_mechanisms": [
+        "private_property",
+        "economic_activity_for_vat",
+        "commercial_activity_comparable_to_trader",
+        "preliminary_sale_agreement",
+        "land_development_conditions",
+        "building_permit",
+        "utility_connection_conditions",
+        "land_subdivision",
+        "change_of_land_use",
+        "actions_performed_by_buyer_on_sellers_behalf",
+        "legal_effects_attributed_to_principal",
+        "lease_as_continuous_use_for_profit",
+        "developed_land",
+        "undeveloped_building_land",
+        "professional_real_estate_activity",
+        "occasional_disposal"
+      ],
+      "disambiguators": [
+        "buyers_actions_legally_bind_seller",
+        "power_of_attorney_before_sale",
+        "lease_may_indicate_economic_use",
+        "seller_activity_exceeds_passive_property_management"
+      ],
+      "negative_matches": [
+        "sale_of_multiple_private_plots",
+        "inheritance_of_land",
+        "single_private_sale_without_preparatory_actions",
+        "agricultural_land_exemption",
+        "sale_of_built_up_property"
+      ]
+    },
+    {
+      "id": "vat-dropshipping-klient-jako-importer",
+      "expected_signature": "0113-KDIPT1-2.4012.347.2026.1.MC",
+      "tax_domains": [
+        "VAT"
+      ],
+      "primary_mechanisms": [
+        "dropshipping",
+        "customer_as_importer_of_record",
+        "import_of_goods",
+        "customs_clearance_by_customer",
+        "vat_treatment_of_intermediary"
+      ],
+      "supporting_mechanisms": [
+        "distance_sale_of_imported_goods",
+        "place_of_supply_of_goods",
+        "supply_chain",
+        "direct_shipment_from_third_country",
+        "seller_does_not_import_goods",
+        "intermediation_service",
+        "commission_income",
+        "sale_of_goods_in_own_name",
+        "acting_on_behalf_of_supplier",
+        "transfer_of_right_to_dispose_as_owner",
+        "import_vat_liability",
+        "customs_duty_liability",
+        "ecommerce_sales_records",
+        "fiscal_cash_register",
+        "ioss_special_scheme",
+        "low_value_goods",
+        "customer_payment_collection",
+        "foreign_supplier"
+      ],
+      "disambiguators": [
+        "who_is_importer",
+        "who_performs_customs_formalities",
+        "whether_dropshipper_sells_goods_or_only_service",
+        "whether_goods_enter_poland_before_customer_acquisition"
+      ],
+      "negative_matches": [
+        "domestic_distance_sale",
+        "intra_community_distance_sale",
+        "warehouse_based_ecommerce",
+        "importer_as_seller",
+        "platform_deemed_supplier"
+      ]
+    },
+    {
+      "id": "vat-adwokat-nieodplatna-pomoc-prawna",
+      "expected_signature": "0113-KDIPT1-1.4012.351.2026.2.MH",
+      "tax_domains": [
+        "VAT"
+      ],
+      "primary_mechanisms": [
+        "public_legal_aid",
+        "lawyer_independent_economic_activity",
+        "employment_like_relationship",
+        "vat_taxpayer_status",
+        "legal_services_vat_rate"
+      ],
+      "supporting_mechanisms": [
+        "independence_for_vat",
+        "conditions_of_performing_services",
+        "remuneration_conditions",
+        "liability_towards_third_parties",
+        "economic_risk",
+        "organizational_subordination",
+        "place_and_time_determined_by_contracting_authority",
+        "use_of_public_infrastructure",
+        "professional_liability",
+        "legal_services",
+        "service_for_consideration",
+        "invoice_issuance",
+        "standard_vat_rate",
+        "exclusion_from_independent_activity",
+        "relationship_similar_to_employment",
+        "county_or_public_authority_as_payer"
+      ],
+      "disambiguators": [
+        "not_whether_service_is_free_for_recipient",
+        "lawyer_receives_remuneration_from_public_entity",
+        "independence_depends_on_contractual_conditions",
+        "third_party_liability_is_key"
+      ],
+      "negative_matches": [
+        "pro_bono_legal_service",
+        "employment_contract",
+        "medical_service_exemption",
+        "public_authority_activity",
+        "legal_aid_recipient_payment"
+      ]
+    },
+    {
+      "id": "pit-sprzedaz-udzialow-po-przeksztalceniu-spolki-komandytowej",
+      "expected_signature": "0113-KDIPT2-3.4011.305.2022.11.MS",
+      "tax_domains": [
+        "PIT"
+      ],
+      "primary_mechanisms": [
+        "sale_of_company_shares",
+        "transformation_of_limited_partnership_into_limited_liability_company",
+        "tax_cost_basis_of_shares",
+        "continuity_of_ownership_after_transformation",
+        "historical_expenditure_method"
+      ],
+      "supporting_mechanisms": [
+        "tax_neutral_transformation",
+        "universal_succession",
+        "partnership_interest",
+        "shares_received_on_transformation",
+        "expenditure_on_acquisition_of_partnership_interest",
+        "contributions_to_partnership",
+        "retained_earnings",
+        "undistributed_profit",
+        "nominal_value_of_shares",
+        "market_value_of_shares",
+        "actual_historical_cost",
+        "capital_gains",
+        "income_from_disposal_of_shares",
+        "cost_recognition_at_disposal",
+        "no_new_acquisition_on_transformation",
+        "continuation_of_tax_values",
+        "court_judgment_follow_up_interpretation"
+      ],
+      "disambiguators": [
+        "transformation_is_not_contribution_in_kind",
+        "shares_are_not_acquired_for_nominal_value",
+        "cost_may_derive_from_historical_partnership_expenditure",
+        "distinguish_partnership_asset_value_from_taxpayer_expenditure"
+      ],
+      "negative_matches": [
+        "share_exchange",
+        "contribution_in_kind_to_company",
+        "sale_of_partnership_interest",
+        "liquidation_of_partnership",
+        "dividend_income"
+      ]
+    },
+    {
+      "id": "pit-ulga-mieszkaniowa-czasowy-wynajem-nowego-lokalu",
+      "expected_signature": "0114-KDWP.4011.143.2026.1.PP",
+      "tax_domains": [
+        "PIT"
+      ],
+      "primary_mechanisms": [
+        "housing_relief",
+        "own_housing_purposes",
+        "temporary_rental_of_new_property",
+        "future_self_occupation",
+        "housing_intent"
+      ],
+      "supporting_mechanisms": [
+        "purchase_of_residential_property",
+        "use_of_sale_proceeds",
+        "three_year_expenditure_deadline",
+        "temporary_lack_of_self_occupation",
+        "rental_income",
+        "investment_purpose_vs_housing_purpose",
+        "objective_and_subjective_housing_intent",
+        "planned_future_residence",
+        "change_of_life_circumstances",
+        "family_housing_needs",
+        "property_available_for_taxpayer",
+        "duration_of_rental",
+        "evidence_of_housing_purpose",
+        "sale_before_five_year_period",
+        "exemption_of_real_estate_sale_income"
+      ],
+      "disambiguators": [
+        "temporary_rental_does_not_automatically_exclude_relief",
+        "permanent_investment_intent_may_exclude_relief",
+        "future_personal_use_is_relevant",
+        "actual_circumstances_matter_more_than_declaration"
+      ],
+      "negative_matches": [
+        "rental_business",
+        "purchase_exclusively_for_investment",
+        "repayment_of_housing_loan",
+        "temporary_rental_of_sold_property",
+        "short_term_accommodation_service"
+      ]
+    },
+    {
+      "id": "pit-ulga-dla-seniora-wyplaty-przed-pierwsza-emerytura",
+      "expected_signature": "0113-KDWPT.4011.188.2026.3.DS",
+      "tax_domains": [
+        "PIT"
+      ],
+      "primary_mechanisms": [
+        "working_senior_relief",
+        "pension_entitlement_vs_pension_receipt",
+        "income_received_before_first_pension_payment",
+        "cash_basis_of_employment_income",
+        "senior_age_threshold"
+      ],
+      "supporting_mechanisms": [
+        "employment_income",
+        "social_security_coverage",
+        "continuation_of_work_after_retirement_age",
+        "right_to_retirement_pension",
+        "application_for_pension",
+        "pension_award_decision",
+        "first_pension_payment_date",
+        "suspended_pension",
+        "not_receiving_pension_condition",
+        "income_receipt_date",
+        "salary_payment_date",
+        "annual_exemption_limit",
+        "employer_payroll_obligations",
+        "tax_advance_calculation",
+        "retroactive_pension_payment"
+      ],
+      "disambiguators": [
+        "having_right_to_pension_is_not_same_as_receiving_it",
+        "condition_is_tested_on_income_receipt_date",
+        "payment_before_first_pension_transfer",
+        "distinguish_award_decision_from_actual_payment"
+      ],
+      "negative_matches": [
+        "late_salary_paid_after_pension_started",
+        "return_relief",
+        "pension_income_taxation",
+        "pension_suspension_after_first_payment",
+        "senior_tax_credit"
+      ]
+    },
+    {
+      "id": "vat-sprzedaz-dziesieciu-dzialek-z-majatku-prywatnego",
+      "expected_signature": "0112-KDIL3.4012.223.2026.4.EW",
+      "tax_domains": [
+        "VAT"
+      ],
+      "primary_mechanisms": [
+        "sale_of_multiple_land_plots",
+        "private_property",
+        "vat_taxpayer_status_for_land_sale",
+        "economic_activity_for_vat",
+        "active_real_estate_trading"
+      ],
+      "supporting_mechanisms": [
+        "land_subdivision",
+        "number_of_transactions",
+        "frequency_of_sales",
+        "organized_sale_activity",
+        "professional_marketing",
+        "advertising_of_land",
+        "utility_connections",
+        "internal_access_road",
+        "zoning_change",
+        "development_conditions",
+        "building_permits",
+        "land_preparation_for_sale",
+        "purchase_intent",
+        "inheritance_or_gift_origin",
+        "long_term_private_ownership",
+        "passive_property_management",
+        "commercial_activity_comparable_to_trader",
+        "undeveloped_building_land",
+        "agricultural_land",
+        "single_project_split_into_multiple_sales"
+      ],
+      "disambiguators": [
+        "number_of_plots_alone_is_not_determinative",
+        "active_preparatory_actions_are_more_important_than_quantity",
+        "private_asset_origin_is_not_always_decisive",
+        "assessment_requires_totality_of_actions"
+      ],
+      "negative_matches": [
+        "sale_of_land_with_buyer_power_of_attorney",
+        "sale_of_one_private_plot",
+        "developer_business",
+        "sale_of_built_up_property",
+        "agricultural_activity"
+      ]
+    },
+    {
+      "id": "pit-przejecie-dlugu-cywilna-skutecznosc-przed-podatkami",
+      "expected_signature": "0113-KDIPT2-3.4011.341.2026.2.MS",
+      "tax_domains": [
+        "PIT"
+      ],
+      "primary_mechanisms": [
+        "debt_assumption",
+        "civil_law_effectiveness",
+        "creditor_consent",
+        "free_benefit_income",
+        "group_i_or_ii_relief"
+      ],
+      "supporting_mechanisms": [
+        "art_519_kc",
+        "art_520_kc",
+        "art_521_kc",
+        "tax_exemption_for_family_benefit",
+        "non_gratuitous_assumption_of_liability",
+        "distinguish_pit_from_sd",
+        "no_automatic_pcc",
+        "definitive_release_from_debt",
+        "credit_agreement_amendment"
+      ],
+      "disambiguators": [
+        "whether_creditor_consented",
+        "whether_debt_transfer_was_effective",
+        "whether_the_benefit_is_gratuitous",
+        "whether_the_case_should_be_classified_as_pit_or_sd_first"
+      ],
+      "negative_matches": [
+        "automatic_pcc_due_to_debtor_change",
+        "gift_of_property_in_exchange_for_release",
+        "mortgage_settlement_refund",
+        "housing_relief",
+        "loan_write_off"
+      ]
+    }
+  ]
+}

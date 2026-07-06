@@ -108,6 +108,9 @@ KSEF_FOREIGN_SALE_STATUTE_TARGETS: tuple[tuple[str, str], ...] = (
     ("VAT", "106gb"),
 )
 KSEF_FOREIGN_SALE_INTERPRETATION_DOCUMENT_IDS: tuple[str, ...] = ("679542",)
+DEBT_ASSUMPTION_INTERPRETATION_DOCUMENT_IDS: tuple[str, ...] = ("695395", "678370")
+HOUSING_RELIEF_TEMPORARY_RENTAL_INTERPRETATION_DOCUMENT_IDS: tuple[str, ...] = ("691376",)
+MORTGAGE_SETTLEMENT_INTERPRETATION_DOCUMENT_IDS: tuple[str, ...] = ("688486", "693529")
 
 # The search corpus uses both abbreviations and their expanded legal names.  Keeping
 # these aliases here makes a user's natural query match either form without an LLM.
@@ -195,6 +198,39 @@ QUERY_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         ),
     ),
     (re.compile(r"\bpcc\b|podatek od czynności cywilnoprawnych", re.IGNORECASE), ("PCC", "podatek od czynności cywilnoprawnych")),
+    (
+        re.compile(
+            r"(\bprzejęci\w*\s+dług\w*|\bprzejęci\w*\s+zobowiązan\w*|\bzwolnieni\w*\s+z dług\w*|"
+            r"\bzmian\w*\s+dłużnik\w*|\bzmian\w*\s+dluznik\w*|\bzgod\w*\s+wierzyciel\w*|"
+            r"art\.\s*519|art\.\s*520|art\.\s*521|art\.\s*508)\b",
+            re.IGNORECASE,
+        ),
+        (
+            "przejęcie długu",
+            "przejęcie zobowiązania",
+            "zwolnienie z długu",
+            "zgoda wierzyciela",
+            "art. 519 Kodeksu cywilnego",
+            "art. 508 Kodeksu cywilnego",
+        ),
+    ),
+    (
+        re.compile(
+            r"(\bulg\w*\s+mieszkaniow\w*|\bwłasn\w*\s+cele\s+mieszkaniow\w*|\bwlasn\w*\s+cele\s+mieszkaniow\w*|"
+            r"\bczasow\w*\s+wynaj\w*|\bwynajmow\w*\s+lokal\w*|\bwynajem\w*\s+zakupion\w*\s+lokal\w*|"
+            r"\bart\.\s*52i\b|\bzaniechan\w*\s+pobor\w*|\bkredyt\w*\s+mieszkaniow\w*|\bumorzen\w*\s+zadłużen\w*|\bumorzen\w*\s+zadluzen\w*)\b",
+            re.IGNORECASE,
+        ),
+        (
+            "ulga mieszkaniowa",
+            "własne cele mieszkaniowe",
+            "czasowy wynajem",
+            "zaniechanie poboru",
+            "art. 52i",
+            "kredyt mieszkaniowy",
+            "umorzenie zadłużenia",
+        ),
+    ),
     (
         re.compile(
             r"(\bsamoch[óo]d\w*|\bpojazd\w*|\bauto\b).{0,220}"
@@ -469,6 +505,39 @@ STATUTE_QUERY_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = 
     (re.compile(r"\b(stawk\w*\s*9\s*%|9\s*proc\.?|9-proc)\b", re.IGNORECASE), ("9 % podstawy opodatkowania",)),
     (re.compile(r"\b(ip\s*box|kwalifikowan\w* praw\w* własności intelektualnej|obowiązk\w* ewidencyjn\w*)\b", re.IGNORECASE), ("kwalifikowane prawo własności intelektualnej", "ewidencji rachunkowej",)),
     (re.compile(r"\b(exit\s+tax|niezrealizowanych zysk\w*)\b", re.IGNORECASE), ("podatek od dochodów z niezrealizowanych zysków", "dochód z niezrealizowanych zysków")),
+    (
+        re.compile(
+            r"(\bprzejęci\w*\s+dług\w*|\bprzejęci\w*\s+zobowiązan\w*|\bzwolnieni\w*\s+z dług\w*|"
+            r"\bzmian\w*\s+dłużnik\w*|\bzmian\w*\s+dluznik\w*|\bzgod\w*\s+wierzyciel\w*|"
+            r"art\.\s*519|art\.\s*520|art\.\s*521|art\.\s*508)\b",
+            re.IGNORECASE,
+        ),
+        (
+            "przejęcie długu",
+            "przejęcie zobowiązania",
+            "zwolnienie z długu",
+            "zgoda wierzyciela",
+            "art. 519 Kodeksu cywilnego",
+            "art. 508 Kodeksu cywilnego",
+        ),
+    ),
+    (
+        re.compile(
+            r"(\bulg\w*\s+mieszkaniow\w*|\bwłasn\w*\s+cele\s+mieszkaniow\w*|\bwlasn\w*\s+cele\s+mieszkaniow\w*|"
+            r"\bczasow\w*\s+wynaj\w*|\bwynajmow\w*\s+lokal\w*|\bwynajem\w*\s+zakupion\w*\s+lokal\w*|"
+            r"\bart\.\s*52i\b|\bzaniechan\w*\s+pobor\w*|\bkredyt\w*\s+mieszkaniow\w*|\bumorzen\w*\s+zadłużen\w*|\bumorzen\w*\s+zadluzen\w*)\b",
+            re.IGNORECASE,
+        ),
+        (
+            "ulga mieszkaniowa",
+            "własne cele mieszkaniowe",
+            "czasowy wynajem",
+            "zaniechanie poboru",
+            "art. 52i",
+            "kredyt mieszkaniowy",
+            "umorzenie zadłużenia",
+        ),
+    ),
 )
 STATUTORY_CONCEPTS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
     (re.compile(r"\b(terytor\w* kraju|defini\w*|oznacza\w*|ilekroć)\b", re.IGNORECASE), ("ilekroć w dalszych przepisach jest mowa",)),
@@ -721,6 +790,14 @@ MECHANISM_RULES: dict[str, tuple[str, ...]] = {
         "umorzenie części kredytu hipotecznego",
         "zwrot kosztów zastępstwa procesowego",
         "zwrot kosztów zastepstwa procesowego",
+    ),
+    "debt_assumption": (
+        "przejęcie długu",
+        "przejęcie zobowiązania",
+        "zwolnienie z długu",
+        "zmiana dłużnika",
+        "zgoda wierzyciela",
+        "art. 519 kodeksu cywilnego",
     ),
 }
 STATUTE_PROCEDURAL_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...], tuple[str, ...], tuple[str, ...]], ...] = (
@@ -1894,6 +1971,61 @@ def query_targets_ksef_foreign_sale(query: str) -> bool:
     return bool(KSEF_QUERY_RE.search(normalized) and KSEF_FOREIGN_SALE_QUERY_RE.search(normalized))
 
 
+def query_targets_debt_assumption_effectiveness(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    return bool(
+        re.search(
+            r"(\bprzejęci\w*\s+dług\w*|\bprzejęci\w*\s+zobowiązan\w*|\bzwolnieni\w*\s+z dług\w*|"
+            r"\bzmian\w*\s+dłużnik\w*|\bzmian\w*\s+dluznik\w*|\bzgod\w*\s+wierzyciel\w*|"
+            r"art\.\s*519|art\.\s*520|art\.\s*521|art\.\s*508)\b",
+            normalized,
+        )
+    )
+
+
+def query_targets_housing_relief_temporary_rental(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_housing_relief = bool(
+        re.search(
+            r"\b(ulg\w*\s+mieszkaniow\w*|własn\w*\s+cele\s+mieszkaniow\w*|wlasn\w*\s+cele\s+mieszkaniow\w*|art\.\s*21\s*ust\.\s*1\s*pkt\s*131)\b",
+            normalized,
+        )
+    )
+    has_temporary_rental = bool(
+        re.search(r"\b(czasow\w*\s+wynaj\w*|wynajmow\w*\s+lokal\w*|wynajem\w*\s+zakupion\w*\s+lokal\w*|wynaj\w*.*lokal\w*|lokal\w*.*wynaj\w*)\b", normalized)
+    )
+    return has_housing_relief and has_temporary_rental
+
+
+def query_targets_housing_relief_loan_repayment(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_housing_relief = bool(
+        re.search(
+            r"\b(ulg\w*\s+mieszkaniow\w*|własn\w*\s+cele\s+mieszkaniow\w*|wlasn\w*\s+cele\s+mieszkaniow\w*|art\.\s*21\s*ust\.\s*1\s*pkt\s*131)\b",
+            normalized,
+        )
+    )
+    has_loan_repayment = bool(
+        re.search(
+            r"\b(sp[łl]at\w*\s+rat\w*|kredyt\w*\s+zaci[ąa]gni[ęe]t\w*\s+przed\s+sprzedaż\w*|przychód\w*\s+ze\s+sprzedaż\w*.*sp[łl]at\w*\s+kredyt\w*)\b",
+            normalized,
+        )
+    )
+    return has_housing_relief and has_loan_repayment
+
+
+def query_targets_mortgage_settlement_refund(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    return bool(
+        re.search(
+            r"\b(ugod\w*\s+z\s+bankiem|kredyt\w*\s+hipoteczn\w*|kredyt\w*\s+mieszkaniow\w*|"
+            r"zaniechan\w*\s+pobor\w*|art\.\s*52i|umorzen\w*\s+zadłużen\w*|umorzen\w*\s+zadluzen\w*|"
+            r"skapitalizowan\w*\s+odsetk\w*|prowizj\w*|opłat\w*|oplata\w*)\b",
+            normalized,
+        )
+    )
+
+
 def query_targets_vat_dropshipping_ioss(query: str) -> bool:
     normalized = normalize_whitespace(query or "").lower()
     has_platform_or_dropshipping = bool(
@@ -2061,6 +2193,88 @@ def build_vat_dropshipping_ioss_statute_targets(query: str) -> list[tuple[str, s
         ("VAT", "106ga"),
         ("VAT", "106gb"),
         ("VAT", "2"),
+    ]
+    deduped_targets: list[tuple[str, str]] = []
+    seen_targets: set[tuple[str, str]] = set()
+    for target in preferred_targets:
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        deduped_targets.append(target)
+    return deduped_targets
+
+
+def build_debt_assumption_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_debt_assumption_effectiveness(query):
+        return []
+
+    preferred_targets: list[tuple[str, str]] = [
+        ("PIT", "21"),
+        ("PIT", "11"),
+        ("PIT", "20"),
+        ("PIT", "2"),
+        ("PIT", "30e"),
+        ("SD", "1"),
+        ("SD", "4a"),
+    ]
+    deduped_targets: list[tuple[str, str]] = []
+    seen_targets: set[tuple[str, str]] = set()
+    for target in preferred_targets:
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        deduped_targets.append(target)
+    return deduped_targets
+
+
+def build_housing_relief_temporary_rental_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_housing_relief_temporary_rental(query):
+        return []
+
+    preferred_targets: list[tuple[str, str]] = [
+        ("PIT", "21"),
+        ("PIT", "30e"),
+        ("PIT", "52i"),
+        ("PIT", "11"),
+    ]
+    deduped_targets: list[tuple[str, str]] = []
+    seen_targets: set[tuple[str, str]] = set()
+    for target in preferred_targets:
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        deduped_targets.append(target)
+    return deduped_targets
+
+
+def build_housing_relief_loan_repayment_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_housing_relief_loan_repayment(query):
+        return []
+
+    preferred_targets: list[tuple[str, str]] = [
+        ("PIT", "21"),
+        ("PIT", "30e"),
+        ("PIT", "52i"),
+        ("PIT", "11"),
+    ]
+    deduped_targets: list[tuple[str, str]] = []
+    seen_targets: set[tuple[str, str]] = set()
+    for target in preferred_targets:
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        deduped_targets.append(target)
+    return deduped_targets
+
+
+def build_mortgage_settlement_refund_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_mortgage_settlement_refund(query):
+        return []
+
+    preferred_targets: list[tuple[str, str]] = [
+        ("PIT", "52i"),
+        ("PIT", "21"),
+        ("PIT", "11"),
     ]
     deduped_targets: list[tuple[str, str]] = []
     seen_targets: set[tuple[str, str]] = set()
@@ -3595,6 +3809,12 @@ def resolve_statute_tax_domains(query: str) -> set[str]:
         domains.update({"PIT", "SD"})
     if query_targets_spouse_gift_sd(query):
         domains.add("SD")
+    if query_targets_debt_assumption_effectiveness(query):
+        domains.update({"PIT", "SD"})
+        if "PCC" not in {domain.upper() for domain in detect_domains(query)}:
+            domains.discard("PCC")
+    if query_targets_housing_relief_temporary_rental(query) or query_targets_housing_relief_loan_repayment(query) or query_targets_mortgage_settlement_refund(query):
+        domains.add("PIT")
     if query_targets_estonian_cit_transformation_share_cost(query):
         domains.update({"CIT", "PIT", "PCC", "ORDYNACJA"})
     if query_targets_vat_dropshipping_ioss(query):
@@ -3853,6 +4073,8 @@ def build_pcc_interpretation_match_score(row: sqlite3.Row, *, query: str) -> flo
         )
     ).lower()
     score = 0.0
+    if query_targets_debt_assumption_effectiveness(query) and "pcc" not in normalized_query:
+        score -= 1.0
     if "pożycz" in normalized_query and "pożycz" in candidate_text:
         score += 0.6
         if re.search(r"art\.\s*2\s*pkt\s*4|vat|towar[óo]w i usług", normalized_query) and re.search(
@@ -4218,6 +4440,26 @@ def build_statute_match_score(row: sqlite3.Row, *, query: str) -> float:
             text,
         ):
             score += 0.45
+    if query_targets_debt_assumption_effectiveness(query):
+        row_domains = row_tax_domains(row)
+        if article_number == "21" and "PIT" in row_domains and re.search(r"\b(nieodpłatn\w* świadczen\w*|art\.\s*21\s*ust\.\s*1\s*pkt\s*125|świadczen\w* otrzyman\w* od osób)\b", text):
+            score += 1.1
+        if article_number == "2" and "SD" in row_domains and re.search(r"\b(podatku od spadków i darowizn|grupy podatkowe|zwolnienie)\b", text):
+            score += 0.9
+        if article_number == "1" and "PCC" in row_domains and re.search(r"\b(czynności cywilnoprawnych|umowa sprzedaży|pożyczka|darowizna)\b", text):
+            score -= 0.65
+    if query_targets_housing_relief_loan_repayment(query):
+        row_domains = row_tax_domains(row)
+        if article_number == "21" and "PIT" in row_domains and re.search(r"\b(spłat\w* rat\w* kredyt\w*|przychód\w* ze sprzedaż\w*|własne cele mieszkaniowe|wlasne cele mieszkaniowe)\b", text):
+            score += 1.25
+        if article_number == "67a" and "ORDYNACJA" in row_domains:
+            score -= 0.8
+    if query_targets_housing_relief_temporary_rental(query) or query_targets_mortgage_settlement_refund(query):
+        row_domains = row_tax_domains(row)
+        if article_number == "21" and "PIT" in row_domains and re.search(r"\b(własne cele mieszkaniowe|wlasne cele mieszkaniowe|wydatki na cele mieszkaniowe|ulga mieszkaniowa)\b", text):
+            score += 1.2
+        if article_number == "52i" and "PIT" in row_domains and re.search(r"\b(zaniechanie poboru|umorzenie zadłużenia|umorzenie zadluzenia|kwalifikowan\w* kredyt\w* mieszkaniow\w*)\b", text):
+            score += 1.4
     if query_targets_post_leasing_vehicle_gift_sale(query):
         row_domains = row_tax_domains(row)
         if article_number == "7" and "VAT" in row_domains and re.search(
@@ -5113,18 +5355,32 @@ def search_chat_chunks(
                 interpretation_limit = max(1, interpretation_limit - shift)
             if include_judgments and (statute_limit + interpretation_limit + judgment_limit) > effective_limit:
                 judgment_limit = max(1, effective_limit - statute_limit - interpretation_limit)
-    if interpretation_limit and query_targets_ksef_foreign_sale(query):
-        interpretation_rows = fetch_rows_by_document_ids(
-            KSEF_FOREIGN_SALE_INTERPRETATION_DOCUMENT_IDS,
+    direct_interpretation_document_ids: list[str] = []
+    if query_targets_ksef_foreign_sale(query):
+        direct_interpretation_document_ids.extend(KSEF_FOREIGN_SALE_INTERPRETATION_DOCUMENT_IDS)
+    if query_targets_debt_assumption_effectiveness(query):
+        direct_interpretation_document_ids.extend(DEBT_ASSUMPTION_INTERPRETATION_DOCUMENT_IDS)
+    if query_targets_housing_relief_temporary_rental(query):
+        direct_interpretation_document_ids.extend(HOUSING_RELIEF_TEMPORARY_RENTAL_INTERPRETATION_DOCUMENT_IDS)
+    if query_targets_housing_relief_loan_repayment(query):
+        direct_interpretation_document_ids.extend(("695380",))
+    if query_targets_mortgage_settlement_refund(query):
+        direct_interpretation_document_ids.extend(MORTGAGE_SETTLEMENT_INTERPRETATION_DOCUMENT_IDS)
+    direct_interpretation_rows = []
+    if interpretation_limit and direct_interpretation_document_ids:
+        direct_interpretation_rows = fetch_rows_by_document_ids(
+            tuple(dict.fromkeys(direct_interpretation_document_ids)),
             config=config,
             source_type="interpretation",
+            chunk_limit_per_document=1,
         )
+    if interpretation_limit and direct_interpretation_rows:
         interpretations = rank_hybrid_local_candidates(
-            interpretation_rows,
+            direct_interpretation_rows,
             query=expand_search_query(query),
             effective_limit=interpretation_limit,
             config=config,
-        ) if interpretation_rows else []
+        )
     else:
         interpretations = search_chunks(
             query,
@@ -5157,6 +5413,14 @@ def search_chat_chunks(
     preferred_targets: list[tuple[str, str]] = []
     if query_targets_ksef_foreign_sale(query):
         preferred_targets.extend(KSEF_FOREIGN_SALE_STATUTE_TARGETS)
+    if query_targets_debt_assumption_effectiveness(query):
+        preferred_targets.extend(build_debt_assumption_statute_targets(query))
+    if query_targets_housing_relief_temporary_rental(query):
+        preferred_targets.extend(build_housing_relief_temporary_rental_statute_targets(query))
+    if query_targets_housing_relief_loan_repayment(query):
+        preferred_targets.extend(build_housing_relief_loan_repayment_statute_targets(query))
+    if query_targets_mortgage_settlement_refund(query):
+        preferred_targets.extend(build_mortgage_settlement_refund_statute_targets(query))
     if query_targets_poland_spain_treaty(query):
         preferred_targets.extend(build_poland_spain_treaty_statute_targets(query))
     if query_targets_vat_dropshipping_ioss(query):
@@ -5209,6 +5473,10 @@ def search_chat_chunks(
             or query_targets_gifted_asset_cost_basis(query)
             or query_targets_spouse_gift_sd(query)
             or query_targets_estonian_cit_transformation_share_cost(query)
+            or query_targets_debt_assumption_effectiveness(query)
+            or query_targets_housing_relief_temporary_rental(query)
+            or query_targets_housing_relief_loan_repayment(query)
+            or query_targets_mortgage_settlement_refund(query)
         ) else statute_limit,
     ) if statute_limit else []
     if direct_treaty_rows:
@@ -5222,6 +5490,10 @@ def search_chat_chunks(
             or query_targets_gifted_asset_cost_basis(query)
             or query_targets_spouse_gift_sd(query)
             or query_targets_estonian_cit_transformation_share_cost(query)
+            or query_targets_debt_assumption_effectiveness(query)
+            or query_targets_housing_relief_temporary_rental(query)
+            or query_targets_housing_relief_loan_repayment(query)
+            or query_targets_mortgage_settlement_refund(query)
         ) else statute_limit,
         config=config,
     ) if hinted_statute_rows else []
@@ -5232,6 +5504,10 @@ def search_chat_chunks(
         or query_targets_gifted_asset_cost_basis(query)
         or query_targets_spouse_gift_sd(query)
         or query_targets_estonian_cit_transformation_share_cost(query)
+        or query_targets_debt_assumption_effectiveness(query)
+        or query_targets_housing_relief_temporary_rental(query)
+        or query_targets_housing_relief_loan_repayment(query)
+        or query_targets_mortgage_settlement_refund(query)
     ):
         hinted_statutes = order_chunks_by_statute_targets(hinted_statutes, preferred_targets)
 
@@ -5239,6 +5515,10 @@ def search_chat_chunks(
     seen_statute_chunks: set[str] = set()
     prefer_hinted_statutes = (
         query_targets_ksef_foreign_sale(query)
+        or query_targets_debt_assumption_effectiveness(query)
+        or query_targets_housing_relief_temporary_rental(query)
+        or query_targets_housing_relief_loan_repayment(query)
+        or query_targets_mortgage_settlement_refund(query)
         or query_targets_poland_spain_treaty(query)
         or query_targets_vat_dropshipping_ioss(query)
         or query_targets_wht_crossborder_payments(query)

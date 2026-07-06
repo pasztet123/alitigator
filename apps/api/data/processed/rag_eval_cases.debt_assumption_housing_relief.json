@@ -1,0 +1,46 @@
+[
+  {
+    "id": "debt-assumption-pit-group-zero-no-pcc",
+    "question": "Czy nieodpłatne przejęcie zobowiązania kredytowego podatnika przez brata jego małżonki i małżonkę tego brata powoduje powstanie opodatkowanego przychodu w PIT?",
+    "expected_legal_provisions": [
+      "art. 21"
+    ],
+    "required_legal_provisions": [
+      "art. 21"
+    ],
+    "notes": "Regresja dla przejęcia długu: najpierw skuteczność cywilna i zwolnienie z długu, potem kwalifikacja PIT/SD bez automatycznego przerzucania sprawy do PCC."
+  },
+  {
+    "id": "housing-relief-temporary-rental-does-not-automatically-exclude",
+    "question": "Czy czasowy wynajem zakupionego lokalu mieszkalnego przed własnym zamieszkaniem automatycznie wyklucza ulgę mieszkaniową przy wydatkowaniu przychodu ze sprzedaży mieszkania?",
+    "expected_legal_provisions": [
+      "art. 21"
+    ],
+    "required_legal_provisions": [
+      "art. 21"
+    ],
+    "notes": "Ma łapać interpretację o czasowym wynajmie nowego lokalu i nie gubić własnego celu mieszkaniowego tylko dlatego, że lokal był czasowo wynajmowany."
+  },
+  {
+    "id": "housing-relief-loan-repayment-before-sale",
+    "question": "Czy spłata rat kredytu zaciągniętego przed sprzedażą mieszkania może być wydatkiem na własne cele mieszkaniowe w uldze mieszkaniowej?",
+    "expected_legal_provisions": [
+      "art. 21"
+    ],
+    "required_legal_provisions": [
+      "art. 21"
+    ],
+    "notes": "Regresja pod własne cele mieszkaniowe i proporcję wydatku. Dobrze pilnuje, że nie miesza się tego z automatycznym odrzuceniem przez sam fakt kredytu."
+  },
+  {
+    "id": "mortgage-waiver-qualified-loan-52i",
+    "question": "Czy umorzenie zadłużenia z kwalifikowanego kredytu mieszkaniowego korzysta z zaniechania poboru PIT do 31 grudnia 2026 r.?",
+    "expected_legal_provisions": [
+      "art. 52i"
+    ],
+    "required_legal_provisions": [
+      "art. 52i"
+    ],
+    "notes": "Regresja dla art. 52i i kwalifikowanego kredytu mieszkaniowego. Bank nie powinien być opisywany jako płatnik bez podstawy."
+  }
+]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from contextlib import contextmanager
@@ -48,6 +49,7 @@ from app.rag import (
     query_targets_ksef_foreign_sale,
     query_targets_shareholder_company_asset_sale,
     query_targets_small_taxpayer_foreign_vat,
+    decompose_query_into_legal_axes,
     rerank_chunks_within_documents,
     rank_hybrid_local_candidates,
     ranking_terms,
@@ -66,7 +68,9 @@ from app.rag import (
     build_statute_match_score,
     build_interpretation_section_match_score,
     compute_cross_encoder_scores,
+    _merge_axis_search_chunks,
     resolve_cross_blend_weight,
+    LegalRetrievalAxis,
 )
 
 
@@ -812,6 +816,88 @@ def fetch_candidate_rows_mysql(
     return " || ".join(match_queries), rows
 
 
+def _resolve_axis_scope_mysql(
+    axis: LegalRetrievalAxis,
+    *,
+    source_types: Optional[set[str]],
+    tax_domains: Optional[set[str]],
+) -> Optional[tuple[Optional[set[str]], Optional[set[str]]]]:
+    axis_source_types = set(axis.source_types) if axis.source_types else None
+    if source_types is not None:
+        axis_source_types = set(source_types) if axis_source_types is None else axis_source_types & set(source_types)
+        if axis_source_types is not None and not axis_source_types:
+            return None
+
+    axis_tax_domains = set(axis.tax_domains) if axis.tax_domains else None
+    if tax_domains is not None:
+        axis_tax_domains = set(tax_domains) if axis_tax_domains is None else axis_tax_domains & set(tax_domains)
+        if axis_tax_domains is not None and not axis_tax_domains:
+            return None
+
+    return axis_source_types, axis_tax_domains
+
+
+def _search_chunks_single_query_mysql(
+    query: str,
+    *,
+    limit: Optional[int] = None,
+    source_types: Optional[set[str]] = None,
+    enforce_query_domain: bool = False,
+    tax_domains: Optional[set[str]] = None,
+) -> list[RagChunk]:
+    config = get_rag_config()
+    effective_limit = limit or config.retrieval_limit
+    expanded_query = expand_search_query(query)
+    _, rows = fetch_candidate_rows_mysql(
+        expanded_query,
+        effective_limit=effective_limit,
+        source_types=source_types,
+        enforce_query_domain=enforce_query_domain,
+        tax_domains=tax_domains,
+        detection_query=query,
+    )
+    return rank_hybrid_local_candidates(rows, query=expanded_query, effective_limit=effective_limit, config=config)
+
+
+def _search_chunks_by_legal_axes_mysql(
+    query: str,
+    *,
+    limit: Optional[int] = None,
+    source_types: Optional[set[str]] = None,
+    enforce_query_domain: bool = False,
+    tax_domains: Optional[set[str]] = None,
+) -> tuple[list[RagChunk], list[LegalRetrievalAxis]]:
+    config = get_rag_config()
+    effective_limit = limit or config.retrieval_limit
+    axes = decompose_query_into_legal_axes(query)
+    if len(axes) <= 1:
+        return [], axes
+
+    scoped_axis_chunks: list[list[RagChunk]] = []
+    active_axes: list[LegalRetrievalAxis] = []
+    for axis in axes:
+        axis_scope = _resolve_axis_scope_mysql(axis, source_types=source_types, tax_domains=tax_domains)
+        if axis_scope is None:
+            continue
+        axis_source_types, axis_tax_domains = axis_scope
+        active_axes.append(axis)
+        axis_limit = max(1, math.ceil(effective_limit / max(len(axes), 1)))
+        scoped_axis_chunks.append(
+            _search_chunks_single_query_mysql(
+                axis.query,
+                limit=axis_limit,
+                source_types=axis_source_types,
+                enforce_query_domain=enforce_query_domain or bool(axis_tax_domains),
+                tax_domains=axis_tax_domains,
+            )
+        )
+
+    if not scoped_axis_chunks:
+        return [], axes
+
+    return _merge_axis_search_chunks(scoped_axis_chunks, effective_limit=effective_limit), active_axes
+
+
 def inspect_search_mysql(
     query: str,
     *,
@@ -886,18 +972,31 @@ def search_chunks_mysql(
     enforce_query_domain: bool = False,
     tax_domains: Optional[set[str]] = None,
 ) -> list[RagChunk]:
-    config = get_rag_config()
-    effective_limit = limit or config.retrieval_limit
-    expanded_query = expand_search_query(query)
-    _, rows = fetch_candidate_rows_mysql(
-        expanded_query,
-        effective_limit=effective_limit,
+    axis_chunks, axes = _search_chunks_by_legal_axes_mysql(
+        query,
+        limit=limit,
         source_types=source_types,
         enforce_query_domain=enforce_query_domain,
         tax_domains=tax_domains,
-        detection_query=query,
     )
-    return rank_hybrid_local_candidates(rows, query=expanded_query, effective_limit=effective_limit, config=config)
+    if axis_chunks:
+        return axis_chunks
+    if axes:
+        fallback_query = axes[0].query if len(axes) == 1 else query
+        return _search_chunks_single_query_mysql(
+            fallback_query,
+            limit=limit,
+            source_types=source_types,
+            enforce_query_domain=enforce_query_domain,
+            tax_domains=tax_domains,
+        )
+    return _search_chunks_single_query_mysql(
+        query,
+        limit=limit,
+        source_types=source_types,
+        enforce_query_domain=enforce_query_domain,
+        tax_domains=tax_domains,
+    )
 
 
 def search_chat_chunks_mysql(

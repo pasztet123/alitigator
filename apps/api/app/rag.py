@@ -1873,6 +1873,18 @@ class RetrievalInspection:
     raw_candidate_pool: list[dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class LegalRetrievalAxis:
+    axis_id: str
+    label: str
+    query: str
+    source_types: Optional[set[str]] = None
+    tax_domains: Optional[set[str]] = None
+    preferred_targets: tuple[tuple[str, str], ...] = ()
+    direct_subject_prefix: Optional[str] = None
+    limit_fraction: float = 1.0
+
+
 def get_rag_config() -> RagConfig:
     configured_extra_sources = os.getenv("ALITIGATOR_RAG_ADDITIONAL_SOURCE_PATHS", "").strip()
     additional_source_paths = tuple(
@@ -2922,6 +2934,22 @@ def query_targets_poland_spain_treaty(query: str) -> bool:
     return has_spain_marker and (has_treaty_marker or query_targets_crossborder_treaty_analysis(query))
 
 
+def query_targets_poland_germany_treaty(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_germany_marker = bool(re.search(r"\b(niemc\w*|germany|german|niemcy)\b", normalized))
+    has_treaty_marker = bool(
+        re.search(
+            r"\b(upo|umow\w* o unikaniu podwójnego opodatkowania|"
+            r"rezydent\w*|rezydencj\w*|zakład\w*|zaklad\w*|"
+            r"dywidend\w*|odsetk\w*|należno\w* licencyjn\w*|nalezn\w* licencyjn\w*|"
+            r"beneficial owner|rzeczywist\w* właściciel\w*|"
+            r"double taxation|tax treaty|mli)\b",
+            normalized,
+        )
+    )
+    return has_germany_marker and (has_treaty_marker or query_targets_crossborder_treaty_analysis(query))
+
+
 def build_poland_spain_treaty_statute_targets(query: str) -> list[tuple[str, str]]:
     if not query_targets_poland_spain_treaty(query):
         return []
@@ -2972,6 +3000,32 @@ def build_poland_spain_treaty_statute_targets(query: str) -> list[tuple[str, str
             ("CIT", "16"),
             ("CIT", "23"),
         ]
+
+    deduped_targets: list[tuple[str, str]] = []
+    seen_targets: set[tuple[str, str]] = set()
+    for target in preferred_targets:
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        deduped_targets.append(target)
+    return deduped_targets
+
+
+def build_poland_germany_treaty_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_poland_germany_treaty(query):
+        return []
+
+    normalized = normalize_whitespace(query or "").lower()
+    if re.search(r"\b(dywidend\w*|dividend\w*|udział\w*)\b", normalized):
+        preferred_targets: list[tuple[str, str]] = [("CIT", "10"), ("CIT", "26"), ("CIT", "7"), ("CIT", "23"), ("CIT", "4")]
+    elif re.search(r"\b(odsetk\w*|interest\w*)\b", normalized):
+        preferred_targets = [("CIT", "11"), ("CIT", "26"), ("CIT", "7"), ("CIT", "23"), ("CIT", "4")]
+    elif re.search(r"\b(należno\w* licencyjn\w*|nalezn\w* licencyjn\w*|royalt(?:y|ies))\b", normalized):
+        preferred_targets = [("CIT", "12"), ("CIT", "26"), ("CIT", "7"), ("CIT", "23"), ("CIT", "4")]
+    elif re.search(r"\b(zakład\w*|zaklad\w*|business profits|stał\w* miejsce)\b", normalized):
+        preferred_targets = [("CIT", "7"), ("CIT", "5"), ("CIT", "4"), ("CIT", "10"), ("CIT", "11"), ("CIT", "12"), ("CIT", "26")]
+    else:
+        preferred_targets = [("CIT", "7"), ("CIT", "10"), ("CIT", "11"), ("CIT", "12"), ("CIT", "26"), ("CIT", "4"), ("CIT", "23")]
 
     deduped_targets: list[tuple[str, str]] = []
     seen_targets: set[tuple[str, str]] = set()
@@ -4386,6 +4440,8 @@ def resolve_statute_tax_domains(query: str) -> set[str]:
         domains.update({"CIT", "PIT"})
     if query_targets_crossborder_treaty_analysis(query):
         domains.update({"CIT", "PIT"})
+    if query_targets_poland_germany_treaty(query):
+        domains.update({"CIT", "PIT"})
     if query_targets_poland_spain_treaty(query):
         domains.update({"CIT", "PIT"})
     if query_targets_developer_land_sale(query):
@@ -4427,6 +4483,8 @@ def resolve_statute_tax_domains(query: str) -> set[str]:
 
 def infer_retrieval_tax_domains(query: str) -> set[str]:
     domains = resolve_statute_tax_domains(query)
+    if query_targets_poland_germany_treaty(query):
+        domains.update({"CIT", "PIT"})
     if query_targets_ksef_b2c_invoice(query):
         domains.add("VAT")
     if query_targets_private_vehicle_pit_expense(query):
@@ -5594,6 +5652,224 @@ def order_chunks_by_statute_targets(chunks: list[RagChunk], targets: list[tuple[
     return sorted(chunks, key=sort_key)
 
 
+def decompose_query_into_legal_axes(query: str) -> list[LegalRetrievalAxis]:
+    normalized = normalize_whitespace(query or "")
+    axes: list[LegalRetrievalAxis] = []
+
+    if query_targets_estonian_cit_transformation_share_cost(query):
+        axes.extend(
+            [
+                LegalRetrievalAxis(
+                    axis_id="estonian_cit_loan_principal",
+                    label="estoński CIT: kapitał / przekształcenie / wkład / pożyczka",
+                    query=expand_search_query(f"{normalized} przekształcenie spółki komandytowej estoński CIT kapitał wkład 93a 7aa 28j 28k 28m"),
+                    source_types={"statute", "interpretation"},
+                    tax_domains={"CIT", "ORDYNACJA"},
+                    preferred_targets=(("CIT", "7aa"), ("CIT", "28j"), ("CIT", "28k"), ("CIT", "28m"), ("ORDYNACJA", "93a")),
+                ),
+                LegalRetrievalAxis(
+                    axis_id="estonian_cit_interest",
+                    label="estoński CIT: odsetki / ukryty zysk / finansowanie wspólnika",
+                    query=expand_search_query(f"{normalized} odsetki pożyczka wspólnik ukryty zysk ryczałt od dochodów spółek"),
+                    source_types={"statute", "interpretation"},
+                    tax_domains={"CIT", "ORDYNACJA"},
+                    preferred_targets=(("CIT", "28m"), ("CIT", "28n"), ("CIT", "28o"), ("CIT", "7aa"), ("ORDYNACJA", "93a")),
+                ),
+                LegalRetrievalAxis(
+                    axis_id="estonian_cit_management_services",
+                    label="estoński CIT: usługi zarządzania / powiązane świadczenia",
+                    query=expand_search_query(f"{normalized} usługi zarządzania ryczałt od dochodów spółek ukryty zysk świadczenie"),
+                    source_types={"statute", "interpretation"},
+                    tax_domains={"CIT", "ORDYNACJA"},
+                    preferred_targets=(("CIT", "28m"), ("CIT", "28n"), ("CIT", "28o"), ("CIT", "7aa"), ("ORDYNACJA", "93a")),
+                ),
+            ]
+        )
+
+    if query_targets_wht_pay_and_refund_services(query) or query_targets_crossborder_treaty_analysis(query):
+        axes.extend(
+            [
+                LegalRetrievalAxis(
+                    axis_id="wht_interest",
+                    label="WHT: odsetki i należności bierne",
+                    query=expand_search_query(f"{normalized} odsetki beneficial owner certyfikat rezydencji art. 21 art. 26"),
+                    source_types={"statute", "interpretation", "judgment"},
+                    tax_domains={"CIT", "PIT"},
+                    preferred_targets=(("CIT", "21"), ("CIT", "26"), ("CIT", "22c"), ("CIT", "22"), ("CIT", "10"), ("CIT", "11"), ("CIT", "12")),
+                ),
+                LegalRetrievalAxis(
+                    axis_id="wht_management_services",
+                    label="WHT: usługi zarządzania / usługi niematerialne",
+                    query=expand_search_query(f"{normalized} usługi zarządzania art. 21 ust. 1 pkt 2a art. 7 UPO zakład"),
+                    source_types={"statute", "interpretation", "judgment"},
+                    tax_domains={"CIT", "PIT"},
+                    preferred_targets=(("CIT", "21"), ("CIT", "26"), ("CIT", "7"), ("CIT", "4"), ("CIT", "5"), ("CIT", "11"), ("CIT", "12")),
+                ),
+                LegalRetrievalAxis(
+                    axis_id="pay_and_refund",
+                    label="WHT: pay and refund / próg 2 mln / nadwyżka",
+                    query=expand_search_query(f"{normalized} art. 26 ust. 2e 2 000 000 nadwyżka pay and refund"),
+                    source_types={"statute", "interpretation", "judgment"},
+                    tax_domains={"CIT"},
+                    preferred_targets=(("CIT", "26"), ("CIT", "21"), ("CIT", "22")),
+                ),
+                LegalRetrievalAxis(
+                    axis_id="interest_royalties_exemption",
+                    label="WHT: zwolnienie dyrektywowe / odsetki / należności licencyjne",
+                    query=expand_search_query(f"{normalized} art. 21 ust. 3 3c 3d 3e art. 22c beneficial owner zwolnienie"),
+                    source_types={"statute", "interpretation", "judgment"},
+                    tax_domains={"CIT", "PIT"},
+                    preferred_targets=(("CIT", "21"), ("CIT", "22"), ("CIT", "22c"), ("CIT", "26"), ("CIT", "10"), ("CIT", "11"), ("CIT", "12")),
+                ),
+                LegalRetrievalAxis(
+                    axis_id="beneficial_owner",
+                    label="WHT: beneficial owner / należyta staranność",
+                    query=expand_search_query(f"{normalized} beneficial owner rzeczywisty właściciel należyta staranność certyfikat rezydencji"),
+                    source_types={"statute", "interpretation", "judgment"},
+                    tax_domains={"CIT", "PIT"},
+                    preferred_targets=(("CIT", "26"), ("CIT", "21"), ("CIT", "22"), ("CIT", "10"), ("CIT", "11"), ("CIT", "12")),
+                ),
+            ]
+        )
+
+    if query_targets_poland_germany_treaty(query):
+        axes.append(
+            LegalRetrievalAxis(
+                axis_id="poland_germany_treaty",
+                label="UPO Polska-Niemcy / treaty override / zakład",
+                query=expand_search_query(f"{normalized} UPO Polska Niemcy art. 7 art. 10 art. 11 art. 12 art. 26 art. 29 zakład beneficial owner"),
+                source_types={"statute"},
+                tax_domains={"CIT"},
+                preferred_targets=tuple(build_poland_germany_treaty_statute_targets(query)),
+                direct_subject_prefix="UPO Polska - Niemcy",
+            )
+        )
+    elif query_targets_poland_spain_treaty(query):
+        axes.append(
+            LegalRetrievalAxis(
+                axis_id="poland_spain_treaty",
+                label="UPO Polska-Hiszpania / treaty override / zakład",
+                query=expand_search_query(f"{normalized} UPO Polska Hiszpania art. 7 art. 10 art. 11 art. 12 art. 26 zakład beneficial owner"),
+                source_types={"statute"},
+                tax_domains={"CIT"},
+                preferred_targets=tuple(build_poland_spain_treaty_statute_targets(query)),
+                direct_subject_prefix="UPO Polska - Hiszpania",
+            )
+        )
+
+    # Keep axes unique and stable.
+    deduped: list[LegalRetrievalAxis] = []
+    seen_axis_ids: set[str] = set()
+    for axis in axes:
+        if axis.axis_id in seen_axis_ids:
+            continue
+        seen_axis_ids.add(axis.axis_id)
+        deduped.append(axis)
+    return deduped
+
+
+def _search_chunks_single_query(
+    query: str,
+    *,
+    limit: Optional[int] = None,
+    source_types: Optional[set[str]] = None,
+    enforce_query_domain: bool = False,
+    tax_domains: Optional[set[str]] = None,
+) -> list[RagChunk]:
+    config = get_rag_config()
+    ensure_local_index_ready()
+    if not config.db_path.exists():
+        return []
+
+    effective_limit = limit or config.retrieval_limit
+    expanded_query = expand_search_query(query)
+    inferred_tax_domains = tax_domains or infer_retrieval_tax_domains(query) or None
+    _, rows = fetch_local_candidate_rows(
+        expanded_query,
+        effective_limit=effective_limit,
+        config=config,
+        source_types=source_types,
+        enforce_query_domain=enforce_query_domain or bool(inferred_tax_domains),
+        tax_domains=inferred_tax_domains,
+    )
+    return rank_hybrid_local_candidates(rows, query=expanded_query, effective_limit=effective_limit, config=config)
+
+
+def _resolve_axis_scope(
+    axis: LegalRetrievalAxis,
+    *,
+    source_types: Optional[set[str]],
+    tax_domains: Optional[set[str]],
+) -> Optional[tuple[Optional[set[str]], Optional[set[str]]]]:
+    axis_source_types = set(axis.source_types) if axis.source_types else None
+    if source_types is not None:
+        axis_source_types = set(source_types) if axis_source_types is None else axis_source_types & set(source_types)
+        if axis_source_types is not None and not axis_source_types:
+            return None
+
+    axis_tax_domains = set(axis.tax_domains) if axis.tax_domains else None
+    if tax_domains is not None:
+        axis_tax_domains = set(tax_domains) if axis_tax_domains is None else axis_tax_domains & set(tax_domains)
+        if axis_tax_domains is not None and not axis_tax_domains:
+            return None
+
+    return axis_source_types, axis_tax_domains
+
+
+def _merge_axis_search_chunks(axis_chunks: list[list[RagChunk]], *, effective_limit: int) -> list[RagChunk]:
+    merged: list[RagChunk] = []
+    seen_canonical_sources: set[str] = set()
+    flattened = [chunk for group in axis_chunks for chunk in group]
+    flattened.sort(key=lambda chunk: (chunk.score, chunk.chunk_index, chunk.document_id), reverse=True)
+    for chunk in flattened:
+        canonical_source_id = chunk_canonical_source_id(chunk)
+        if canonical_source_id in seen_canonical_sources:
+            continue
+        seen_canonical_sources.add(canonical_source_id)
+        merged.append(chunk)
+        if len(merged) >= effective_limit:
+            break
+    return merged
+
+
+def _search_chunks_by_legal_axes(
+    query: str,
+    *,
+    limit: Optional[int] = None,
+    source_types: Optional[set[str]] = None,
+    enforce_query_domain: bool = False,
+    tax_domains: Optional[set[str]] = None,
+) -> tuple[list[RagChunk], list[LegalRetrievalAxis]]:
+    effective_limit = limit or get_rag_config().retrieval_limit
+    axes = decompose_query_into_legal_axes(query)
+    if len(axes) <= 1:
+        return [], axes
+
+    scoped_axis_chunks: list[list[RagChunk]] = []
+    active_axes: list[LegalRetrievalAxis] = []
+    for axis in axes:
+        axis_scope = _resolve_axis_scope(axis, source_types=source_types, tax_domains=tax_domains)
+        if axis_scope is None:
+            continue
+        axis_source_types, axis_tax_domains = axis_scope
+        active_axes.append(axis)
+        axis_limit = max(1, math.ceil(effective_limit / max(len(axes), 1)))
+        scoped_axis_chunks.append(
+            _search_chunks_single_query(
+                axis.query,
+                limit=axis_limit,
+                source_types=axis_source_types,
+                enforce_query_domain=enforce_query_domain or bool(axis_tax_domains),
+                tax_domains=axis_tax_domains,
+            )
+        )
+
+    if not scoped_axis_chunks:
+        return [], axes
+
+    return _merge_axis_search_chunks(scoped_axis_chunks, effective_limit=effective_limit), active_axes
+
+
 def fetch_rows_by_document_ids(
     document_ids: list[str] | tuple[str, ...],
     *,
@@ -5987,19 +6263,31 @@ def search_chunks(
             enforce_query_domain=enforce_query_domain,
             tax_domains=tax_domains,
         )
-    config = get_rag_config()
-    ensure_local_index_ready()
-    if not config.db_path.exists():
-        return []
-
-    effective_limit = limit or config.retrieval_limit
-    expanded_query = expand_search_query(query)
-    inferred_tax_domains = tax_domains or infer_retrieval_tax_domains(query) or None
-    _, rows = fetch_local_candidate_rows(
-        expanded_query, effective_limit=effective_limit, config=config, source_types=source_types,
-        enforce_query_domain=enforce_query_domain or bool(inferred_tax_domains), tax_domains=inferred_tax_domains,
+    axis_chunks, axes = _search_chunks_by_legal_axes(
+        query,
+        limit=limit,
+        source_types=source_types,
+        enforce_query_domain=enforce_query_domain,
+        tax_domains=tax_domains,
     )
-    return rank_hybrid_local_candidates(rows, query=expanded_query, effective_limit=effective_limit, config=config)
+    if axis_chunks:
+        return axis_chunks
+    if axes:
+        fallback_query = axes[0].query if len(axes) == 1 else query
+        return _search_chunks_single_query(
+            fallback_query,
+            limit=limit,
+            source_types=source_types,
+            enforce_query_domain=enforce_query_domain,
+            tax_domains=tax_domains,
+        )
+    return _search_chunks_single_query(
+        query,
+        limit=limit,
+        source_types=source_types,
+        enforce_query_domain=enforce_query_domain,
+        tax_domains=tax_domains,
+    )
 
 
 def search_chat_chunks(
@@ -6197,7 +6485,12 @@ def search_chat_chunks(
         config=config,
         source_type="statute",
     ) if query_targets_poland_spain_treaty(query) and statute_limit else []
-    statutes = [] if (query_targets_ksef_foreign_sale(query) or query_targets_poland_spain_treaty(query)) else (
+    direct_germany_treaty_rows = fetch_rows_by_subject_prefix(
+        "UPO Polska - Niemcy",
+        config=config,
+        source_type="statute",
+    ) if query_targets_poland_germany_treaty(query) and statute_limit else []
+    statutes = [] if (query_targets_ksef_foreign_sale(query) or query_targets_poland_spain_treaty(query) or query_targets_poland_germany_treaty(query)) else (
         search_chunks(
             query,
             limit=statute_limit,
@@ -6295,8 +6588,8 @@ def search_chat_chunks(
             or query_targets_mortgage_settlement_refund(query)
         ) else statute_limit,
     ) if statute_limit else []
-    if direct_treaty_rows:
-        hinted_statute_rows = direct_treaty_rows
+    if direct_treaty_rows or direct_germany_treaty_rows:
+        hinted_statute_rows = [*direct_treaty_rows, *direct_germany_treaty_rows]
     hinted_statutes = rank_hybrid_local_candidates(
         hinted_statute_rows,
         query=query if query_targets_poland_spain_treaty(query) else expanded_query,

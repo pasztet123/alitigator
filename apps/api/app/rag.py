@@ -2093,13 +2093,91 @@ def query_targets_crossborder_treaty_analysis(query: str) -> bool:
     has_country_marker = bool(
         re.search(
             r"\b(niemc\w*|niderland\w*|holand\w*|luksemburg\w*|franc\w*|irland\w*|"
-            r"szwajcar\w*|austri\w*|wielk\w* bryt\w*|uk\b|usa\b|stan\w* zjednoczon\w*|czech\w*)\b",
+            r"szwajcar\w*|austri\w*|wielk\w* bryt\w*|uk\b|usa\b|stan\w* zjednoczon\w*|czech\w*|"
+            r"hiszpani\w*|hiszpań\w*|spain\b|españa|espana)\b",
             normalized,
         )
     )
     return (has_crossborder_marker and (has_income_tax_angle or has_country_marker)) or (
         has_country_marker and has_income_tax_angle
     )
+
+
+def query_targets_poland_spain_treaty(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_spain_marker = bool(re.search(r"\b(hiszpani\w*|hiszpań\w*|spain\b|españa|espana)\b", normalized))
+    has_treaty_marker = bool(
+        re.search(
+            r"\b(upo|umow\w* o unikaniu podwójnego opodatkowania|"
+            r"rezydent\w*|rezydencj\w*|zakład\w*|zaklad\w*|"
+            r"dywidend\w*|odsetk\w*|wynagrodzen\w*|pracy najemn\w*|woln\w* zawód\w*|"
+            r"woln\w* zawod\w*|zarząd\w*|zarzadu\b|działalno\w* samodzieln\w*|"
+            r"double taxation|tax treaty|mli)\b",
+            normalized,
+        )
+    )
+    return has_spain_marker and (has_treaty_marker or query_targets_crossborder_treaty_analysis(query))
+
+
+def build_poland_spain_treaty_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_poland_spain_treaty(query):
+        return []
+
+    normalized = normalize_whitespace(query or "").lower()
+    if re.search(r"\b(prac\w* najem\w*|umow\w* o prac\w*|wynagrodzen\w* za prac\w*|employment|salary)\b", normalized):
+        preferred_targets: list[tuple[str, str]] = [
+            ("CIT", "15"),
+            ("CIT", "4"),
+            ("CIT", "23"),
+            ("CIT", "5"),
+            ("CIT", "14"),
+            ("CIT", "16"),
+        ]
+    elif re.search(r"\b(usług\w* doradcz\w*|woln\w* zawód\w*|samodzieln\w* działalno\w*|independent services)\b", normalized):
+        preferred_targets = [
+            ("CIT", "14"),
+            ("CIT", "4"),
+            ("CIT", "23"),
+            ("CIT", "5"),
+            ("CIT", "15"),
+            ("CIT", "16"),
+        ]
+    elif re.search(r"\b(zarząd\w*|zarzadu\b|board|członkostw\w* w zarządzie|powołan\w*)\b", normalized):
+        preferred_targets = [
+            ("CIT", "16"),
+            ("CIT", "4"),
+            ("CIT", "23"),
+            ("CIT", "5"),
+            ("CIT", "14"),
+            ("CIT", "15"),
+        ]
+    elif re.search(r"\b(rezydenc\w*|miejsce zamieszkania|centrum interes\w*|ośrodek interes\w*)\b", normalized):
+        preferred_targets = [
+            ("CIT", "4"),
+            ("CIT", "23"),
+            ("CIT", "5"),
+            ("CIT", "14"),
+            ("CIT", "15"),
+            ("CIT", "16"),
+        ]
+    else:
+        preferred_targets = [
+            ("CIT", "4"),
+            ("CIT", "5"),
+            ("CIT", "14"),
+            ("CIT", "15"),
+            ("CIT", "16"),
+            ("CIT", "23"),
+        ]
+
+    deduped_targets: list[tuple[str, str]] = []
+    seen_targets: set[tuple[str, str]] = set()
+    for target in preferred_targets:
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        deduped_targets.append(target)
+    return deduped_targets
 
 
 def query_targets_shareholder_company_asset_sale(query: str) -> bool:
@@ -3505,6 +3583,8 @@ def resolve_statute_tax_domains(query: str) -> set[str]:
         domains.update({"CIT", "PIT"})
     if query_targets_crossborder_treaty_analysis(query):
         domains.update({"CIT", "PIT"})
+    if query_targets_poland_spain_treaty(query):
+        domains.update({"CIT", "PIT"})
     if query_targets_developer_land_sale(query):
         domains.update({"VAT", "PIT", "PCC"})
     if query_targets_post_leasing_vehicle_gift_sale(query):
@@ -3984,8 +4064,35 @@ def build_treaty_focus_score(row: sqlite3.Row, *, query: str) -> float:
         score += 0.9
     if re.search(r"\b(beneficial owner|rzeczywist\w* właściciel\w*|certyfikat\w* rezydencji|nierezydent\w*)\b", normalized_query) and re.search(r"\b(miejsce zamieszkania|siedzib\w*|osob\w* uprawnion\w*|uprawnion\w* do|rezydent\w*)\b", candidate_text):
         score += 0.45
+    if query_targets_poland_spain_treaty(query):
+        spain_article_boosts = {
+            "4": 1.3,
+            "5": 0.8,
+            "14": 1.1,
+            "15": 1.1,
+            "16": 1.1,
+            "23": 0.9,
+        }
+        for article_key, boost in spain_article_boosts.items():
+            if f"art. {article_key}" in normalized_query and f"art. {article_key}" in candidate_text:
+                score += boost
+        if re.search(r"\b(rezydenc\w*|miejsce zamieszkania|centrum interes\w*|ośrodek interes\w*)\b", normalized_query):
+            if re.search(r"\bart\.\s*4\b", candidate_text):
+                score += 0.7
+        if re.search(r"\b(usług\w* doradcz\w*|woln\w* zawód\w*|samodzieln\w* działalno\w*|independent services)\b", normalized_query):
+            if re.search(r"\bart\.\s*14\b", candidate_text):
+                score += 0.8
+        if re.search(r"\b(prac\w* najem\w*|umow\w* o prac\w*|employment|salary|wynagrodzen\w* za prac\w*)\b", normalized_query):
+            if re.search(r"\bart\.\s*15\b", candidate_text):
+                score += 0.8
+        if re.search(r"\b(zarząd\w*|zarzadu\b|board|członkostw\w* w zarządzie|powołan\w*)\b", normalized_query):
+            if re.search(r"\bart\.\s*16\b", candidate_text):
+                score += 0.8
+        if re.search(r"\b(unikan\w* podwójnego opodatkowania|double taxation|zaliczen\w*|odliczen\w*)\b", normalized_query):
+            if re.search(r"\bart\.\s*23\b", candidate_text):
+                score += 0.6
     if re.search(r"\b(niemc\w*|niderland\w*|holand\w*|luksemburg\w*|franc\w*|irland\w*|szwajcar\w*|austri\w*|wielk\w* bryt\w*|uk\b|usa\b|stan\w* zjednoczon\w*|czech\w*)\b", normalized_query):
-        country_hits = re.findall(r"\b(austria|czechy|francja|irlandia|luksemburg|niderlandy|niemcy|szwajcaria|usa|wielka brytania)\b", candidate_text)
+        country_hits = re.findall(r"\b(austria|czechy|francja|hiszpania|irlandia|luksemburg|niderlandy|niemcy|szwajcaria|usa|wielka brytania)\b", candidate_text)
         if country_hits:
             score += 0.55
     return min(score, 3.6)
@@ -4587,6 +4694,44 @@ def fetch_rows_by_document_ids(
     return limited_rows
 
 
+def fetch_rows_by_subject_prefix(
+    subject_prefix: str,
+    *,
+    config: RagConfig,
+    source_type: Optional[str] = None,
+) -> list[sqlite3.Row]:
+    prefix = str(subject_prefix).strip()
+    if not prefix or not config.db_path.exists():
+        return []
+
+    source_clause = " AND d.source_type = ?" if source_type else ""
+    values: list[str] = [f"{prefix}%"]
+    if source_type:
+        values.append(source_type)
+
+    connection = get_connection(config.db_path)
+    try:
+        rows = connection.execute(
+            f"""
+            SELECT
+                c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                d.subject, d.signature, d.published_date, d.source_url, d.category,
+                d.keywords_json, d.legal_provisions_json, d.issues_json, d.law_tags_json, d.facts_text, d.question_text, d.tax_domain,
+                d.source, d.source_type, d.source_subtype, d.authority, d.publication, d.legal_state_date, d.source_pages_json,
+                0.0 AS lexical_score
+            FROM chunks c
+            JOIN documents d ON d.document_id = c.document_id
+            WHERE d.subject LIKE ?
+              {source_clause}
+            ORDER BY d.subject ASC, c.document_id ASC, c.chunk_index ASC
+            """,
+            tuple(values),
+        ).fetchall()
+    finally:
+        connection.close()
+    return rows
+
+
 def inspect_local_candidate_pool(
     query: str, *, limit: Optional[int] = None, source_types: Optional[set[str]] = None,
     enforce_query_domain: bool = False, tax_domains: Optional[set[str]] = None,
@@ -4995,7 +5140,12 @@ def search_chat_chunks(
         enforce_query_domain=explicit_query_domains,
         tax_domains=statute_domains,
     ) if include_judgments else []
-    statutes = [] if query_targets_ksef_foreign_sale(query) else (
+    direct_treaty_rows = fetch_rows_by_subject_prefix(
+        "UPO Polska - Hiszpania",
+        config=config,
+        source_type="statute",
+    ) if query_targets_poland_spain_treaty(query) and statute_limit else []
+    statutes = [] if (query_targets_ksef_foreign_sale(query) or query_targets_poland_spain_treaty(query)) else (
         search_chunks(
             query,
             limit=statute_limit,
@@ -5007,6 +5157,8 @@ def search_chat_chunks(
     preferred_targets: list[tuple[str, str]] = []
     if query_targets_ksef_foreign_sale(query):
         preferred_targets.extend(KSEF_FOREIGN_SALE_STATUTE_TARGETS)
+    if query_targets_poland_spain_treaty(query):
+        preferred_targets.extend(build_poland_spain_treaty_statute_targets(query))
     if query_targets_vat_dropshipping_ioss(query):
         preferred_targets.extend(build_vat_dropshipping_ioss_statute_targets(query))
     if query_targets_wht_crossborder_payments(query):
@@ -5059,9 +5211,11 @@ def search_chat_chunks(
             or query_targets_estonian_cit_transformation_share_cost(query)
         ) else statute_limit,
     ) if statute_limit else []
+    if direct_treaty_rows:
+        hinted_statute_rows = direct_treaty_rows
     hinted_statutes = rank_hybrid_local_candidates(
         hinted_statute_rows,
-        query=expand_search_query(query),
+        query=query if query_targets_poland_spain_treaty(query) else expand_search_query(query),
         effective_limit=len(hinted_statute_rows) if (
             query_targets_post_leasing_vehicle_gift_sale(query)
             or query_targets_leased_movable_six_year_rule(query)
@@ -5072,7 +5226,8 @@ def search_chat_chunks(
         config=config,
     ) if hinted_statute_rows else []
     if (
-        query_targets_post_leasing_vehicle_gift_sale(query)
+        query_targets_poland_spain_treaty(query)
+        or query_targets_post_leasing_vehicle_gift_sale(query)
         or query_targets_leased_movable_six_year_rule(query)
         or query_targets_gifted_asset_cost_basis(query)
         or query_targets_spouse_gift_sd(query)
@@ -5084,6 +5239,7 @@ def search_chat_chunks(
     seen_statute_chunks: set[str] = set()
     prefer_hinted_statutes = (
         query_targets_ksef_foreign_sale(query)
+        or query_targets_poland_spain_treaty(query)
         or query_targets_vat_dropshipping_ioss(query)
         or query_targets_wht_crossborder_payments(query)
         or query_targets_developer_land_sale(query)

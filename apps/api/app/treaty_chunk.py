@@ -266,6 +266,32 @@ CORE_TREATY_SOURCES: tuple[TreatySource, ...] = (
         legal_state_date="",
         published_date="",
     ),
+    TreatySource(
+        country="Hiszpania",
+        slug="hiszpania",
+        variant="umowa",
+        pdf_path=Path("resources/upo/hiszpania/umowa_pl.pdf"),
+        structured_json_path=None,
+        source_url="https://www.podatki.gov.pl/media/0yppho2i/hiszpania-konwencja-tekst-polski.pdf",
+        act_title="Umowa między Rządem Polskiej Rzeczypospolitej Ludowej a Rządem Hiszpanii o unikaniu podwójnego opodatkowania w zakresie podatków od dochodu i majątku",
+        subject_prefix="UPO Polska - Hiszpania",
+        publication="Dz.U. 1982 nr 17 poz. 127",
+        legal_state_date="1982-06-18",
+        published_date="1982-06-18",
+    ),
+    TreatySource(
+        country="Hiszpania",
+        slug="hiszpania",
+        variant="tekst_syntetyczny_mli",
+        pdf_path=Path("resources/upo/hiszpania/tekst_syntetyczny_mli_pl.pdf"),
+        structured_json_path=None,
+        source_url="https://www.podatki.gov.pl/media/d0nlkedh/pl-es-konwencja-mli-tekst-syntetyczny-pl-es-kopia.pdf",
+        act_title="Tekst syntetyczny Konwencji MLI oraz Umowy między Rządem Polskiej Rzeczypospolitej Ludowej a Rządem Hiszpanii",
+        subject_prefix="UPO Polska - Hiszpania - tekst syntetyczny MLI",
+        publication="MF treaty PDF",
+        legal_state_date="",
+        published_date="",
+    ),
 )
 
 

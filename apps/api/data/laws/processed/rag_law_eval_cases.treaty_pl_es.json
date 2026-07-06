@@ -1,0 +1,27 @@
+[
+  {
+    "id": "treaty-pl-es-bundle-trigger",
+    "question": "Czy przy relacji Polska - Hiszpania trzeba sięgnąć do UPO Polska - Hiszpania oraz tekstu syntetycznego MLI i sprawdzić art. 4, 5, 14, 15, 16 oraz 23?",
+    "expected_legal_provisions": ["art. 4"],
+    "required_legal_provisions": ["art. 14", "art. 15"],
+    "notes": "The bundle should surface the Spanish treaty and its synthetic MLI text instead of defaulting to the OECD model convention."
+  },
+  {
+    "id": "treaty-pl-es-independent-services",
+    "question": "Czy dochód z usług doradczych wykonywanych przez przedsiębiorcę mającego rezydencję w Hiszpanii należy analizować najpierw pod art. 14 UPO Polska - Hiszpania?",
+    "expected_legal_provisions": ["art. 14"],
+    "notes": "Independent services should route to article 14, not article 7 model-convention reasoning."
+  },
+  {
+    "id": "treaty-pl-es-employment-income",
+    "question": "Czy wynagrodzenie za pracę najemną wykonywaną w Hiszpanii przez osobę mającą związek z Polską trzeba oceniać przez art. 15 UPO Polska - Hiszpania?",
+    "expected_legal_provisions": ["art. 15"],
+    "notes": "Employment income must stay separate from residence and board-remuneration analysis."
+  },
+  {
+    "id": "treaty-pl-es-directors-fees",
+    "question": "Czy wynagrodzenie z tytułu członkostwa w zarządzie polskiej spółki wypłacane osobie związanej z Hiszpanią trzeba analizować przez art. 16 UPO Polska - Hiszpania?",
+    "expected_legal_provisions": ["art. 16"],
+    "notes": "Board remuneration should surface article 16 directly."
+  }
+]

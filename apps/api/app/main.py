@@ -91,10 +91,12 @@ Zasady odpowiedzi:
 13. Jeżeli materiał jest niepełny, sformułuj minimalną użyteczną odpowiedź: co wynika wprost, jakie ostrożne wnioski można wyprowadzić i czego nie da się potwierdzić.
 14. Nie pisz, że „nie da się odpowiedzieć”, jeśli da się odpowiedzieć choćby częściowo. Zamiast tego napisz „na podstawie tych źródeł można stwierdzić co najmniej, że...”.
 15. W pytaniach o KSeF nie zakładaj, że miejsce dostawy lub świadczenia poza Polską automatycznie oznacza brak faktury ustrukturyzowanej. Najpierw sprawdź zakres polskich zasad fakturowania z art. 106a, obowiązek faktury z art. 106b, wyjątki z art. 106ga ust. 2, a dopiero potem sposób udostępnienia z art. 106gb.
-16. Jeżeli art. 106gb ust. 4 mówi o udostępnieniu faktury nabywcy w uzgodniony sposób, traktuj to jako regułę doręczenia/udostępnienia faktury ustrukturyzowanej, nie jako wyłączenie obowiązku KSeF.
-17. Nie wolno Ci przenosić elementów stanu faktycznego ze źródła do kazusu użytkownika. Fakty kazusu pochodzą tylko z pytania użytkownika i z dostarczonych doprecyzowań intencji, nie z treści wyroku ani interpretacji.
-18. Jeżeli wyrok lub interpretacja opisuje inny stan faktyczny, możesz wykorzystać tylko wynikającą z niego tezę albo kierunek wykładni. Zawsze wyraźnie zaznacz, które elementy są wspólne, a które różne.
-19. Nie używaj wyroku ani interpretacji do dopowiadania brakującej przesłanki ustawowej. Jeżeli przepis uzależnia wynik od konkretnego faktu, a tego faktu nie ma w pytaniu ani w źródłach, wskaż brak tej przesłanki zamiast zgadywać.
+16. Jeżeli źródła pokazują, że faktura została wystawiona poza KSeF, nie zakładaj, że sama późniejsza faktura w KSeF automatycznie zastępuje wcześniejszą; może chodzić o duplikat tej samej transakcji, a prawo do odliczenia i moment jego realizacji oceniaj według materialnych przesłanek art. 86, nie według samego późniejszego numeru KSeF.
+17. Jeżeli art. 106gb ust. 4 mówi o udostępnieniu faktury nabywcy w uzgodniony sposób, traktuj to jako regułę doręczenia/udostępnienia faktury ustrukturyzowanej, nie jako wyłączenie obowiązku KSeF.
+18. Jeżeli pytanie dotyczy błędów w danych nabywcy, nie zakładaj automatycznie, że nota korygująca pozostaje właściwym narzędziem; sprawdź, czy z materiału nie wynika konieczność korekty przez sprzedawcę.
+19. Nie wolno Ci przenosić elementów stanu faktycznego ze źródła do kazusu użytkownika. Fakty kazusu pochodzą tylko z pytania użytkownika i z dostarczonych doprecyzowań intencji, nie z treści wyroku ani interpretacji.
+20. Jeżeli wyrok lub interpretacja opisuje inny stan faktyczny, możesz wykorzystać tylko wynikającą z niego tezę albo kierunek wykładni. Zawsze wyraźnie zaznacz, które elementy są wspólne, a które różne.
+21. Nie używaj wyroku ani interpretacji do dopowiadania brakującej przesłanki ustawowej. Jeżeli przepis uzależnia wynik od konkretnego faktu, a tego faktu nie ma w pytaniu ani w źródłach, wskaż brak tej przesłanki zamiast zgadywać.
 """.strip()
 
 REDACTION_PATTERNS = {
@@ -1331,6 +1333,9 @@ def build_chat_system_prompt(
         + " rozróżnij obowiązek wystawienia faktury ustrukturyzowanej od sposobu jej udostępnienia nabywcy."
         + " Nie uzależniaj obowiązku KSeF wyłącznie od tego, czy podatnik jest czynnym podatnikiem VAT."
         + " Najpierw ustal, czy działa jako podatnik VAT przy danej transakcji, czy ma obowiązek wystawić fakturę, a dopiero potem oceniaj wejście do KSeF i ewentualne przepisy przejściowe."
+        + " Jeżeli faktura została najpierw otrzymana poza KSeF, a później ten sam wydatek lub ta sama transakcja pojawia się w KSeF, nie przesądzaj automatycznie o korekcie JPK ani o przesunięciu momentu odliczenia."
+        + " Potraktuj późniejszy dokument przede wszystkim jako potencjalny duplikat albo wtórne potwierdzenie tej samej transakcji i sprawdź materialne przesłanki odliczenia z art. 86."
+        + " Jeżeli pytanie dotyczy błędnych danych nabywcy, nie zakładaj z góry, że wystarczy nota korygująca; sprawdź, czy z materiału nie wynika korekta po stronie sprzedawcy."
         + " W pytaniach o dropshipping, platformę, interfejs elektroniczny, IOSS albo sprzedaż towarów importowanych do 150 euro najpierw sprawdź art. 7a, art. 19a, art. 17, art. 28d oraz art. 138a-138j."
         + " Nie zastępuj tych przepisów ogólną regułą z art. 22 ani automatycznym wnioskiem, że importerem jest ten, kto organizuje odprawę."
         + " Przy usługach pośrednika działającego w imieniu i na rzecz sprzedawcy dla B2C użyj art. 28d, nie art. 28c."

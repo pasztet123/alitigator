@@ -842,6 +842,13 @@ select {
   color: #eef9ed;
 }
 
+.admin-panel-modal .helper-text-warning {
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(235, 174, 86, 0.16);
+  color: #fff4df;
+}
+
 .chat-panel {
   min-height: calc(100svh - 32px);
   display: grid;
@@ -1167,6 +1174,10 @@ textarea {
 
 .helper-text-positive {
   color: #255d35;
+}
+
+.helper-text-warning {
+  color: #7a4f13;
 }
 
 .sr-only {

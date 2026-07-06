@@ -90,6 +90,7 @@ Ważne założenie MVP:
 3. Ustaw frontend:
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_PUBLISHABLE_KEY`
+   - opcjonalnie `VITE_ALITIGATOR_ADMIN_EMAILS=admin@twojadomena.pl`
 4. Ustaw cenę kredytów:
    - `ALITIGATOR_CREDIT_UNIT_PRICE_GROSS` (domyślnie `200`, czyli 2,00 zł za 1 kredyt)
    - `ALITIGATOR_CREDIT_CURRENCY` (domyślnie `pln`)
@@ -103,6 +104,7 @@ Stripe webhook powinien wskazywać na:
 Ręczne granty kredytów:
 
 - backend traktuje użytkownika jako admina, jeśli jego e-mail jest na liście `ALITIGATOR_ADMIN_EMAILS`
+- frontend może pokazywać panel admina dla tych samych adresów przez `VITE_ALITIGATOR_ADMIN_EMAILS`
 - admin może przyznać kredyty bez Stripe przez `POST /api/admin/credits/grant`
 - w UI pojawia się wtedy prosty formularz do dopisywania kredytów po e-mailu użytkownika
 

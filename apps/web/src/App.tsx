@@ -189,6 +189,16 @@ const modelLabels: Record<string, string> = {
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
+const ADMIN_EMAILS = new Set(
+  String(
+    import.meta.env.VITE_ALITIGATOR_ADMIN_EMAILS
+    ?? import.meta.env.NEXT_PUBLIC_ALITIGATOR_ADMIN_EMAILS
+    ?? '',
+  )
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean),
+)
 const LOCAL_THREAD_PREFIX = 'local-thread-'
 const HINT_DEBOUNCE_MS = 900
 const MIN_DRAFT_LENGTH_FOR_HINTS = 24
@@ -663,6 +673,7 @@ function App() {
   const [adminGrantInfo, setAdminGrantInfo] = useState('')
   const [adminUsers, setAdminUsers] = useState<AdminUserSummary[]>([])
   const [isAdminUsersLoading, setIsAdminUsersLoading] = useState(false)
+  const [adminUsersError, setAdminUsersError] = useState('')
   const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false)
   const [feedbackDrafts, setFeedbackDrafts] = useState<FeedbackDrafts>({})
   const [feedbackSavingMessageId, setFeedbackSavingMessageId] = useState<string | null>(null)
@@ -683,6 +694,7 @@ function App() {
   }, [draft, isSending, messages.length, selectedChatId])
 
   async function refreshAdminUsers(activeSession: Session) {
+    setAdminUsersError('')
     const response = await apiFetch('/api/admin/users', activeSession)
     if (!response.ok) {
       throw new Error(await readErrorResponse(response))
@@ -787,6 +799,7 @@ function App() {
     setAdminGrantDraft({ user_email: '', credit_amount: '1', reason: '' })
     setAdminGrantInfo('')
     setAdminUsers([])
+    setAdminUsersError('')
     setIsAdminPanelOpen(false)
     setLastRedactions([])
     setFeedbackDrafts({})
@@ -903,6 +916,15 @@ function App() {
           setIsAdminUsersLoading(true)
           try {
             await refreshAdminUsers(activeSession)
+          } catch (adminUsersError) {
+            if (!isCancelled) {
+              setAdminUsers([])
+              setAdminUsersError(
+                adminUsersError instanceof Error
+                  ? adminUsersError.message
+                  : 'Nie udało się wczytać użytkowników.',
+              )
+            }
           } finally {
             if (!isCancelled) {
               setIsAdminUsersLoading(false)
@@ -910,6 +932,7 @@ function App() {
           }
         } else if (!isCancelled) {
           setAdminUsers([])
+          setAdminUsersError('')
         }
       } catch (bootstrapError) {
         if (!isCancelled) {
@@ -1390,7 +1413,16 @@ function App() {
       )
       setAdminGrantDraft({ user_email: '', credit_amount: '1', reason: '' })
       await refreshAccount(session)
-      await refreshAdminUsers(session)
+      try {
+        await refreshAdminUsers(session)
+      } catch (adminUsersRefreshError) {
+        setAdminUsers([])
+        setAdminUsersError(
+          adminUsersRefreshError instanceof Error
+            ? adminUsersRefreshError.message
+            : 'Nie udało się odświeżyć listy użytkowników.',
+        )
+      }
     } catch (grantError) {
       setError(grantError instanceof Error ? grantError.message : 'Nie udało się przyznać kredytów.')
     } finally {
@@ -1426,7 +1458,16 @@ function App() {
         `Przyznano ${creditAmount} kredytów dla ${payload.email ?? payload.user_id}. Nowe saldo: ${payload.credit_balance}.`,
       )
       await refreshAccount(session)
-      await refreshAdminUsers(session)
+      try {
+        await refreshAdminUsers(session)
+      } catch (adminUsersRefreshError) {
+        setAdminUsers([])
+        setAdminUsersError(
+          adminUsersRefreshError instanceof Error
+            ? adminUsersRefreshError.message
+            : 'Nie udało się odświeżyć listy użytkowników.',
+        )
+      }
     } catch (grantError) {
       setError(grantError instanceof Error ? grantError.message : 'Nie udało się przyznać kredytów.')
     } finally {
@@ -1612,10 +1653,10 @@ function App() {
   const creditCurrency = account?.credit_currency ?? 'pln'
   const normalizedCheckoutCreditAmount = Math.max(1, Math.min(100000, Number.parseInt(checkoutCreditAmount, 10) || 1))
   const checkoutTotalGross = normalizedCheckoutCreditAmount * creditUnitPriceGross
-  const isAdminUser = Boolean(
-    account?.is_admin
-      || session?.user.email?.trim().toLowerCase() === 'stanislawwadolowski123@gmail.com',
+  const isConfiguredAdminEmail = Boolean(
+    session?.user.email && ADMIN_EMAILS.has(session.user.email.trim().toLowerCase()),
   )
+  const isAdminUser = Boolean(account?.is_admin || isConfiguredAdminEmail)
 
   if (!isSupabaseConfigured) {
     return (
@@ -2198,6 +2239,7 @@ function App() {
             </div>
 
             {adminGrantInfo ? <p className="helper-text helper-text-positive">{adminGrantInfo}</p> : null}
+            {adminUsersError ? <p className="helper-text helper-text-warning">{adminUsersError}</p> : null}
 
             <div className="admin-panel-grid">
               <div className="admin-panel-section">

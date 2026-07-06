@@ -16,11 +16,15 @@ from app.rag import (
     KSEF_FOREIGN_SALE_STATUTE_TARGETS,
     QUERY_TOKEN_RE,
     RagChunk,
+    RagDocumentContext,
     RetrievalInspection,
+    build_document_context_from_rows,
     build_article_family_match_score,
     build_chunk_payload,
     build_context_block,
     build_match_query,
+    annotate_chunk_evidence_role,
+    chunk_canonical_source_id,
     build_shareholder_company_asset_sale_statute_targets,
     build_structured_profile,
     build_subject_phrase_match_score,
@@ -44,6 +48,7 @@ from app.rag import (
     query_targets_ksef_foreign_sale,
     query_targets_shareholder_company_asset_sale,
     query_targets_small_taxpayer_foreign_vat,
+    rerank_chunks_within_documents,
     rank_hybrid_local_candidates,
     ranking_terms,
     resolve_statute_tax_domains,
@@ -102,6 +107,9 @@ def get_mysql_connection_kwargs() -> dict[str, Any]:
         "charset": "utf8mb4",
         "cursorclass": DictCursor,
         "autocommit": False,
+        "connect_timeout": int(os.getenv("ALITIGATOR_RAG_MYSQL_CONNECT_TIMEOUT_SECONDS", "10")),
+        "read_timeout": int(os.getenv("ALITIGATOR_RAG_MYSQL_READ_TIMEOUT_SECONDS", "90")),
+        "write_timeout": int(os.getenv("ALITIGATOR_RAG_MYSQL_WRITE_TIMEOUT_SECONDS", "30")),
     }
     if not ssl_disabled:
         kwargs["ssl"] = {}
@@ -615,6 +623,31 @@ def fetch_rows_by_document_ids_mysql(
     return limited_rows
 
 
+def fetch_document_contexts_mysql(document_ids: list[str], *, seed_chunks: list[RagChunk]) -> list[RagDocumentContext]:
+    clean_ids = [str(document_id).strip() for document_id in document_ids if str(document_id).strip()]
+    if not clean_ids:
+        return []
+    documents_table, chunks_table = get_mysql_target()
+    with mysql_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT
+                    c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                    d.subject, d.signature, d.published_date, d.source_url, d.category,
+                    d.legal_provisions_json, d.source, d.source_type, d.source_subtype,
+                    d.authority, d.publication, d.legal_state_date, d.source_pages_json
+                FROM `{chunks_table}` c
+                JOIN `{documents_table}` d ON d.document_id = c.document_id
+                WHERE c.document_id IN ({", ".join(["%s"] * len(clean_ids))})
+                ORDER BY c.document_id ASC, c.chunk_index ASC
+                """,
+                tuple(clean_ids),
+            )
+            rows = list(cursor.fetchall())
+    return build_document_context_from_rows(rows, ordered_document_ids=clean_ids, seed_chunks=seed_chunks)
+
+
 def fetch_statute_rows_by_targets_mysql(
     targets: list[tuple[str, str]],
     *,
@@ -876,6 +909,7 @@ def search_chat_chunks_mysql(
 ) -> list[RagChunk]:
     config = get_rag_config()
     effective_limit = limit or config.retrieval_limit
+    expanded_query = expand_search_query(query)
     judgment_requested_by_query = bool(JUDGMENT_INTENT_RE.search(query) or extract_judgment_signatures(query))
     include_judgments = judgment_requested_by_query if include_judgments is None else include_judgments
     judgment_only_context = bool(JUDGMENT_ONLY_CONTEXT_RE.search(query))
@@ -910,7 +944,7 @@ def search_chat_chunks_mysql(
         interpretations = (
             rank_hybrid_local_candidates(
                 interpretation_rows,
-                query=expand_search_query(query),
+                query=expanded_query,
                 effective_limit=interpretation_limit,
                 config=config,
             )
@@ -929,6 +963,13 @@ def search_chat_chunks_mysql(
             if interpretation_limit
             else []
         )
+    interpretations = rerank_chunks_within_documents(
+        interpretations,
+        query=expanded_query,
+        config=config,
+        source_type="interpretation",
+        max_chunks_per_document=4,
+    )
     judgments = (
         search_chunks_mysql(
             query,
@@ -939,6 +980,13 @@ def search_chat_chunks_mysql(
         )
         if include_judgments
         else []
+    )
+    judgments = rerank_chunks_within_documents(
+        judgments,
+        query=expanded_query,
+        config=config,
+        source_type="judgment",
+        max_chunks_per_document=4,
     )
     statutes = (
         search_chunks_mysql(
@@ -977,7 +1025,7 @@ def search_chat_chunks_mysql(
     hinted_statutes = (
         rank_hybrid_local_candidates(
             hinted_rows,
-            query=expand_search_query(query),
+            query=expanded_query,
             effective_limit=statute_limit,
             config=config,
         )
@@ -985,19 +1033,24 @@ def search_chat_chunks_mysql(
         else []
     )
     merged_statutes: list[RagChunk] = []
-    seen_statute_chunks: set[str] = set()
-    prefer_hinted_statutes = (
-        query_targets_ksef_foreign_sale(query)
-        or query_targets_shareholder_company_asset_sale(query)
-        or query_targets_small_taxpayer_foreign_vat(query)
-    )
-    statute_candidates = [*hinted_statutes, *statutes] if prefer_hinted_statutes else [*statutes, *hinted_statutes]
-    for chunk in statute_candidates:
-        if chunk.chunk_id in seen_statute_chunks:
+    seen_statute_sources: set[str] = set()
+    for chunk in statutes:
+        canonical_source_id = chunk_canonical_source_id(chunk)
+        if canonical_source_id in seen_statute_sources:
             continue
-        seen_statute_chunks.add(chunk.chunk_id)
-        merged_statutes.append(chunk)
+        seen_statute_sources.add(canonical_source_id)
+        merged_statutes.append(annotate_chunk_evidence_role(chunk, "governing_statute"))
         if len(merged_statutes) >= statute_limit:
+            break
+    bundle_limit = min(2, max(0, len(hinted_statutes)))
+    bundle_statutes: list[RagChunk] = []
+    for chunk in hinted_statutes:
+        canonical_source_id = chunk_canonical_source_id(chunk)
+        if canonical_source_id in seen_statute_sources:
+            continue
+        seen_statute_sources.add(canonical_source_id)
+        bundle_statutes.append(annotate_chunk_evidence_role(chunk, "bundle_source"))
+        if len(bundle_statutes) >= bundle_limit:
             break
 
     mixed: list[RagChunk] = []
@@ -1008,4 +1061,5 @@ def search_chat_chunks_mysql(
             mixed.append(merged_statutes[position])
         if position < len(interpretations):
             mixed.append(interpretations[position])
-    return mixed[:effective_limit]
+    mixed.extend(bundle_statutes)
+    return mixed[: effective_limit + len(bundle_statutes)]

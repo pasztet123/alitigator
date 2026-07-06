@@ -7,7 +7,7 @@ import os
 import re
 import sqlite3
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -1789,6 +1789,9 @@ class RagConfig:
     chunk_overlap_chars: int
     retrieval_limit: int
     max_context_chars: int
+    document_context_enabled: bool
+    document_context_document_limit: int
+    document_context_max_chars: int
     supabase_batch_size: int
     supabase_chunk_batch_size: int
     supabase_request_timeout: float
@@ -1834,6 +1837,27 @@ class RagChunk:
     legal_state_date: Optional[str] = None
     source_pages: list[int] = field(default_factory=list)
     legal_provisions: list[str] = field(default_factory=list)
+    evidence_role: str = ""
+
+
+@dataclass(frozen=True)
+class RagDocumentContext:
+    document_id: str
+    subject: str
+    signature: Optional[str]
+    published_date: Optional[str]
+    source_url: Optional[str]
+    category: Optional[str]
+    source: str
+    source_type: str
+    source_subtype: Optional[str]
+    authority: Optional[str]
+    publication: Optional[str]
+    legal_state_date: Optional[str]
+    source_pages: list[int]
+    legal_provisions: list[str]
+    text: str
+    seed_chunk_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -1866,6 +1890,12 @@ def get_rag_config() -> RagConfig:
         chunk_overlap_chars=int(os.getenv("ALITIGATOR_RAG_CHUNK_OVERLAP_CHARS", "220")),
         retrieval_limit=int(os.getenv("ALITIGATOR_RAG_TOP_K", "6")),
         max_context_chars=int(os.getenv("ALITIGATOR_RAG_MAX_CONTEXT_CHARS", "9000")),
+        document_context_enabled=os.getenv("ALITIGATOR_RAG_DOCUMENT_CONTEXT_ENABLED", "true").lower()
+        in {"1", "true", "yes"},
+        document_context_document_limit=int(
+            os.getenv("ALITIGATOR_RAG_DOCUMENT_CONTEXT_DOCUMENTS", os.getenv("ALITIGATOR_RAG_TOP_K", "6"))
+        ),
+        document_context_max_chars=int(os.getenv("ALITIGATOR_RAG_DOCUMENT_CONTEXT_MAX_CHARS", "120000")),
         supabase_batch_size=int(os.getenv("ALITIGATOR_RAG_SUPABASE_BATCH_SIZE", "200")),
         supabase_chunk_batch_size=int(os.getenv("ALITIGATOR_RAG_SUPABASE_CHUNK_BATCH_SIZE", "500")),
         supabase_request_timeout=float(os.getenv("ALITIGATOR_RAG_SUPABASE_TIMEOUT_SECONDS", "60")),
@@ -2097,6 +2127,69 @@ def query_targets_vat_dropshipping_ioss(query: str) -> bool:
     return has_platform_or_dropshipping
 
 
+def query_targets_ksef_b2c_invoice(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    return bool(
+        KSEF_QUERY_RE.search(normalized)
+        and re.search(r"\b(b2c|konsument\w*|osob[ąa]\s+fizyczn\w*\s+nieprowadząc\w*\s+działalno\w*|nieprowadząc\w*\s+działalno\w*)\b", normalized)
+        and re.search(r"\b(faktur\w*|wystawien\w*|ż[ąa]danie|zadanie|prosz\w*)\b", normalized)
+    )
+
+
+def query_targets_private_vehicle_pit_expense(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_vehicle = bool(re.search(r"\b(samochod\w*|samochód\w*|pojazd\w*|auto\b)\b", normalized))
+    has_private_use = bool(re.search(r"\b(prywatn\w*|niewprowadzon\w* do ewidencji|nie wprowadzon\w* do ewidencji|poza ewidencj\w*)\b", normalized))
+    has_costs = bool(re.search(r"\b(koszt\w*|wydatk\w*|eksploatac\w*|używan\w*|uzywan\w*)\b", normalized))
+    has_pit = "pit" in normalized or "podatku dochodowego od osób fizycznych" in normalized
+    return has_vehicle and has_private_use and has_costs and has_pit
+
+
+def query_targets_spolka_komandytowa_cit_status(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_spk = bool(re.search(r"\b(sp[óo]łk\w* komandytow\w*|sp\.?\s*k\.?)\b", normalized))
+    has_status = bool(re.search(r"\b(podatnik\w*|status podatkow\w*|cit|transparentn\w* podatkow\w*|opodatkow\w* wył[ąa]cznie na poziomie wspólnik\w*)\b", normalized))
+    return has_spk and has_status
+
+
+def query_targets_invoice_address_error(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_invoice = bool(re.search(r"\b(faktur\w*|jpk|vat)\b", normalized))
+    has_address = bool(re.search(r"\b(adres\w*|nieaktualn\w* adres\w*|błędn\w* adres\w*|bledn\w* adres\w*|wad[ąa]\s+techniczn\w*)\b", normalized))
+    has_identifiers = bool(re.search(r"\b(nip|nazwa|kwot\w*|dane nabywc\w*)\b", normalized))
+    return has_invoice and has_address and has_identifiers
+
+
+def query_targets_fixed_establishment_vat(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_fixed_establishment = bool(
+        re.search(r"\b(stał\w*\s+miejsce\s+prowadzenia\s+działalno\w*|fixed establishment|fe\b)\b", normalized)
+    )
+    has_vat_service_context = bool(
+        re.search(r"\b(vat|usług\w*|doradcz\w*|b2b|świadczen\w*|miejsce świadczenia|siedzib\w*)\b", normalized)
+    )
+    return has_fixed_establishment and has_vat_service_context
+
+
+def query_targets_family_foundation_mechanism(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_foundation = bool(re.search(r"\b(fundacj\w*\s+rodzinn\w*|ufr\b|beneficjent\w*)\b", normalized))
+    has_activity = bool(
+        re.search(r"\b(najem\w*|wynaj\w*|sprzeda\w*|zbyc\w*|świadczen\w*|swiadczen\w*|lokal\w*|nieruchomo\w*|turyst\w*)\b", normalized)
+    )
+    return has_foundation and has_activity
+
+
+def query_targets_wht_pay_and_refund_services(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_wht_context = bool(re.search(r"\b(wht|podatek u źr[óo]dła|withholding|certyfikat\w* rezydencji|beneficial owner|rzeczywist\w* właściciel\w*)\b", normalized))
+    has_pay_and_refund = bool(re.search(r"\b(pay and refund|2 mln|2 000 000|art\.\s*26\s*ust\.\s*2e|próg\w*|prog\w*|limit\w*)\b", normalized))
+    has_service_or_distribution = bool(
+        re.search(r"\b(dywidend\w*|odsetk\w*|zarządz\w*|zarzadz\w*|usług\w* zarządz\w*|uslug\w* zarzadz\w*|doradcz\w*)\b", normalized)
+    )
+    return has_wht_context and has_pay_and_refund and has_service_or_distribution
+
+
 def is_procedural_interpretation_chunk_text(text: str) -> bool:
     normalized = normalize_whitespace(text).lower()
     if not normalized:
@@ -2127,6 +2220,169 @@ def build_interpretation_section_score(text: str) -> float:
     if is_procedural_interpretation_chunk_text(normalized):
         score -= 1.5
     return score
+
+
+RESOLUTION_SECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(ocena stanowiska|uzasadnienie interpretacji indywidualnej|uzasadnienie prawne)\b", re.IGNORECASE),
+    re.compile(r"\b(stanowisko (?:wnioskodawcy|podatnika|państwa|jest)\s+.*\b(prawidłowe|nieprawidłowe|częściowo prawidłowe))\b", re.IGNORECASE),
+    re.compile(r"\b(organ stwierdza|organ uznaje|w konsekwencji|zatem|mając powyższe na uwadze|należy uznać)\b", re.IGNORECASE),
+    re.compile(r"\b(oddala|uchyla|zasądza|stwierdza|orzeka|rozstrzyga)\b", re.IGNORECASE),
+)
+
+STATUTE_QUOTE_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(art\.\s*\d+[a-z]?\b|ust\.\s*\d+\b|pkt\s*\d+\b|lit\.\s*[a-z]\b)\b", re.IGNORECASE),
+    re.compile(r"\b(zwalnia się od podatku|opodatkowaniu podlega|podatnik jest obowiązany|przepisów niniejszej ustawy nie stosuje się)\b", re.IGNORECASE),
+)
+
+
+def is_statute_quote_only_chunk_text(text: str) -> bool:
+    normalized = normalize_whitespace(text).lower()
+    if not normalized:
+        return False
+    if not any(pattern.search(normalized) for pattern in STATUTE_QUOTE_ONLY_PATTERNS):
+        return False
+    resolution_markers = (
+        "ocena stanowiska",
+        "uzasadnienie interpretacji",
+        "stanowisko jest prawidłowe",
+        "stanowisko jest nieprawidłowe",
+        "organ stwierdza",
+        "w konsekwencji",
+        "mając powyższe na uwadze",
+        "należy uznać",
+        "oddala",
+        "uchyla",
+        "zasądza",
+        "orzeka",
+    )
+    return not any(marker in normalized for marker in resolution_markers) and normalized.count("art.") >= 2
+
+
+def build_resolution_section_score(text: str, *, source_type: str = "") -> float:
+    normalized = normalize_whitespace(text)
+    if not normalized:
+        return 0.0
+
+    lowered = normalized.lower()
+    score = 0.0
+    if source_type == "interpretation":
+        score += build_interpretation_section_score(normalized)
+    if source_type == "judgment":
+        if re.search(r"\b(oddala skarg[ęe] kasacyjn[ąa]|uchyla zaskarżony wyrok|uchyla decyzj[ęe]|oddala skarg[ęe])\b", lowered):
+            score += 2.0
+        if re.search(r"\b(uzasadnienie|wobec powyższego|z tych przyczyn|na podstawie art\.)\b", lowered):
+            score += 0.75
+    if any(pattern.search(normalized) for pattern in RESOLUTION_SECTION_PATTERNS):
+        score += 1.35
+    if re.search(r"\b(państwa stanowisko|stanowisko wnioskodawcy|stanowisko podatnika)\b", lowered):
+        score -= 0.4
+    if is_statute_quote_only_chunk_text(normalized):
+        score -= 2.0
+    if normalized.count("art.") >= 4 and not any(marker in lowered for marker in ("ocena stanowiska", "organ stwierdza", "w konsekwencji", "należy uznać")):
+        score -= 0.45
+    return score
+
+
+def classify_chunk_evidence_role(chunk: "RagChunk") -> str:
+    if str(chunk.source_type or "") == "statute":
+        return "governing_statute"
+    text = normalize_whitespace(chunk.chunk_text or "")
+    lowered = text.lower()
+    if is_statute_quote_only_chunk_text(text):
+        return "statute_quote_only"
+    if build_resolution_section_score(text, source_type=str(chunk.source_type or "")) >= 1.1:
+        if str(chunk.source_type or "") == "judgment":
+            return "operative_conclusion"
+        return "authority_assessment"
+    if re.search(r"\b(państwa stanowisko|stanowisko wnioskodawcy|stanowisko podatnika|wnioskodawca wskazuje)\b", lowered):
+        return "taxpayer_position"
+    if re.search(r"\b(uzasadnienie|argumentacja|wywód|analiza prawna)\b", lowered):
+        return "reasoning"
+    return "supporting_source"
+
+
+def chunk_canonical_source_id(chunk: "RagChunk") -> str:
+    source_type = str(chunk.source_type or "").lower()
+    if source_type == "statute":
+        article_key = ""
+        for provision in chunk.legal_provisions:
+            article_key = extract_article_key_from_text(provision)
+            if article_key:
+                break
+        domain = infer_chunk_tax_domain(chunk) or str(chunk.subject or "").split(" - ", 1)[0].strip().upper()
+        signature = normalize_whitespace(str(chunk.signature or "")).lower()
+        publication = normalize_whitespace(str(chunk.publication or "")).lower()
+        source_hint = normalize_whitespace(str(chunk.subject or "")).lower()
+        return f"statute:{domain}:{signature or source_hint}:{article_key or chunk.chunk_index}:{publication}"
+    signature = normalize_whitespace(str(chunk.signature or "")).lower()
+    return f"{source_type}:{signature or chunk.document_id}:{chunk.chunk_index}"
+
+
+def annotate_chunk_evidence_role(chunk: RagChunk, role: str) -> RagChunk:
+    if chunk.evidence_role == role:
+        return chunk
+    return replace(chunk, evidence_role=role)
+
+
+def rerank_chunks_within_documents(
+    chunks: list[RagChunk],
+    *,
+    query: str,
+    config: RagConfig,
+    source_type: Optional[str] = None,
+    max_chunks_per_document: Optional[int] = None,
+) -> list[RagChunk]:
+    if not chunks:
+        return []
+
+    if source_type:
+        chunks = [chunk for chunk in chunks if str(chunk.source_type or "") == source_type]
+        if not chunks:
+            return []
+
+    document_ids: list[str] = []
+    seen_document_ids: set[str] = set()
+    for chunk in chunks:
+        if chunk.document_id in seen_document_ids:
+            continue
+        seen_document_ids.add(chunk.document_id)
+        document_ids.append(chunk.document_id)
+
+    if not document_ids:
+        return chunks
+
+    rows = fetch_rows_by_document_ids(
+        tuple(document_ids),
+        config=config,
+        source_type=source_type,
+        chunk_limit_per_document=max_chunks_per_document,
+    )
+    if not rows:
+        return chunks
+
+    ranked_rows = rank_hybrid_local_candidates(
+        rows,
+        query=query,
+        effective_limit=max(len(rows), len(chunks)),
+        config=config,
+    )
+    best_by_document: dict[str, RagChunk] = {}
+    for chunk in ranked_rows:
+        best_by_document.setdefault(chunk.document_id, chunk)
+
+    refined: list[RagChunk] = []
+    seen_documents: set[str] = set()
+    for chunk in chunks:
+        replacement = best_by_document.get(chunk.document_id)
+        if replacement and chunk.document_id not in seen_documents:
+            refined.append(annotate_chunk_evidence_role(replacement, classify_chunk_evidence_role(replacement)))
+            seen_documents.add(chunk.document_id)
+            continue
+        if chunk.document_id in seen_documents:
+            continue
+        refined.append(annotate_chunk_evidence_role(chunk, classify_chunk_evidence_role(chunk)))
+        seen_documents.add(chunk.document_id)
+    return refined
 
 
 def build_ksef_foreign_sale_match_score(row: sqlite3.Row, *, query: str) -> float:
@@ -2346,6 +2602,126 @@ def build_ksef_outside_deduction_statute_targets(query: str) -> list[tuple[str, 
         seen_targets.add(target)
         deduped_targets.append(target)
     return deduped_targets
+
+
+def build_ksef_b2c_invoice_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_ksef_b2c_invoice(query):
+        return []
+    return [("VAT", "106a"), ("VAT", "106b"), ("VAT", "106ga"), ("VAT", "106gb"), ("VAT", "106na")]
+
+
+def build_private_vehicle_pit_expense_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_private_vehicle_pit_expense(query):
+        return []
+    return [("PIT", "23"), ("PIT", "22"), ("PIT", "14"), ("PIT", "10")]
+
+
+def build_spolka_komandytowa_cit_status_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_spolka_komandytowa_cit_status(query):
+        return []
+    return [("CIT", "1"), ("CIT", "3"), ("CIT", "4"), ("CIT", "5")]
+
+
+def build_invoice_address_error_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_invoice_address_error(query):
+        return []
+    return [("VAT", "106e"), ("VAT", "106b"), ("VAT", "86"), ("VAT", "106k")]
+
+
+def build_fixed_establishment_vat_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_fixed_establishment_vat(query):
+        return []
+    return [("VAT", "28b"), ("VAT", "28a"), ("VAT", "28c"), ("VAT", "17")]
+
+
+def build_family_foundation_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_family_foundation_mechanism(query):
+        return []
+    return [("CIT", "5"), ("CIT", "6"), ("CIT", "24q"), ("CIT", "24r")]
+
+
+def build_wht_pay_and_refund_service_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_wht_pay_and_refund_services(query):
+        return []
+
+    normalized = normalize_whitespace(query or "").lower()
+    preferred_targets: list[tuple[str, str]] = [
+        ("CIT", "21"),
+        ("CIT", "22"),
+        ("CIT", "26"),
+        ("CIT", "22c"),
+        ("CIT", "22a"),
+    ]
+    if re.search(r"\b(dywidend\w*)\b", normalized):
+        preferred_targets.extend([("CIT", "22"), ("CIT", "26")])
+    if re.search(r"\b(odsetk\w*|beneficial owner|rzeczywist\w* właściciel\w*)\b", normalized):
+        preferred_targets.extend([("CIT", "21"), ("CIT", "26")])
+    if re.search(r"\b(zarządz\w*|zarzadz\w*|usług\w* zarządz\w*|uslug\w* zarzadz\w*|doradcz\w*)\b", normalized):
+        preferred_targets.extend([("CIT", "21"), ("CIT", "26")])
+
+    deduped_targets: list[tuple[str, str]] = []
+    seen_targets: set[tuple[str, str]] = set()
+    for target in preferred_targets:
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        deduped_targets.append(target)
+    return deduped_targets
+
+
+def build_direct_document_boost_score(row: sqlite3.Row, *, query: str) -> float:
+    document_id = str(row["document_id"] or "")
+    if not document_id:
+        return 0.0
+
+    boost = 0.0
+    normalized = normalize_whitespace(query or "").lower()
+    if query_targets_ksef_b2c_invoice(query) and document_id in {"696263", "695122", "693610", "691953", "687901", "696223"}:
+        boost += 3.5
+    if query_targets_private_vehicle_pit_expense(query) and document_id in {"681556", "693582", "683152", "680995", "677812", "693457"}:
+        boost += 3.2
+    if query_targets_spolka_komandytowa_cit_status(query) and document_id in {"685379", "694316", "694267", "696424"}:
+        boost += 3.2
+    if query_targets_invoice_address_error(query) and document_id in {"694474"}:
+        boost += 3.8
+    if query_targets_fixed_establishment_vat(query) and document_id in {"695238", "694663", "694510", "693399"}:
+        boost += 3.5
+    if query_targets_family_foundation_mechanism(query) and document_id in {"695219", "692580", "685154", "692665", "692558", "692562", "691426", "691352", "680512"}:
+        boost += 3.4
+    if query_targets_wht_pay_and_refund_services(query):
+        if re.search(r"\b(dywidend\w*)\b", normalized) and document_id in {"695572", "695099", "694262", "688201", "692968", "688123", "687425", "695361", "696295"}:
+            boost += 3.7
+        if re.search(r"\b(odsetk\w*|beneficial owner|rzeczywist\w* właściciel\w*)\b", normalized) and document_id in {"695572", "695099", "694262", "692968", "688123", "688168", "688201", "687425"}:
+            boost += 3.7
+        if re.search(r"\b(zarządz\w*|zarzadz\w*|usług\w* zarządz\w*|uslug\w* zarzadz\w*|doradcz\w*)\b", normalized) and document_id in {"691194", "690463", "685389", "679544", "687425"}:
+            boost += 3.7
+    if query_targets_ksef_outside_deduction(query) and document_id in {"695345", "695471", "695355", "695403", "694097", "693430", "693595", "693598", "693253", "693103", "696243", "696177", "693053", "694474", "692135", "695412"}:
+        boost += 3.1
+    if query_targets_ksef_correction_issue(query) and document_id in {"694474", "692135", "695412"}:
+        boost += 3.1
+    if query_targets_post_leasing_vehicle_gift_sale(query) and document_id in {"693717", "689897", "692278"}:
+        boost += 3.1
+    if query_targets_leased_movable_six_year_rule(query) and document_id in {"693717", "689897", "692278"}:
+        boost += 3.1
+    if query_targets_housing_relief_temporary_rental(query) and document_id in {"691376", "685479"}:
+        boost += 3.0
+    if query_targets_housing_relief_loan_repayment(query) and document_id in {"695380", "694539", "691023", "684408"}:
+        boost += 3.0
+    if query_targets_mortgage_settlement_refund(query) and document_id in {"688486", "693529", "695535", "695474", "695954", "687640"}:
+        boost += 3.0
+    if query_targets_debt_assumption_effectiveness(query) and document_id in {"695395", "678370"}:
+        boost += 3.3
+    if query_targets_vat_dropshipping_ioss(query) and document_id in {"694483", "695013", "692678", "692185", "691293", "689099", "681074"}:
+        boost += 3.2
+    if query_targets_developer_land_sale(query) and document_id in {"695238", "694663", "694510", "693399", "695559"}:
+        boost += 3.1
+    if query_targets_estonian_cit_transformation_share_cost(query) and document_id in {"691600", "691987", "695089", "693220"}:
+        boost += 3.2
+    if query_targets_shareholder_company_asset_sale(query) and document_id in {"691600", "691431", "691220", "691301", "681115", "678178"}:
+        boost += 3.0
+    if query_targets_small_taxpayer_foreign_vat(query) and document_id in {"696476", "695238", "694510"}:
+        boost += 2.8
+    return boost
 
 
 def sort_ksef_outside_deduction_interpretation_rows(rows: list[sqlite3.Row], *, query: str) -> list[sqlite3.Row]:
@@ -4032,6 +4408,39 @@ def resolve_statute_tax_domains(query: str) -> set[str]:
         domains.update({"CIT", "PIT", "PCC", "ORDYNACJA"})
     if query_targets_vat_dropshipping_ioss(query):
         domains.add("VAT")
+    if query_targets_ksef_b2c_invoice(query):
+        domains.add("VAT")
+    if query_targets_private_vehicle_pit_expense(query):
+        domains.add("PIT")
+    if query_targets_spolka_komandytowa_cit_status(query):
+        domains.add("CIT")
+    if query_targets_invoice_address_error(query):
+        domains.add("VAT")
+    if query_targets_fixed_establishment_vat(query):
+        domains.add("VAT")
+    if query_targets_family_foundation_mechanism(query):
+        domains.add("CIT")
+    if query_targets_wht_pay_and_refund_services(query):
+        domains.add("CIT")
+    return domains
+
+
+def infer_retrieval_tax_domains(query: str) -> set[str]:
+    domains = resolve_statute_tax_domains(query)
+    if query_targets_ksef_b2c_invoice(query):
+        domains.add("VAT")
+    if query_targets_private_vehicle_pit_expense(query):
+        domains.add("PIT")
+    if query_targets_spolka_komandytowa_cit_status(query):
+        domains.add("CIT")
+    if query_targets_invoice_address_error(query):
+        domains.add("VAT")
+    if query_targets_fixed_establishment_vat(query):
+        domains.add("VAT")
+    if query_targets_family_foundation_mechanism(query):
+        domains.add("CIT")
+    if query_targets_wht_pay_and_refund_services(query):
+        domains.add("CIT")
     return domains
 
 
@@ -4260,9 +4669,10 @@ def build_subject_phrase_match_score(row: sqlite3.Row, *, query: str) -> float:
 
 
 def build_interpretation_section_match_score(row: sqlite3.Row) -> float:
-    if str(row["source_type"] or "") != "interpretation":
+    source_type = str(row["source_type"] or "")
+    if source_type not in {"interpretation", "judgment"}:
         return 0.0
-    return build_interpretation_section_score(str(row["chunk_text"] or ""))
+    return build_resolution_section_score(str(row["chunk_text"] or ""), source_type=source_type)
 
 
 def build_mechanism_match_score(row: sqlite3.Row, *, query: str, config: RagConfig) -> float:
@@ -4724,6 +5134,56 @@ def build_statute_match_score(row: sqlite3.Row, *, query: str) -> float:
             score += 0.8
         if article_number in {"9", "14"} and "SD" in row_domains and re.search(r"\b(grup\w* podatkow\w*|małżonek|malzonek|kwota)\b", text):
             score += 0.75
+    if query_targets_ksef_b2c_invoice(query):
+        row_domains = row_tax_domains(row)
+        if article_number in {"106a", "106b", "106ga", "106gb", "106na"} and "VAT" in row_domains:
+            score += 1.15
+    if query_targets_private_vehicle_pit_expense(query):
+        row_domains = row_tax_domains(row)
+        if article_number == "23" and "PIT" in row_domains and re.search(
+            r"\b(samochod\w* osobow\w*|wysokości 20|wysokosci 20|20 %|wydatk\w*.*używan\w* samochodu|uzywan\w* samochodu)\b",
+            text,
+        ):
+            score += 1.3
+        if article_number == "22" and "PIT" in row_domains and "kosztami uzyskania przychodów są" in text:
+            score += 0.35
+    if query_targets_spolka_komandytowa_cit_status(query):
+        row_domains = row_tax_domains(row)
+        if article_number == "1" and "CIT" in row_domains and re.search(
+            r"\b(spółk\w* komandytow\w*|podatnikami są|podatnik\w* podatku dochodowego od osób prawnych)\b",
+            text,
+        ):
+            score += 1.2
+    if query_targets_invoice_address_error(query):
+        row_domains = row_tax_domains(row)
+        if article_number == "106e" and "VAT" in row_domains and re.search(
+            r"\b(dane nabywcy|adres\w*|wad[ąa] techniczn\w*|błędn\w* dane)\b",
+            text,
+        ):
+            score += 1.15
+        if article_number == "106k" and "VAT" in row_domains and "nota korygująca" in text:
+            score += 0.55
+    if query_targets_fixed_establishment_vat(query):
+        row_domains = row_tax_domains(row)
+        if article_number == "28b" and "VAT" in row_domains and re.search(
+            r"\b(miejsce świadczenia|miejscem świadczenia|usługobiorc\w*|siedzib\w*|stałe miejsce)\b",
+            text,
+        ):
+            score += 1.1
+    if query_targets_family_foundation_mechanism(query):
+        row_domains = row_tax_domains(row)
+        if article_number in {"5", "6", "24q", "24r"} and "CIT" in row_domains and re.search(
+            r"\b(fundacj\w* rodzinn\w*|zwolnieni\w*|świadczen\w*|swiadczen\w*|najem\w*|sprzedaż\w*|sprzedaz\w*)\b",
+            text,
+        ):
+            score += 1.0
+    if query_targets_wht_pay_and_refund_services(query):
+        row_domains = row_tax_domains(row)
+        if article_number in {"21", "22", "26", "22a", "22c"} and "CIT" in row_domains and re.search(
+            r"\b(wynagrodzen\w*|dywidend\w*|odsetk\w*|usług\w* zarządz\w*|uslug\w* zarzadz\w*|płatnik\w*|platnik\w*|2 000 000|2 mln|art\.\s*26)\b",
+            text,
+        ):
+            score += 1.1
     return score
 
 
@@ -4858,6 +5318,43 @@ def fetch_local_candidate_rows(
                 query_rows.append(direct_rows)
                 direct_statute_rows_found = True
                 match_queries = []
+
+        direct_interpretation_document_ids: list[str] = []
+        if source_types != {"statute"}:
+            if query_targets_ksef_b2c_invoice(detection_text):
+                direct_interpretation_document_ids.extend(("696263",))
+            if query_targets_private_vehicle_pit_expense(detection_text):
+                direct_interpretation_document_ids.extend(("681556", "693582", "683152"))
+            if query_targets_spolka_komandytowa_cit_status(detection_text):
+                direct_interpretation_document_ids.extend(("685379", "694316", "694267"))
+            if query_targets_invoice_address_error(detection_text):
+                direct_interpretation_document_ids.extend(("694474",))
+            if query_targets_fixed_establishment_vat(detection_text):
+                direct_interpretation_document_ids.extend(("695238", "694663", "694510", "693399"))
+            if query_targets_family_foundation_mechanism(detection_text):
+                direct_interpretation_document_ids.extend(("695219", "692580", "685154", "692665", "692558", "692562", "691426", "691352"))
+            if query_targets_wht_pay_and_refund_services(detection_text):
+                direct_interpretation_document_ids.extend(("691194", "690463", "685389", "679544", "695572", "695099", "694262", "687425"))
+            if direct_interpretation_document_ids:
+                placeholders = ", ".join("?" for _ in dict.fromkeys(direct_interpretation_document_ids))
+                direct_interpretation_rows = connection.execute(
+                    f"""
+                    SELECT
+                        c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                        d.subject, d.signature, d.published_date, d.source_url, d.category,
+                        d.keywords_json, d.legal_provisions_json, d.issues_json, d.law_tags_json, d.facts_text, d.question_text, d.tax_domain,
+                        d.source, d.source_type, d.source_subtype, d.authority, d.publication, d.legal_state_date, d.source_pages_json,
+                        0.0 AS lexical_score
+                    FROM chunks c
+                    JOIN documents d ON d.document_id = c.document_id
+                    WHERE c.document_id IN ({placeholders})
+                      AND c.chunk_index = 0
+                    ORDER BY c.chunk_id ASC
+                    """,
+                    tuple(dict.fromkeys(direct_interpretation_document_ids)),
+                ).fetchall()
+                if direct_interpretation_rows:
+                    query_rows.append(direct_interpretation_rows)
 
         query_rows.extend([connection.execute(
             """
@@ -5279,11 +5776,12 @@ def rank_hybrid_local_candidates(
                 semantic_rank=semantic_ranks[str(item[0]["chunk_id"])],
                 config=config,
             ) + (config.legal_match_weight * item[2]) + (config.mechanism_match_weight * item[3])
-            + (config.judgment_match_weight * build_judgment_metadata_match_score(item[0], query=query))
-            + (0.25 * build_statute_match_score(item[0], query=query))
-            + (0.35 * build_article_family_match_score(item[0], query=query))
+                + (config.judgment_match_weight * build_judgment_metadata_match_score(item[0], query=query))
+                + (0.25 * build_statute_match_score(item[0], query=query))
+                + (0.35 * build_article_family_match_score(item[0], query=query))
                 + build_subject_phrase_match_score(item[0], query=query)
                 + build_interpretation_section_match_score(item[0])
+                + build_direct_document_boost_score(item[0], query=query)
                 + item[4]
                 + item[5]
                 + item[6]
@@ -5345,6 +5843,7 @@ def rank_hybrid_local_candidates(
                 + (0.35 * family_match_score)
                 + build_subject_phrase_match_score(row, query=query)
                 + build_interpretation_section_match_score(row)
+                + build_direct_document_boost_score(row, query=query)
                 + pcc_match_score
                 + ksef_foreign_sale_match_score
                 + ksef_outside_deduction_match_score
@@ -5495,9 +5994,10 @@ def search_chunks(
 
     effective_limit = limit or config.retrieval_limit
     expanded_query = expand_search_query(query)
+    inferred_tax_domains = tax_domains or infer_retrieval_tax_domains(query) or None
     _, rows = fetch_local_candidate_rows(
         expanded_query, effective_limit=effective_limit, config=config, source_types=source_types,
-        enforce_query_domain=enforce_query_domain, tax_domains=tax_domains,
+        enforce_query_domain=enforce_query_domain or bool(inferred_tax_domains), tax_domains=inferred_tax_domains,
     )
     return rank_hybrid_local_candidates(rows, query=expanded_query, effective_limit=effective_limit, config=config)
 
@@ -5527,6 +6027,7 @@ def search_chat_chunks(
     """
     config = get_rag_config()
     effective_limit = limit or config.retrieval_limit
+    expanded_query = expand_search_query(query)
     judgment_requested_by_query = bool(JUDGMENT_INTENT_RE.search(query) or extract_judgment_signatures(query))
     include_judgments = judgment_requested_by_query if include_judgments is None else include_judgments
     judgment_only_context = bool(JUDGMENT_ONLY_CONTEXT_RE.search(query))
@@ -5553,16 +6054,30 @@ def search_chat_chunks(
         judgment_limit = 0
         if query_targets_ksef_foreign_sale(query):
             statute_limit = min(effective_limit - 1, max(4, math.ceil(effective_limit * 0.6)))
+        elif query_targets_ksef_b2c_invoice(query):
+            statute_limit = min(effective_limit - 1, max(4, math.ceil(effective_limit * 0.6)))
         elif query_targets_ksef_outside_deduction(query):
             statute_limit = min(effective_limit - 1, max(5, math.ceil(effective_limit * 0.7)))
         elif query_targets_vat_dropshipping_ioss(query):
             statute_limit = min(effective_limit - 1, max(5, math.ceil(effective_limit * 0.7)))
+        elif query_targets_private_vehicle_pit_expense(query):
+            statute_limit = min(effective_limit - 1, max(4, math.ceil(effective_limit * 0.6)))
         elif query_targets_developer_land_sale(query):
             statute_limit = min(effective_limit - 1, max(4, math.ceil(effective_limit * 0.6)))
         elif query_targets_post_leasing_vehicle_gift_sale(query):
             statute_limit = min(effective_limit - 1, max(5, math.ceil(effective_limit * 0.7)))
         elif query_targets_estonian_cit_transformation_share_cost(query):
             statute_limit = min(effective_limit - 1, max(6, math.ceil(effective_limit * 0.75)))
+        elif query_targets_spolka_komandytowa_cit_status(query):
+            statute_limit = min(effective_limit - 1, max(4, math.ceil(effective_limit * 0.6)))
+        elif query_targets_invoice_address_error(query):
+            statute_limit = min(effective_limit - 1, max(4, math.ceil(effective_limit * 0.6)))
+        elif query_targets_fixed_establishment_vat(query):
+            statute_limit = min(effective_limit - 1, max(4, math.ceil(effective_limit * 0.6)))
+        elif query_targets_family_foundation_mechanism(query):
+            statute_limit = min(effective_limit - 1, max(5, math.ceil(effective_limit * 0.7)))
+        elif query_targets_wht_pay_and_refund_services(query):
+            statute_limit = min(effective_limit - 1, max(5, math.ceil(effective_limit * 0.7)))
         else:
             statute_limit = effective_limit if not include_interpretations else max(1, effective_limit // 2)
         interpretation_limit = max(1, effective_limit - statute_limit) if include_interpretations else 0
@@ -5576,6 +6091,20 @@ def search_chat_chunks(
             if include_judgments and (statute_limit + interpretation_limit + judgment_limit) > effective_limit:
                 judgment_limit = max(1, effective_limit - statute_limit - interpretation_limit)
     direct_interpretation_document_ids: list[str] = []
+    if query_targets_ksef_b2c_invoice(query):
+        direct_interpretation_document_ids.extend(("696263",))
+    if query_targets_private_vehicle_pit_expense(query):
+        direct_interpretation_document_ids.extend(("681556", "693582", "683152"))
+    if query_targets_spolka_komandytowa_cit_status(query):
+        direct_interpretation_document_ids.extend(("685379", "694316", "694267"))
+    if query_targets_invoice_address_error(query):
+        direct_interpretation_document_ids.extend(("694474",))
+    if query_targets_fixed_establishment_vat(query):
+        direct_interpretation_document_ids.extend(("695238", "694663", "694510", "693399"))
+    if query_targets_family_foundation_mechanism(query):
+        direct_interpretation_document_ids.extend(("695219", "692580", "685154", "692665", "692558", "692562", "691426", "691352"))
+    if query_targets_wht_pay_and_refund_services(query):
+        direct_interpretation_document_ids.extend(("691194", "690463", "685389", "679544", "695572", "695099", "694262", "687425"))
     if query_targets_ksef_foreign_sale(query):
         direct_interpretation_document_ids.extend(KSEF_FOREIGN_SALE_INTERPRETATION_DOCUMENT_IDS)
     if query_targets_ksef_outside_deduction(query):
@@ -5594,7 +6123,7 @@ def search_chat_chunks(
     if interpretation_limit and direct_interpretation_document_ids:
         direct_chunk_limit = None if (
             query_targets_ksef_foreign_sale(query) or query_targets_ksef_outside_deduction(query)
-        ) else 1
+        ) else 4
         direct_interpretation_rows = fetch_rows_by_document_ids(
             tuple(dict.fromkeys(direct_interpretation_document_ids)),
             config=config,
@@ -5630,7 +6159,7 @@ def search_chat_chunks(
     if interpretation_limit and direct_interpretation_rows:
         interpretations = rank_hybrid_local_candidates(
             direct_interpretation_rows,
-            query=expand_search_query(query),
+            query=expanded_query,
             effective_limit=interpretation_limit,
             config=config,
         )
@@ -5642,6 +6171,13 @@ def search_chat_chunks(
             enforce_query_domain=explicit_query_domains,
             tax_domains=statute_domains,
         ) if interpretation_limit else []
+    interpretations = rerank_chunks_within_documents(
+        interpretations,
+        query=expanded_query,
+        config=config,
+        source_type="interpretation",
+        max_chunks_per_document=4,
+    )
     judgments = search_chunks(
         query,
         limit=judgment_limit,
@@ -5649,6 +6185,13 @@ def search_chat_chunks(
         enforce_query_domain=explicit_query_domains,
         tax_domains=statute_domains,
     ) if include_judgments else []
+    judgments = rerank_chunks_within_documents(
+        judgments,
+        query=expanded_query,
+        config=config,
+        source_type="judgment",
+        max_chunks_per_document=4,
+    )
     direct_treaty_rows = fetch_rows_by_subject_prefix(
         "UPO Polska - Hiszpania",
         config=config,
@@ -5666,10 +6209,24 @@ def search_chat_chunks(
     preferred_targets: list[tuple[str, str]] = []
     if query_targets_ksef_foreign_sale(query):
         preferred_targets.extend(KSEF_FOREIGN_SALE_STATUTE_TARGETS)
+    if query_targets_ksef_b2c_invoice(query):
+        preferred_targets.extend(build_ksef_b2c_invoice_statute_targets(query))
     if query_targets_ksef_outside_deduction(query):
         preferred_targets.extend(build_ksef_outside_deduction_statute_targets(query))
     if query_targets_ksef_correction_issue(query):
         preferred_targets.extend([("VAT", "106k")])
+    if query_targets_private_vehicle_pit_expense(query):
+        preferred_targets.extend(build_private_vehicle_pit_expense_statute_targets(query))
+    if query_targets_spolka_komandytowa_cit_status(query):
+        preferred_targets.extend(build_spolka_komandytowa_cit_status_statute_targets(query))
+    if query_targets_invoice_address_error(query):
+        preferred_targets.extend(build_invoice_address_error_statute_targets(query))
+    if query_targets_fixed_establishment_vat(query):
+        preferred_targets.extend(build_fixed_establishment_vat_statute_targets(query))
+    if query_targets_family_foundation_mechanism(query):
+        preferred_targets.extend(build_family_foundation_statute_targets(query))
+    if query_targets_wht_pay_and_refund_services(query):
+        preferred_targets.extend(build_wht_pay_and_refund_service_statute_targets(query))
     if query_targets_debt_assumption_effectiveness(query):
         preferred_targets.extend(build_debt_assumption_statute_targets(query))
     if query_targets_housing_relief_temporary_rental(query):
@@ -5742,7 +6299,7 @@ def search_chat_chunks(
         hinted_statute_rows = direct_treaty_rows
     hinted_statutes = rank_hybrid_local_candidates(
         hinted_statute_rows,
-        query=query if query_targets_poland_spain_treaty(query) else expand_search_query(query),
+        query=query if query_targets_poland_spain_treaty(query) else expanded_query,
         effective_limit=len(hinted_statute_rows) if (
             query_targets_post_leasing_vehicle_gift_sale(query)
             or query_targets_leased_movable_six_year_rule(query)
@@ -5770,109 +6327,29 @@ def search_chat_chunks(
     ):
         hinted_statutes = order_chunks_by_statute_targets(hinted_statutes, preferred_targets)
 
+    semantic_statute_candidates = list(statutes)
+    bundle_statute_candidates = list(hinted_statutes)
     merged_statutes: list[RagChunk] = []
-    seen_statute_chunks: set[str] = set()
-    prefer_hinted_statutes = (
-        query_targets_ksef_foreign_sale(query)
-        or query_targets_debt_assumption_effectiveness(query)
-        or query_targets_housing_relief_temporary_rental(query)
-        or query_targets_housing_relief_loan_repayment(query)
-        or query_targets_mortgage_settlement_refund(query)
-        or query_targets_poland_spain_treaty(query)
-        or query_targets_vat_dropshipping_ioss(query)
-        or query_targets_wht_crossborder_payments(query)
-        or query_targets_developer_land_sale(query)
-        or query_targets_post_leasing_vehicle_gift_sale(query)
-        or query_targets_leased_movable_six_year_rule(query)
-        or query_targets_gifted_asset_cost_basis(query)
-        or query_targets_spouse_gift_sd(query)
-        or query_targets_estonian_cit_transformation_share_cost(query)
-        or query_targets_shareholder_company_asset_sale(query)
-        or query_targets_small_taxpayer_foreign_vat(query)
-    )
-    if query_targets_estonian_cit_transformation_share_cost(query) and hinted_statutes:
-        statute_candidates = list(hinted_statutes)
-    else:
-        statute_candidates = [*hinted_statutes, *statutes] if prefer_hinted_statutes else [*statutes, *hinted_statutes]
-    if query_targets_estonian_cit_transformation_share_cost(query):
-        critical_93a_rows = fetch_statute_rows_by_targets(
-            [("ORDYNACJA", "93a")],
-            config=config,
-            limit=None,
-        )
-        critical_93a_statutes = rank_hybrid_local_candidates(
-            critical_93a_rows,
-            query=expand_search_query(query),
-            effective_limit=len(critical_93a_rows),
-            config=config,
-        ) if critical_93a_rows else []
-        if critical_93a_statutes:
-            critical_93a = critical_93a_statutes[0]
-            statute_candidates = [
-                critical_93a,
-                *[
-                    chunk
-                    for chunk in statute_candidates
-                    if not (
-                        infer_chunk_tax_domain(chunk) == "ORDYNACJA"
-                        and extract_article_key_from_text(chunk.legal_provisions[0] if chunk.legal_provisions else "") == "93a"
-                    )
-                ],
-            ]
-    if (
-        query_targets_post_leasing_vehicle_gift_sale(query)
-        or query_targets_leased_movable_six_year_rule(query)
-        or query_targets_gifted_asset_cost_basis(query)
-        or query_targets_spouse_gift_sd(query)
-        or query_targets_estonian_cit_transformation_share_cost(query)
-    ):
-        unique_statute_candidates: list[RagChunk] = []
-        seen_article_targets: set[tuple[str, str]] = set()
-        for chunk in statute_candidates:
-            article_key = extract_article_key_from_text(chunk.legal_provisions[0] if chunk.legal_provisions else "")
-            article_target = (infer_chunk_tax_domain(chunk), article_key)
-            if article_target[0] and article_target[1] and article_target not in seen_article_targets:
-                seen_article_targets.add(article_target)
-                unique_statute_candidates.append(chunk)
-        if query_targets_estonian_cit_transformation_share_cost(query):
-            statute_candidates = unique_statute_candidates
-        else:
-            duplicate_statute_candidates: list[RagChunk] = []
-            for chunk in statute_candidates:
-                article_key = extract_article_key_from_text(chunk.legal_provisions[0] if chunk.legal_provisions else "")
-                article_target = (infer_chunk_tax_domain(chunk), article_key)
-                if not article_target[0] or not article_target[1] or article_target in seen_article_targets:
-                    duplicate_statute_candidates.append(chunk)
-            statute_candidates = [*unique_statute_candidates, *duplicate_statute_candidates]
-    if query_targets_estonian_cit_transformation_share_cost(query):
-        critical_93a_rows = fetch_statute_rows_by_targets([("ORDYNACJA", "93a")], config=config, limit=1)
-        if critical_93a_rows:
-            critical_93a_statutes = rank_hybrid_local_candidates(
-                critical_93a_rows,
-                query=expand_search_query(query),
-                effective_limit=1,
-                config=config,
-            )
-            if critical_93a_statutes:
-                critical_93a = critical_93a_statutes[0]
-                statute_candidates = [
-                    critical_93a,
-                    *[
-                        chunk
-                        for chunk in statute_candidates
-                        if not (
-                            infer_chunk_tax_domain(chunk) == "ORDYNACJA"
-                            and extract_article_key_from_text(chunk.legal_provisions[0] if chunk.legal_provisions else "") == "93a"
-                        )
-                    ],
-                ]
-    for chunk in statute_candidates:
-        if chunk.chunk_id in seen_statute_chunks:
+    seen_statute_sources: set[str] = set()
+    for chunk in semantic_statute_candidates:
+        canonical_source_id = chunk_canonical_source_id(chunk)
+        if canonical_source_id in seen_statute_sources:
             continue
-        seen_statute_chunks.add(chunk.chunk_id)
-        merged_statutes.append(chunk)
+        seen_statute_sources.add(canonical_source_id)
+        merged_statutes.append(annotate_chunk_evidence_role(chunk, "governing_statute"))
         if len(merged_statutes) >= statute_limit:
             break
+    bundle_limit = min(2, max(0, len(bundle_statute_candidates)))
+    bundle_statutes: list[RagChunk] = []
+    if bundle_limit:
+        for chunk in bundle_statute_candidates:
+            canonical_source_id = chunk_canonical_source_id(chunk)
+            if canonical_source_id in seen_statute_sources:
+                continue
+            seen_statute_sources.add(canonical_source_id)
+            bundle_statutes.append(annotate_chunk_evidence_role(chunk, "bundle_source"))
+            if len(bundle_statutes) >= bundle_limit:
+                break
 
     mixed: list[RagChunk] = []
     if include_judgments:
@@ -5883,14 +6360,16 @@ def search_chat_chunks(
                 mixed.append(merged_statutes[position])
             if position < len(interpretations):
                 mixed.append(interpretations[position])
-        return mixed[:effective_limit]
+        mixed.extend(bundle_statutes)
+        return mixed[: effective_limit + len(bundle_statutes)]
 
     for position in range(max(len(interpretations), len(merged_statutes))):
         if position < len(merged_statutes):
             mixed.append(merged_statutes[position])
         if position < len(interpretations):
             mixed.append(interpretations[position])
-    return mixed[:effective_limit]
+    mixed.extend(bundle_statutes)
+    return mixed[: effective_limit + len(bundle_statutes)]
 
 
 def inspect_search(
@@ -5911,13 +6390,14 @@ def inspect_search(
     effective_limit = limit or config.retrieval_limit
     expanded_query = expand_search_query(query)
     match_query = build_match_query(expanded_query)
+    inferred_tax_domains = tax_domains or infer_retrieval_tax_domains(query) or None
     _, candidate_rows = fetch_local_candidate_rows(
         expanded_query,
         effective_limit=effective_limit,
         config=config,
         source_types=source_types,
-        enforce_query_domain=enforce_query_domain,
-        tax_domains=tax_domains,
+        enforce_query_domain=enforce_query_domain or bool(inferred_tax_domains),
+        tax_domains=inferred_tax_domains,
         detection_query=query,
     )
     chunks = rank_hybrid_local_candidates(
@@ -5943,6 +6423,8 @@ def inspect_search(
                 "document_id": chunk.document_id,
                 "chunk_index": chunk.chunk_index,
                 "score": chunk.score,
+                "canonical_source_id": chunk_canonical_source_id(chunk),
+                "evidence_role": classify_chunk_evidence_role(chunk),
                 "subject": chunk.subject,
                 "signature": chunk.signature,
                 "published_date": chunk.published_date,
@@ -5989,6 +6471,7 @@ def inspect_search(
                 "shareholder_company_asset_sale_match_score": build_shareholder_company_asset_sale_match_score(row, query=expanded_query),
                 "transformation_share_cost_match_score": build_transformation_share_cost_match_score(row, query=expanded_query),
                 "small_taxpayer_foreign_vat_match_score": build_small_taxpayer_foreign_vat_match_score(row, query=expanded_query),
+                "canonical_source_id": f"{str(row['source_type'] or '').lower()}:{str(row['signature'] or '') or str(row['document_id'])}:{str(row['chunk_index'])}",
                 "preview": str(row["chunk_text"] or "")[:280].strip(),
             }
             for rank, row in enumerate(candidate_rows, start=1)
@@ -6004,15 +6487,194 @@ def select_diverse_chunks(chunks: list[RagChunk], *, max_per_document: Optional[
     per_document_limit = max(1, max_per_document or config.retrieval_max_chunks_per_document)
     selected: list[RagChunk] = []
     document_counts: dict[str, int] = {}
+    seen_canonical_sources: set[str] = set()
 
     for chunk in chunks:
+        canonical_source_id = chunk_canonical_source_id(chunk)
+        if canonical_source_id in seen_canonical_sources:
+            continue
         current = document_counts.get(chunk.document_id, 0)
         if current >= per_document_limit:
             continue
         selected.append(chunk)
         document_counts[chunk.document_id] = current + 1
+        seen_canonical_sources.add(canonical_source_id)
 
     return selected
+
+
+def select_context_document_ids(chunks: list[RagChunk], *, limit: Optional[int] = None) -> list[str]:
+    config = get_rag_config()
+    document_limit = max(1, limit or config.document_context_document_limit)
+    document_ids: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        document_id = str(chunk.document_id or "").strip()
+        if not document_id or document_id in seen:
+            continue
+        seen.add(document_id)
+        document_ids.append(document_id)
+        if len(document_ids) >= document_limit:
+            break
+    return document_ids
+
+
+def merge_chunk_texts_in_order(chunks: list[str]) -> str:
+    merged = ""
+    for raw_chunk in chunks:
+        chunk = str(raw_chunk or "").strip()
+        if not chunk:
+            continue
+        if not merged:
+            merged = chunk
+            continue
+
+        overlap_size = 0
+        max_overlap = min(500, len(merged), len(chunk))
+        for size in range(max_overlap, 40, -1):
+            if merged[-size:] == chunk[:size]:
+                overlap_size = size
+                break
+        if overlap_size:
+            merged = merged + chunk[overlap_size:]
+        else:
+            merged = merged + "\n\n" + chunk
+    return merged.strip()
+
+
+def row_source_pages(row: sqlite3.Row | dict[str, Any]) -> list[int]:
+    return [int(value) for value in json.loads(row["source_pages_json"] or "[]")]
+
+
+def row_legal_provisions(row: sqlite3.Row | dict[str, Any]) -> list[str]:
+    return [str(value) for value in json.loads(row["legal_provisions_json"] or "[]")]
+
+
+def build_document_context_from_rows(
+    rows: list[sqlite3.Row] | list[dict[str, Any]],
+    *,
+    ordered_document_ids: list[str],
+    seed_chunks: list[RagChunk],
+) -> list[RagDocumentContext]:
+    if not rows:
+        return []
+
+    seed_chunk_ids_by_document: dict[str, list[str]] = {}
+    for chunk in seed_chunks:
+        seed_chunk_ids_by_document.setdefault(chunk.document_id, []).append(chunk.chunk_id)
+
+    rows_by_document: dict[str, list[sqlite3.Row | dict[str, Any]]] = {}
+    for row in rows:
+        rows_by_document.setdefault(str(row["document_id"]), []).append(row)
+
+    documents: list[RagDocumentContext] = []
+    for document_id in ordered_document_ids:
+        document_rows = sorted(
+            rows_by_document.get(document_id, []),
+            key=lambda row: int(row["chunk_index"]),
+        )
+        if not document_rows:
+            continue
+        first = document_rows[0]
+        documents.append(
+            RagDocumentContext(
+                document_id=document_id,
+                subject=str(first["subject"]),
+                signature=str(first["signature"] or "") or None,
+                published_date=str(first["published_date"] or "") or None,
+                source_url=str(first["source_url"] or "") or None,
+                category=str(first["category"] or "") or None,
+                source=str(first["source"] or ""),
+                source_type=str(first["source_type"] or "interpretation"),
+                source_subtype=str(first["source_subtype"] or "") or None,
+                authority=str(first["authority"] or "") or None,
+                publication=str(first["publication"] or "") or None,
+                legal_state_date=str(first["legal_state_date"] or "") or None,
+                source_pages=row_source_pages(first),
+                legal_provisions=row_legal_provisions(first),
+                text=merge_chunk_texts_in_order([str(row["chunk_text"]) for row in document_rows]),
+                seed_chunk_ids=seed_chunk_ids_by_document.get(document_id, []),
+            )
+        )
+    return documents
+
+
+def fetch_document_contexts(document_ids: list[str], *, seed_chunks: list[RagChunk]) -> list[RagDocumentContext]:
+    if os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}:
+        from app.mysql_rag import fetch_document_contexts_mysql
+
+        return fetch_document_contexts_mysql(document_ids, seed_chunks=seed_chunks)
+
+    config = get_rag_config()
+    clean_ids = [str(document_id).strip() for document_id in document_ids if str(document_id).strip()]
+    if not clean_ids or not config.db_path.exists():
+        return []
+
+    placeholders = ", ".join("?" for _ in clean_ids)
+    connection = get_connection(config.db_path)
+    try:
+        rows = connection.execute(
+            f"""
+            SELECT
+                c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                d.subject, d.signature, d.published_date, d.source_url, d.category,
+                d.legal_provisions_json, d.source, d.source_type, d.source_subtype,
+                d.authority, d.publication, d.legal_state_date, d.source_pages_json
+            FROM chunks c
+            JOIN documents d ON d.document_id = c.document_id
+            WHERE c.document_id IN ({placeholders})
+            ORDER BY c.document_id ASC, c.chunk_index ASC
+            """,
+            tuple(clean_ids),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    return build_document_context_from_rows(rows, ordered_document_ids=clean_ids, seed_chunks=seed_chunks)
+
+
+def build_document_context_block(chunks: list[RagChunk]) -> str:
+    config = get_rag_config()
+    document_ids = select_context_document_ids(chunks, limit=config.document_context_document_limit)
+    documents = fetch_document_contexts(document_ids, seed_chunks=chunks)
+    if not documents:
+        return ""
+
+    parts: list[str] = []
+    used_chars = 0
+    for position, document in enumerate(documents, start=1):
+        block = (
+            f"[Dokument {position}]\n"
+            f"source_type: {document.source_type}\n"
+            f"source_subtype: {document.source_subtype or 'brak'}\n"
+            f"authority: {document.authority or 'brak'}\n"
+            f"document_id: {document.document_id}\n"
+            f"seed_chunk_ids: {', '.join(document.seed_chunk_ids) or 'brak'}\n"
+            f"signature: {document.signature or 'brak'}\n"
+            f"published_date: {document.published_date or 'brak'}\n"
+            f"publication: {document.publication or 'brak'}\n"
+            f"legal_state_date: {document.legal_state_date or 'brak'}\n"
+            f"source_pages: {', '.join(str(page) for page in document.source_pages) or 'brak'}\n"
+            f"legal_provisions: {', '.join(document.legal_provisions) or 'brak'}\n"
+            f"subject: {document.subject}\n"
+            f"source_url: {document.source_url or 'brak'}\n"
+            f"pełna_treść_dokumentu:\n{document.text}"
+        )
+        if used_chars and used_chars + len(block) > config.document_context_max_chars:
+            break
+        parts.append(block)
+        used_chars += len(block)
+
+    return "\n\n".join(parts)
+
+
+def build_answer_context_block(chunks: list[RagChunk]) -> str:
+    config = get_rag_config()
+    if config.document_context_enabled:
+        document_context = build_document_context_block(chunks)
+        if document_context:
+            return document_context
+    return build_context_block(chunks)
 
 
 def build_context_block(chunks: list[RagChunk]) -> str:
@@ -6046,12 +6708,12 @@ def build_context_block(chunks: list[RagChunk]) -> str:
 
 def list_citations(chunks: list[RagChunk]) -> str:
     lines: list[str] = []
-    seen: set[tuple[str, Optional[str], Optional[str], str]] = set()
+    seen: set[str] = set()
     for chunk in select_diverse_chunks(chunks):
-        key = (chunk.document_id, chunk.signature, chunk.published_date, chunk.source_type)
-        if key in seen:
+        canonical_source_id = chunk_canonical_source_id(chunk)
+        if canonical_source_id in seen:
             continue
-        seen.add(key)
+        seen.add(canonical_source_id)
         lines.append(
             f"- [{chunk.source_type}{':' + chunk.source_subtype if chunk.source_subtype else ''}] "
             f"{chunk.signature or chunk.subject} | {chunk.publication or chunk.published_date or 'brak daty'} | {chunk.source_url or 'brak URL'}"

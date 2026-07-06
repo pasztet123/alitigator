@@ -37,6 +37,7 @@ from app.billing import (
 from app.eureka_ingest import DEFAULT_CONCURRENCY, DEFAULT_PAGE_SIZE, DEFAULT_SORT, FetchConfig, run_ingest
 from app.rag import (
     RagChunk,
+    build_answer_context_block,
     build_context_block,
     detect_domains,
     detect_mechanisms,
@@ -1247,11 +1248,13 @@ def build_chat_system_prompt(
 
     return (
         SYSTEM_PROMPT
-        + "\n\nPoniżej znajdują się zweryfikowane fragmenty z indeksu źródeł prawnych."
+        + "\n\nPoniżej znajdują się zweryfikowane dokumenty z indeksu źródeł prawnych."
+        + " Dokumenty zostały wybrane przez retrieval chunkowy, ale w kontekście dostajesz pełną treść wybranych dokumentów, jeśli była dostępna w indeksie."
         + " Odpowiadaj wyłącznie na ich podstawie w części źródłowej, a własne wnioski oznaczaj jako wnioski."
-        + " Nie traktuj powtarzających się fragmentów z tego samego dokumentu jako niezależnych źródeł."
+        + " Nie traktuj kilku fragmentów albo części tego samego dokumentu jako niezależnych źródeł."
         + " Jeśli źródła są niejednoznaczne albo częściowe, napisz to wprost zamiast domyślać stanowisko."
-        + " Najpierw wykonaj wewnętrznie selekcję materiału: oddziel źródła trafne, częściowo trafne i nietrafne wobec pytania."
+        + " Najpierw wykonaj wewnętrznie selekcję materiału: sporządź robocze podsumowanie każdego dokumentu,"
+        + " oddziel źródła trafne, częściowo trafne i nietrafne wobec pytania, a potem wybierz tylko elementy ważne dla odpowiedzi."
         + " W odpowiedzi pokaż przede wszystkim treść wynikającą ze źródeł trafnych i częściowo trafnych."
         + " Nie wolno Ci maskować słabego retrievalu stanowczą analizą."
         + " Jeżeli pokrycie retrievalu jest częściowe lub słabe, zawęź odpowiedź do osi naprawdę wspartych materiałem."
@@ -1958,7 +1961,7 @@ async def chat(
             structured_reply=structured_reply,
         )
 
-    retrieved_context = build_context_block(retrieved_chunks)
+    retrieved_context = build_answer_context_block(retrieved_chunks)
     retrieval_coverage_context = build_retrieval_coverage_context(effective_user_prompt, retrieved_chunks)
     system_prompt = build_chat_system_prompt(
         latest_user_message,
@@ -2061,7 +2064,7 @@ def rag_search(request: RagSearchRequest) -> RagSearchResponse:
         selected_count=inspection.selected_count,
         selected_context_chars=inspection.selected_context_chars,
         citations=list_citations(chunks),
-        context_block=build_context_block(chunks),
+        context_block=build_answer_context_block(chunks),
         hits=[RagSearchHit(**hit) for hit in inspection.hits],
     )
 

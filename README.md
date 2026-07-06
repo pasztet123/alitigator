@@ -183,6 +183,7 @@ Domyślny przepływ jest taki:
 - `POST /api/rag/reindex` domyślnie buduje lokalny indeks SQLite,
 - `/api/chat` korzysta z lokalnego indeksu, a Supabase jest tylko opcjonalnym rozszerzeniem.
 - jeśli pliki źródłowe ustaw są nowsze niż lokalny SQLite, backend automatycznie odświeży indeks przy pierwszym zapytaniu.
+- chat używa retrievalu chunkowego do wyboru dokumentów, a następnie domyślnie odtwarza pełną treść do 6 wybranych dokumentów i przekazuje ją modelowi do wewnętrznej selekcji oraz syntezy.
 
 Zbudowanie albo odświeżenie indeksu:
 

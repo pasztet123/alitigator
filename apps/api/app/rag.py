@@ -3056,11 +3056,11 @@ def query_targets_estonian_cit_transformation_share_cost(query: str) -> bool:
     normalized = normalize_whitespace(query or "").lower()
     has_transformation = bool(
         re.search(
-            r"(przekształc\w*.*sp[óo]łk\w* komandytow\w*.*sp[óo]łk\w* z o\.?o\.?|"
-            r"sp[óo]łk\w* komandytow\w*.*przekształc\w*.*sp[óo]łk\w* z o\.?o\.?|"
+            r"(przekszta[łl]c\w*.*sp[óo]łk\w* komandytow\w*.*sp[óo]łk\w* z o\.?o\.?|"
+            r"sp[óo]łk\w* komandytow\w*.*przekszta[łl]c\w*.*sp[óo]łk\w* z o\.?o\.?|"
             r"transformacj\w* sp[óo]łk\w* komandytow\w*|"
             r"następstw\w* praw\w*.*sp[óo]łk\w* komandytow\w*|"
-            r"sukcesj\w* podatkow\w*.*przekształc\w*)",
+            r"sukcesj\w* podatkow\w*.*przekszta[łl]c\w*)",
             normalized,
         )
     )
@@ -3082,6 +3082,31 @@ def query_targets_estonian_cit_transformation_share_cost(query: str) -> bool:
     )
     has_pcc = bool(re.search(r"\b(pcc|podatek od czynności cywilnoprawnych)\b", normalized))
     return has_transformation and (has_estonian_cit or has_share_cost or has_pcc)
+
+
+def query_targets_estonian_cit_hidden_profit(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_estonian_cit = bool(
+        re.search(
+            r"\b(esto[ńn]sk\w*\s+cit|rycza[łl]t\w*\s+od\s+dochod\w*\s+sp[óo]łek|ukryte\s+zysk\w*)\b",
+            normalized,
+        )
+    )
+    has_related_party_benefit = bool(
+        re.search(
+            r"\b(wsp[óo]lnik\w*|udzia[łl]owc\w*|podmiot\w* powi[ąa]zan\w*|"
+            r"po[żz]yczk\w*|odsetk\w*|kapita[łl]\w* po[żz]yczk\w*|"
+            r"us[łl]ug\w* zarz[ąa]dz\w*|wynagrodzen\w* za zarz[ąa]dz\w*)\b",
+            normalized,
+        )
+    )
+    return has_estonian_cit and has_related_party_benefit
+
+
+def build_estonian_cit_hidden_profit_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_estonian_cit_hidden_profit(query):
+        return []
+    return [("CIT", "28m"), ("CIT", "28n"), ("CIT", "28o"), ("CIT", "28j"), ("CIT", "28k"), ("CIT", "7aa")]
 
 
 def build_transformation_share_cost_statute_targets(query: str) -> list[tuple[str, str]]:
@@ -4460,7 +4485,7 @@ def resolve_statute_tax_domains(query: str) -> set[str]:
             domains.discard("PCC")
     if query_targets_housing_relief_temporary_rental(query) or query_targets_housing_relief_loan_repayment(query) or query_targets_mortgage_settlement_refund(query):
         domains.add("PIT")
-    if query_targets_estonian_cit_transformation_share_cost(query):
+    if query_targets_estonian_cit_transformation_share_cost(query) or query_targets_estonian_cit_hidden_profit(query):
         domains.update({"CIT", "PIT", "PCC", "ORDYNACJA"})
     if query_targets_vat_dropshipping_ioss(query):
         domains.add("VAT")
@@ -5638,6 +5663,9 @@ def order_chunks_by_statute_targets(chunks: list[RagChunk], targets: list[tuple[
         return chunks
 
     order = build_statute_target_order(targets)
+    article_only_order: dict[str, int] = {}
+    for position, (_domain, article_key) in enumerate(targets):
+        article_only_order.setdefault(article_key, position)
 
     def sort_key(chunk: RagChunk) -> tuple[int, float, str]:
         domain = infer_chunk_tax_domain(chunk)
@@ -5647,16 +5675,34 @@ def order_chunks_by_statute_targets(chunks: list[RagChunk], targets: list[tuple[
             if not article_key:
                 continue
             best_position = min(best_position, order.get((domain, article_key), len(order)))
+            if chunk.subject.lower().startswith("upo polska"):
+                best_position = min(best_position, article_only_order.get(article_key, len(order)))
         return best_position, -chunk.score, chunk.subject
 
     return sorted(chunks, key=sort_key)
+
+
+def filter_treaty_country_chunks(chunks: list[RagChunk], query: str) -> list[RagChunk]:
+    if not chunks:
+        return chunks
+    if query_targets_poland_germany_treaty(query):
+        return [
+            chunk for chunk in chunks
+            if not chunk.subject.lower().startswith("upo polska") or "niemcy" in chunk.subject.lower()
+        ]
+    if query_targets_poland_spain_treaty(query):
+        return [
+            chunk for chunk in chunks
+            if not chunk.subject.lower().startswith("upo polska") or "hiszpani" in chunk.subject.lower()
+        ]
+    return chunks
 
 
 def decompose_query_into_legal_axes(query: str) -> list[LegalRetrievalAxis]:
     normalized = normalize_whitespace(query or "")
     axes: list[LegalRetrievalAxis] = []
 
-    if query_targets_estonian_cit_transformation_share_cost(query):
+    if query_targets_estonian_cit_transformation_share_cost(query) or query_targets_estonian_cit_hidden_profit(query):
         axes.extend(
             [
                 LegalRetrievalAxis(
@@ -5854,15 +5900,34 @@ def _search_chunks_by_legal_axes(
         axis_source_types, axis_tax_domains = axis_scope
         active_axes.append(axis)
         axis_limit = max(1, math.ceil(effective_limit / max(len(axes), 1)))
-        scoped_axis_chunks.append(
-            _search_chunks_single_query(
+        axis_chunks = _search_chunks_single_query(
                 axis.query,
                 limit=axis_limit,
                 source_types=axis_source_types,
                 enforce_query_domain=enforce_query_domain or bool(axis_tax_domains),
                 tax_domains=axis_tax_domains,
             )
-        )
+        if axis.direct_subject_prefix:
+            config = get_rag_config()
+            direct_rows = fetch_rows_by_subject_prefix(
+                axis.direct_subject_prefix,
+                config=config,
+                source_type="statute" if axis_source_types is None or "statute" in axis_source_types else None,
+            )
+            direct_chunks = (
+                rank_hybrid_local_candidates(
+                    direct_rows,
+                    query=axis.query,
+                    effective_limit=max(axis_limit, len(direct_rows)),
+                    config=config,
+                )
+                if direct_rows
+                else []
+            )
+            ordered_direct_chunks = order_chunks_by_statute_targets(direct_chunks, list(axis.preferred_targets))
+            direct_limit = max(axis_limit, len(axis.preferred_targets) or axis_limit)
+            axis_chunks = [*ordered_direct_chunks[:direct_limit], *axis_chunks]
+        scoped_axis_chunks.append(axis_chunks)
 
     if not scoped_axis_chunks:
         return [], axes
@@ -6354,7 +6419,7 @@ def search_chat_chunks(
             statute_limit = min(effective_limit - 1, max(4, math.ceil(effective_limit * 0.6)))
         elif query_targets_post_leasing_vehicle_gift_sale(query):
             statute_limit = min(effective_limit - 1, max(5, math.ceil(effective_limit * 0.7)))
-        elif query_targets_estonian_cit_transformation_share_cost(query):
+        elif query_targets_estonian_cit_transformation_share_cost(query) or query_targets_estonian_cit_hidden_profit(query):
             statute_limit = min(effective_limit - 1, max(6, math.ceil(effective_limit * 0.75)))
         elif query_targets_spolka_komandytowa_cit_status(query):
             statute_limit = min(effective_limit - 1, max(4, math.ceil(effective_limit * 0.6)))
@@ -6490,7 +6555,7 @@ def search_chat_chunks(
         config=config,
         source_type="statute",
     ) if query_targets_poland_germany_treaty(query) and statute_limit else []
-    statutes = [] if (query_targets_ksef_foreign_sale(query) or query_targets_poland_spain_treaty(query) or query_targets_poland_germany_treaty(query)) else (
+    statutes = [] if query_targets_ksef_foreign_sale(query) else (
         search_chunks(
             query,
             limit=statute_limit,
@@ -6499,6 +6564,7 @@ def search_chat_chunks(
             tax_domains=statute_domains,
         ) if statute_limit else []
     )
+    statutes = filter_treaty_country_chunks(statutes, query)
     preferred_targets: list[tuple[str, str]] = []
     if query_targets_ksef_foreign_sale(query):
         preferred_targets.extend(KSEF_FOREIGN_SALE_STATUTE_TARGETS)
@@ -6520,6 +6586,8 @@ def search_chat_chunks(
         preferred_targets.extend(build_family_foundation_statute_targets(query))
     if query_targets_wht_pay_and_refund_services(query):
         preferred_targets.extend(build_wht_pay_and_refund_service_statute_targets(query))
+    if query_targets_poland_germany_treaty(query):
+        preferred_targets.extend(build_poland_germany_treaty_statute_targets(query))
     if query_targets_debt_assumption_effectiveness(query):
         preferred_targets.extend(build_debt_assumption_statute_targets(query))
     if query_targets_housing_relief_temporary_rental(query):
@@ -6546,6 +6614,8 @@ def search_chat_chunks(
         preferred_targets.extend(build_spouse_gift_sd_statute_targets(query))
     if query_targets_estonian_cit_transformation_share_cost(query):
         preferred_targets.extend(build_transformation_share_cost_statute_targets(query))
+    if query_targets_estonian_cit_hidden_profit(query):
+        preferred_targets.extend(build_estonian_cit_hidden_profit_statute_targets(query))
     if query_targets_shareholder_company_asset_sale(query):
         preferred_targets.extend(build_shareholder_company_asset_sale_statute_targets(query))
     if query_targets_small_taxpayer_foreign_vat(query):
@@ -6580,6 +6650,8 @@ def search_chat_chunks(
             or query_targets_gifted_asset_cost_basis(query)
             or query_targets_spouse_gift_sd(query)
             or query_targets_estonian_cit_transformation_share_cost(query)
+            or query_targets_estonian_cit_hidden_profit(query)
+            or query_targets_poland_germany_treaty(query)
             or query_targets_ksef_outside_deduction(query)
             or query_targets_ksef_correction_issue(query)
             or query_targets_debt_assumption_effectiveness(query)
@@ -6589,7 +6661,7 @@ def search_chat_chunks(
         ) else statute_limit,
     ) if statute_limit else []
     if direct_treaty_rows or direct_germany_treaty_rows:
-        hinted_statute_rows = [*direct_treaty_rows, *direct_germany_treaty_rows]
+        hinted_statute_rows = [*hinted_statute_rows, *direct_treaty_rows, *direct_germany_treaty_rows]
     hinted_statutes = rank_hybrid_local_candidates(
         hinted_statute_rows,
         query=query if query_targets_poland_spain_treaty(query) else expanded_query,
@@ -6599,6 +6671,8 @@ def search_chat_chunks(
             or query_targets_gifted_asset_cost_basis(query)
             or query_targets_spouse_gift_sd(query)
             or query_targets_estonian_cit_transformation_share_cost(query)
+            or query_targets_estonian_cit_hidden_profit(query)
+            or query_targets_poland_germany_treaty(query)
             or query_targets_debt_assumption_effectiveness(query)
             or query_targets_housing_relief_temporary_rental(query)
             or query_targets_housing_relief_loan_repayment(query)
@@ -6606,6 +6680,7 @@ def search_chat_chunks(
         ) else statute_limit,
         config=config,
     ) if hinted_statute_rows else []
+    hinted_statutes = filter_treaty_country_chunks(hinted_statutes, query)
     if (
         query_targets_poland_spain_treaty(query)
         or query_targets_post_leasing_vehicle_gift_sale(query)
@@ -6613,6 +6688,8 @@ def search_chat_chunks(
         or query_targets_gifted_asset_cost_basis(query)
         or query_targets_spouse_gift_sd(query)
         or query_targets_estonian_cit_transformation_share_cost(query)
+        or query_targets_estonian_cit_hidden_profit(query)
+        or query_targets_poland_germany_treaty(query)
         or query_targets_debt_assumption_effectiveness(query)
         or query_targets_housing_relief_temporary_rental(query)
         or query_targets_housing_relief_loan_repayment(query)
@@ -6622,6 +6699,17 @@ def search_chat_chunks(
 
     semantic_statute_candidates = list(statutes)
     bundle_statute_candidates = list(hinted_statutes)
+    if (
+        query_targets_poland_germany_treaty(query)
+        or query_targets_poland_spain_treaty(query)
+        or query_targets_wht_pay_and_refund_services(query)
+        or query_targets_estonian_cit_hidden_profit(query)
+    ):
+        bundle_statute_candidates = sorted(
+            enumerate(bundle_statute_candidates),
+            key=lambda item: (item[1].subject.lower().startswith("upo polska"), item[0]),
+        )
+        bundle_statute_candidates = [chunk for _index, chunk in bundle_statute_candidates]
     merged_statutes: list[RagChunk] = []
     seen_statute_sources: set[str] = set()
     for chunk in semantic_statute_candidates:
@@ -6632,7 +6720,15 @@ def search_chat_chunks(
         merged_statutes.append(annotate_chunk_evidence_role(chunk, "governing_statute"))
         if len(merged_statutes) >= statute_limit:
             break
-    bundle_limit = min(2, max(0, len(bundle_statute_candidates)))
+    bundle_cap = 2
+    if (
+        query_targets_poland_germany_treaty(query)
+        or query_targets_poland_spain_treaty(query)
+        or query_targets_wht_pay_and_refund_services(query)
+        or query_targets_estonian_cit_hidden_profit(query)
+    ):
+        bundle_cap = 10
+    bundle_limit = min(bundle_cap, max(0, len(bundle_statute_candidates)))
     bundle_statutes: list[RagChunk] = []
     if bundle_limit:
         for chunk in bundle_statute_candidates:

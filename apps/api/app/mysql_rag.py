@@ -26,7 +26,10 @@ from app.rag import (
     build_match_query,
     annotate_chunk_evidence_role,
     chunk_canonical_source_id,
+    build_estonian_cit_hidden_profit_statute_targets,
+    build_poland_germany_treaty_statute_targets,
     build_shareholder_company_asset_sale_statute_targets,
+    build_wht_pay_and_refund_service_statute_targets,
     build_structured_profile,
     build_subject_phrase_match_score,
     compute_hash_semantic_scores,
@@ -47,9 +50,13 @@ from app.rag import (
     normalize_source_type,
     query_targets_interpretation_procedure,
     query_targets_ksef_foreign_sale,
+    query_targets_estonian_cit_hidden_profit,
+    query_targets_poland_germany_treaty,
     query_targets_shareholder_company_asset_sale,
     query_targets_small_taxpayer_foreign_vat,
+    query_targets_wht_pay_and_refund_services,
     decompose_query_into_legal_axes,
+    order_chunks_by_statute_targets,
     rerank_chunks_within_documents,
     rank_hybrid_local_candidates,
     ranking_terms,
@@ -627,6 +634,40 @@ def fetch_rows_by_document_ids_mysql(
     return limited_rows
 
 
+def fetch_rows_by_subject_prefix_mysql(
+    subject_prefix: str,
+    *,
+    source_type: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    prefix = str(subject_prefix).strip()
+    if not prefix:
+        return []
+    documents_table, chunks_table = get_mysql_target()
+    source_clause = " AND d.source_type = %s" if source_type else ""
+    values: list[Any] = [f"{prefix}%"]
+    if source_type:
+        values.append(source_type)
+    with mysql_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT
+                    c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                    d.subject, d.signature, d.published_date, d.source_url, d.category,
+                    d.keywords_json, d.legal_provisions_json, d.issues_json, d.law_tags_json,
+                    d.facts_text, d.question_text, d.tax_domain, d.source, d.source_type,
+                    d.source_subtype, d.authority, d.publication, d.legal_state_date,
+                    d.source_pages_json, 0.0 AS lexical_score
+                FROM `{chunks_table}` c
+                JOIN `{documents_table}` d ON d.document_id = c.document_id
+                WHERE d.subject LIKE %s{source_clause}
+                ORDER BY d.subject ASC, c.document_id ASC, c.chunk_index ASC
+                """,
+                tuple(values),
+            )
+            return list(cursor.fetchall())
+
+
 def fetch_document_contexts_mysql(document_ids: list[str], *, seed_chunks: list[RagChunk]) -> list[RagDocumentContext]:
     clean_ids = [str(document_id).strip() for document_id in document_ids if str(document_id).strip()]
     if not clean_ids:
@@ -882,15 +923,32 @@ def _search_chunks_by_legal_axes_mysql(
         axis_source_types, axis_tax_domains = axis_scope
         active_axes.append(axis)
         axis_limit = max(1, math.ceil(effective_limit / max(len(axes), 1)))
-        scoped_axis_chunks.append(
-            _search_chunks_single_query_mysql(
+        axis_chunks = _search_chunks_single_query_mysql(
                 axis.query,
                 limit=axis_limit,
                 source_types=axis_source_types,
                 enforce_query_domain=enforce_query_domain or bool(axis_tax_domains),
                 tax_domains=axis_tax_domains,
             )
-        )
+        if axis.direct_subject_prefix:
+            direct_rows = fetch_rows_by_subject_prefix_mysql(
+                axis.direct_subject_prefix,
+                source_type="statute" if axis_source_types is None or "statute" in axis_source_types else None,
+            )
+            direct_chunks = (
+                rank_hybrid_local_candidates(
+                    direct_rows,
+                    query=axis.query,
+                    effective_limit=max(axis_limit, len(direct_rows)),
+                    config=config,
+                )
+                if direct_rows
+                else []
+            )
+            ordered_direct_chunks = order_chunks_by_statute_targets(direct_chunks, list(axis.preferred_targets))
+            direct_limit = max(axis_limit, len(axis.preferred_targets) or axis_limit)
+            axis_chunks = [*ordered_direct_chunks[:direct_limit], *axis_chunks]
+        scoped_axis_chunks.append(axis_chunks)
 
     if not scoped_axis_chunks:
         return [], axes
@@ -1102,6 +1160,12 @@ def search_chat_chunks_mysql(
     preferred_targets: list[tuple[str, str]] = []
     if query_targets_ksef_foreign_sale(query):
         preferred_targets.extend(KSEF_FOREIGN_SALE_STATUTE_TARGETS)
+    if query_targets_wht_pay_and_refund_services(query):
+        preferred_targets.extend(build_wht_pay_and_refund_service_statute_targets(query))
+    if query_targets_poland_germany_treaty(query):
+        preferred_targets.extend(build_poland_germany_treaty_statute_targets(query))
+    if query_targets_estonian_cit_hidden_profit(query):
+        preferred_targets.extend(build_estonian_cit_hidden_profit_statute_targets(query))
     if query_targets_shareholder_company_asset_sale(query):
         preferred_targets.extend(build_shareholder_company_asset_sale_statute_targets(query))
     if query_targets_small_taxpayer_foreign_vat(query):
@@ -1141,7 +1205,14 @@ def search_chat_chunks_mysql(
         merged_statutes.append(annotate_chunk_evidence_role(chunk, "governing_statute"))
         if len(merged_statutes) >= statute_limit:
             break
-    bundle_limit = min(2, max(0, len(hinted_statutes)))
+    bundle_cap = 2
+    if (
+        query_targets_poland_germany_treaty(query)
+        or query_targets_wht_pay_and_refund_services(query)
+        or query_targets_estonian_cit_hidden_profit(query)
+    ):
+        bundle_cap = 10
+    bundle_limit = min(bundle_cap, max(0, len(hinted_statutes)))
     bundle_statutes: list[RagChunk] = []
     for chunk in hinted_statutes:
         canonical_source_id = chunk_canonical_source_id(chunk)

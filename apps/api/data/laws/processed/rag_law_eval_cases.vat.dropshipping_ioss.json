@@ -1,0 +1,16 @@
+[
+  {
+    "id": "vat-dropshipping-platform-deemed-supplier",
+    "question": "Czy platforma lub interfejs elektroniczny, który ułatwia sprzedaż towarów importowanych w przesyłkach do 150 euro na rzecz konsumenta, jest deemed supplier i jakie przepisy trzeba sprawdzić w pierwszej kolejności?",
+    "expected_legal_provisions": ["art. 7a"],
+    "required_legal_provisions": ["art. 17", "art. 28d", "art. 138i"],
+    "notes": "The model should surface the deemed-supplier rule first and keep the import/B2C intermediary chain visible in the top retrieval window."
+  },
+  {
+    "id": "vat-ioss-procedure-150-eur",
+    "question": "Jakie przepisy regulują procedurę IOSS dla sprzedaży na odległość towarów importowanych w przesyłkach do 150 euro?",
+    "expected_legal_provisions": ["art. 138i"],
+    "required_legal_provisions": ["art. 138a", "art. 138b", "art. 138c"],
+    "notes": "IOSS retrieval should cluster the whole 138a-138j family, not just one fragment."
+  }
+]

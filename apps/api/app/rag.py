@@ -1894,6 +1894,20 @@ def query_targets_ksef_foreign_sale(query: str) -> bool:
     return bool(KSEF_QUERY_RE.search(normalized) and KSEF_FOREIGN_SALE_QUERY_RE.search(normalized))
 
 
+def query_targets_vat_dropshipping_ioss(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    has_platform_or_dropshipping = bool(
+        re.search(
+            r"\b(dropshipping\w*|platform\w*|platforma\w*|interfejs\w* elektroniczn\w*|"
+            r"pośrednik\w*|posrednik\w*|sprzedaż na odległość\w* towarów importowanych|"
+            r"sprzedaz na odleglosc\w* towarow importowanych|soti|iioss|ioss|150\s*euro|"
+            r"towar\w* importowan\w*|importowan\w* towar\w*)\b",
+            normalized,
+        )
+    )
+    return has_platform_or_dropshipping
+
+
 def is_procedural_interpretation_chunk_text(text: str) -> bool:
     normalized = normalize_whitespace(text).lower()
     if not normalized:
@@ -1960,6 +1974,102 @@ def build_ksef_foreign_sale_match_score(row: sqlite3.Row, *, query: str) -> floa
     if "państwa stanowisko" in text and "ocena stanowiska" not in text:
         score -= 0.35
     return min(max(score, -0.35), 4.5)
+
+
+def build_vat_dropshipping_ioss_match_score(row: sqlite3.Row, *, query: str) -> float:
+    if not query_targets_vat_dropshipping_ioss(query):
+        return 0.0
+
+    candidate_text = normalize_whitespace(
+        " ".join(
+            [
+                str(row["subject"] or ""),
+                str(row["question_text"] or ""),
+                str(row["issues_json"] or ""),
+                str(row["keywords_json"] or ""),
+                str(row["legal_provisions_json"] or ""),
+                str(row["chunk_text"] or "")[:2600],
+            ]
+        )
+    ).lower()
+    normalized_query = normalize_whitespace(query or "").lower()
+    query_domains = {domain.upper() for domain in detect_domains(query)}
+    candidate_domains = row_tax_domains(row)
+    score = 0.0
+
+    if any(term in candidate_text for term in ("dropshipping", "platform", "interfejs elektroniczny", "ułatwia", "ulatwia", "sprzedaż na odległość towarów importowanych", "sprzedaz na odleglosc towarow importowanych")):
+        score += 1.1
+    if any(term in candidate_text for term in ("ioss", "procedura importu", "sprzedaż na odległość towarów importowanych", "sprzedaz na odleglosc towarow importowanych", "150 euro", "wartość rzeczywista", "wartosc rzeczywista")):
+        score += 1.15
+    if any(term in candidate_text for term in ("pośrednik", "posrednik", "pośredników", "posrednikow", "reprezentowanego przez pośrednika", "reprezentowanego przez posrednika")):
+        score += 0.95
+    if any(term in candidate_text for term in ("import", "importu", "celny", "cło", "cło", "clo", "odpraw", "zgłoszenie", "zgloszenie")):
+        score += 0.7
+    if any(term in candidate_text for term in ("konsument", "niebędącym podatnikiem", "niebedacym podatnikiem", "b2c")):
+        score += 0.55
+
+    article_key = extract_primary_article_key(row)
+    if article_key in {"7a", "17", "28d", "106a", "106b", "106ga", "106gb", "138a", "138b", "138c", "138d", "138e", "138f", "138g", "138h", "138i", "138j", "2"}:
+        score += 1.4
+    if article_key == "7a":
+        score += 0.8
+    if article_key in {"138a", "138b", "138c", "138d", "138e", "138f", "138g", "138h", "138i", "138j"} and any(
+        term in normalized_query for term in ("platform", "platforma", "dropshipping", "deemed supplier", "interfejs elektroniczny")
+    ):
+        score -= 0.2
+    if article_key in {"22", "22a", "22b", "22c"}:
+        score -= 1.0
+    if article_key in {"28b", "28c"} and "pośrednik" not in normalized_query and "posrednik" not in normalized_query:
+        score -= 0.4
+
+    if query_domains and candidate_domains and not (candidate_domains & query_domains):
+        score -= 0.6
+
+    if "art. 7a" in normalized_query and "art. 7a" in candidate_text:
+        score += 0.4
+    if "art. 28d" in normalized_query and "art. 28d" in candidate_text:
+        score += 0.4
+    if "ioss" in normalized_query and "138" in candidate_text:
+        score += 0.35
+    if "ksef" in normalized_query and any(article in candidate_text for article in ("106a", "106b", "106ga", "106gb")):
+        score += 0.25
+
+    return score
+
+
+def build_vat_dropshipping_ioss_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_vat_dropshipping_ioss(query):
+        return []
+
+    preferred_targets: list[tuple[str, str]] = [
+        ("VAT", "7a"),
+        ("VAT", "19a"),
+        ("VAT", "138i"),
+        ("VAT", "17"),
+        ("VAT", "28d"),
+        ("VAT", "138a"),
+        ("VAT", "138b"),
+        ("VAT", "138c"),
+        ("VAT", "138d"),
+        ("VAT", "138e"),
+        ("VAT", "138f"),
+        ("VAT", "138g"),
+        ("VAT", "138h"),
+        ("VAT", "138j"),
+        ("VAT", "106a"),
+        ("VAT", "106b"),
+        ("VAT", "106ga"),
+        ("VAT", "106gb"),
+        ("VAT", "2"),
+    ]
+    deduped_targets: list[tuple[str, str]] = []
+    seen_targets: set[tuple[str, str]] = set()
+    for target in preferred_targets:
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        deduped_targets.append(target)
+    return deduped_targets
 
 
 def query_targets_crossborder_treaty_analysis(query: str) -> bool:
@@ -3407,6 +3517,8 @@ def resolve_statute_tax_domains(query: str) -> set[str]:
         domains.add("SD")
     if query_targets_estonian_cit_transformation_share_cost(query):
         domains.update({"CIT", "PIT", "PCC", "ORDYNACJA"})
+    if query_targets_vat_dropshipping_ioss(query):
+        domains.add("VAT")
     return domains
 
 
@@ -3708,10 +3820,10 @@ def build_pcc_interpretation_match_score(row: sqlite3.Row, *, query: str) -> flo
 
 
 def diversify_top_document_window(
-    ranked_rows: list[tuple[sqlite3.Row, float, float, float, float, float, float, float, float]],
+    ranked_rows: list[tuple[sqlite3.Row, float, float, float, float, float, float, float, float, float]],
     *,
     effective_limit: int,
-) -> list[tuple[sqlite3.Row, float, float, float, float, float, float, float, float]]:
+) -> list[tuple[sqlite3.Row, float, float, float, float, float, float, float, float, float]]:
     if len(ranked_rows) <= effective_limit:
         return ranked_rows
 
@@ -3719,8 +3831,8 @@ def diversify_top_document_window(
     if len({str(item[0]["document_id"]) for item in top_window}) == len(top_window):
         return ranked_rows
 
-    diversified: list[tuple[sqlite3.Row, float, float, float, float, float, float, float, float]] = []
-    deferred: list[tuple[sqlite3.Row, float, float, float, float, float, float, float, float]] = []
+    diversified: list[tuple[sqlite3.Row, float, float, float, float, float, float, float, float, float]] = []
+    deferred: list[tuple[sqlite3.Row, float, float, float, float, float, float, float, float, float]] = []
     seen_documents: set[str] = set()
     for item in ranked_rows:
         document_id = str(item[0]["document_id"])
@@ -4533,6 +4645,7 @@ def rank_hybrid_local_candidates(
             build_mechanism_match_score(row, query=query, config=config),
             build_pcc_interpretation_match_score(row, query=query),
             build_ksef_foreign_sale_match_score(row, query=query),
+            build_vat_dropshipping_ioss_match_score(row, query=query),
             build_shareholder_company_asset_sale_match_score(row, query=query),
             build_transformation_share_cost_match_score(row, query=query),
             build_small_taxpayer_foreign_vat_match_score(row, query=query),
@@ -4547,7 +4660,7 @@ def rank_hybrid_local_candidates(
     }
     semantic_ranks = {
         str(row["chunk_id"]): rank
-        for rank, (row, _, _, _, _, _, _, _, _) in enumerate(
+        for rank, (row, _, _, _, _, _, _, _, _, _) in enumerate(
             sorted(
                 semantic_scores,
                 key=lambda item: (item[1], -int(item[0]["chunk_index"]), str(item[0]["chunk_id"])),
@@ -4571,12 +4684,14 @@ def rank_hybrid_local_candidates(
                 + build_subject_phrase_match_score(item[0], query=query)
                 + build_interpretation_section_match_score(item[0])
                 + item[4]
-                + item[5],
-            item[6] + item[7] + item[8],
-            item[8],
-            item[7],
+                + item[5]
+                + item[6],
+            item[5] + item[6] + item[7] + item[8] + item[9],
             item[6],
             item[5],
+            item[7],
+            item[8],
+            item[9],
             item[4],
             -item[1],
             item[2],
@@ -4590,16 +4705,16 @@ def rank_hybrid_local_candidates(
     # This preserves broad recall while spending the expensive model budget on
     # legal near-misses that can realistically reach the final top-k.
     shortlist = preliminary_rows[: max(effective_limit, config.cross_encoder_candidate_limit)]
-    judgment_only_shortlist = all(str(row["source_type"] or "") == "judgment" for row, _, _, _, _, _, _, _, _ in shortlist)
+    judgment_only_shortlist = all(str(row["source_type"] or "") == "judgment" for row, _, _, _, _, _, _, _, _, _ in shortlist)
     cross_scores = None if judgment_only_shortlist else compute_cross_encoder_scores(
-        [row for row, _, _, _, _, _, _, _, _ in shortlist], query=query, config=config
+        [row for row, _, _, _, _, _, _, _, _, _ in shortlist], query=query, config=config
     )
     if cross_scores is None:
         ranked_rows = preliminary_rows
     else:
         cross_ranks = {
             str(row["chunk_id"]): rank
-            for rank, ((row, _, _, _, _, _, _, _, _), _) in enumerate(
+            for rank, ((row, _, _, _, _, _, _, _, _, _), _) in enumerate(
                 sorted(
                     zip(shortlist, cross_scores),
                     key=lambda item: (item[1], str(item[0][0]["chunk_id"])),
@@ -4609,8 +4724,8 @@ def rank_hybrid_local_candidates(
             )
         }
         cross_weight = min(max(config.cross_encoder_weight, 0.0), 1.0)
-        def cross_encoder_sort_key(item: tuple[sqlite3.Row, float, float, float, float, float, float, float, float]) -> tuple[float, int]:
-            row, _, legal_match_score, mechanism_match_score, pcc_match_score, ksef_match_score, shareholder_sale_match_score, transformation_share_cost_match_score, small_taxpayer_foreign_vat_match_score = item
+        def cross_encoder_sort_key(item: tuple[sqlite3.Row, float, float, float, float, float, float, float, float, float]) -> tuple[float, int]:
+            row, _, legal_match_score, mechanism_match_score, pcc_match_score, ksef_match_score, vat_dropshipping_ioss_match_score, shareholder_sale_match_score, transformation_share_cost_match_score, small_taxpayer_foreign_vat_match_score = item
             chunk_id = str(row["chunk_id"])
             statute_match_score = build_statute_match_score(row, query=query)
             family_match_score = build_article_family_match_score(row, query=query)
@@ -4629,6 +4744,7 @@ def rank_hybrid_local_candidates(
                 + build_interpretation_section_match_score(row)
                 + pcc_match_score
                 + ksef_match_score
+                + vat_dropshipping_ioss_match_score
                 + shareholder_sale_match_score
                 + transformation_share_cost_match_score
                 + small_taxpayer_foreign_vat_match_score
@@ -4661,13 +4777,13 @@ def rank_hybrid_local_candidates(
         raw_leader = semantic_scores[0]
         raw_leader_document_id = str(raw_leader[0]["document_id"])
         final_window = list(ranked_rows[:effective_limit])
-        final_document_ids = {str(row["document_id"]) for row, _, _, _, _, _, _, _, _ in final_window}
+        final_document_ids = {str(row["document_id"]) for row, _, _, _, _, _, _, _, _, _ in final_window}
         if raw_leader_document_id not in final_document_ids:
             if len(final_window) < effective_limit:
                 final_window.append(raw_leader)
             else:
                 document_counts: dict[str, int] = {}
-                for row, _, _, _, _, _, _, _, _ in final_window:
+                for row, _, _, _, _, _, _, _, _, _ in final_window:
                     document_id = str(row["document_id"])
                     document_counts[document_id] = document_counts.get(document_id, 0) + 1
                 replacement_index = len(final_window) - 1
@@ -4678,7 +4794,7 @@ def rank_hybrid_local_candidates(
                         break
                 final_window[replacement_index] = raw_leader
 
-            retained_chunk_ids = {str(row["chunk_id"]) for row, _, _, _, _, _, _, _, _ in final_window}
+            retained_chunk_ids = {str(row["chunk_id"]) for row, _, _, _, _, _, _, _, _, _ in final_window}
             ranked_rows = final_window + [
                 item for item in ranked_rows if str(item[0]["chunk_id"]) not in retained_chunk_ids
             ]
@@ -4686,13 +4802,13 @@ def rank_hybrid_local_candidates(
     raw_leader = semantic_scores[0]
     raw_leader_document_id = str(raw_leader[0]["document_id"])
     final_window = list(ranked_rows[:effective_limit])
-    final_document_ids = {str(row["document_id"]) for row, _, _, _, _, _, _, _, _ in final_window}
+    final_document_ids = {str(row["document_id"]) for row, _, _, _, _, _, _, _, _, _ in final_window}
     if raw_leader_document_id not in final_document_ids:
         if len(final_window) < effective_limit:
             final_window.append(raw_leader)
         else:
             document_counts: dict[str, int] = {}
-            for row, _, _, _, _, _, _, _, _ in final_window:
+            for row, _, _, _, _, _, _, _, _, _ in final_window:
                 document_id = str(row["document_id"])
                 document_counts[document_id] = document_counts.get(document_id, 0) + 1
             replacement_index = len(final_window) - 1
@@ -4703,7 +4819,7 @@ def rank_hybrid_local_candidates(
                     break
             final_window[replacement_index] = raw_leader
 
-        retained_chunk_ids = {str(row["chunk_id"]) for row, _, _, _, _, _, _, _, _ in final_window}
+        retained_chunk_ids = {str(row["chunk_id"]) for row, _, _, _, _, _, _, _, _, _ in final_window}
         ranked_rows = final_window + [
             item for item in ranked_rows if str(item[0]["chunk_id"]) not in retained_chunk_ids
         ]
@@ -4749,7 +4865,7 @@ def rank_hybrid_local_candidates(
             source_pages=[int(value) for value in json.loads(row["source_pages_json"] or "[]")],
             legal_provisions=[str(value) for value in json.loads(row["legal_provisions_json"] or "[]")],
         )
-        for row, _, legal_match_score, mechanism_match_score, pcc_match_score, ksef_match_score, shareholder_sale_match_score, transformation_share_cost_match_score, small_taxpayer_foreign_vat_match_score in ranked_rows[:effective_limit]
+        for row, _, legal_match_score, mechanism_match_score, pcc_match_score, ksef_match_score, vat_dropshipping_ioss_match_score, shareholder_sale_match_score, transformation_share_cost_match_score, small_taxpayer_foreign_vat_match_score in ranked_rows[:effective_limit]
     ]
 
 
@@ -4832,6 +4948,8 @@ def search_chat_chunks(
         judgment_limit = 0
         if query_targets_ksef_foreign_sale(query):
             statute_limit = min(effective_limit - 1, max(4, math.ceil(effective_limit * 0.6)))
+        elif query_targets_vat_dropshipping_ioss(query):
+            statute_limit = min(effective_limit - 1, max(5, math.ceil(effective_limit * 0.7)))
         elif query_targets_developer_land_sale(query):
             statute_limit = min(effective_limit - 1, max(4, math.ceil(effective_limit * 0.6)))
         elif query_targets_post_leasing_vehicle_gift_sale(query):
@@ -4889,6 +5007,8 @@ def search_chat_chunks(
     preferred_targets: list[tuple[str, str]] = []
     if query_targets_ksef_foreign_sale(query):
         preferred_targets.extend(KSEF_FOREIGN_SALE_STATUTE_TARGETS)
+    if query_targets_vat_dropshipping_ioss(query):
+        preferred_targets.extend(build_vat_dropshipping_ioss_statute_targets(query))
     if query_targets_wht_crossborder_payments(query):
         preferred_targets.extend(build_wht_crossborder_payment_statute_targets(query))
     if query_targets_developer_land_sale(query):
@@ -4964,6 +5084,7 @@ def search_chat_chunks(
     seen_statute_chunks: set[str] = set()
     prefer_hinted_statutes = (
         query_targets_ksef_foreign_sale(query)
+        or query_targets_vat_dropshipping_ioss(query)
         or query_targets_wht_crossborder_payments(query)
         or query_targets_developer_land_sale(query)
         or query_targets_post_leasing_vehicle_gift_sale(query)

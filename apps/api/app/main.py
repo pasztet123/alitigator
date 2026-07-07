@@ -43,8 +43,11 @@ from app.rag import (
     build_axis_coverage_context,
     build_context_block,
     build_legal_rules_context,
+    build_legal_rule_trace_context,
     build_legal_source_plan,
+    build_provision_reference_registry,
     detect_domains,
+    detect_missing_required_facts,
     detect_mechanisms,
     extract_legal_rules_from_statute_chunks,
     get_rag_config,
@@ -53,6 +56,8 @@ from app.rag import (
     legal_rule_to_dict,
     legal_source_plan_to_dict,
     list_citations,
+    normalize_provision_reference,
+    prioritize_legal_rules_for_query,
     reindex_corpus,
     search_chat_chunks,
     search_chunks,
@@ -80,17 +85,7 @@ AVAILABLE_MODELS = [
 ]
 HINTS_MODEL = os.getenv("ANTHROPIC_HINTS_MODEL", "claude-haiku-4-5-20251001")
 CHAT_MAX_TOKENS = max(1024, int(os.getenv("ANTHROPIC_CHAT_MAX_TOKENS", "6000")))
-PUBLIC_HTTP_RESPONSE_DEADLINE_SECONDS = max(
-    20.0,
-    float(os.getenv("ALITIGATOR_PUBLIC_HTTP_RESPONSE_DEADLINE_SECONDS", "55")),
-)
-ANTHROPIC_CHAT_TIMEOUT_SECONDS = max(
-    15.0,
-    min(
-        float(os.getenv("ANTHROPIC_CHAT_TIMEOUT_SECONDS", "50")),
-        PUBLIC_HTTP_RESPONSE_DEADLINE_SECONDS - 5.0,
-    ),
-)
+ANTHROPIC_CHAT_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ANTHROPIC_CHAT_TIMEOUT_SECONDS", "240")))
 
 SYSTEM_PROMPT = """
 Jesteś asystentem aLitigator dla polskich prawników podatkowych.
@@ -154,6 +149,7 @@ class ChatResponse(BaseModel):
     mode: Literal["demo", "live"]
     model: str
     redactions: list[str]
+    analysis_trace: dict[str, object] = Field(default_factory=dict)
     chat_id: Optional[str] = None
     assistant_message_id: Optional[str] = None
     structured_reply: Optional["StructuredReply"] = None
@@ -179,9 +175,9 @@ class PromptHintOption(BaseModel):
 
 
 class IntentHintAnswer(BaseModel):
-    question: str = Field(min_length=1, max_length=240)
-    option_id: str = Field(min_length=1, max_length=64)
-    option_label: str = Field(min_length=1, max_length=80)
+    question: str = Field(min_length=1, max_length=600)
+    option_id: str = Field(min_length=1, max_length=128)
+    option_label: str = Field(min_length=1, max_length=240)
 
 
 class RetrievalPreferences(BaseModel):
@@ -193,9 +189,9 @@ ChatRequest.model_rebuild()
 
 
 class PromptHintsRequest(BaseModel):
-    draft: str = Field(min_length=3, max_length=4000)
-    intent_hints: list[IntentHintAnswer] = Field(default_factory=list, max_length=12)
-    excluded_questions: list[str] = Field(default_factory=list, max_length=24)
+    draft: str = Field(min_length=1, max_length=12000)
+    intent_hints: list[IntentHintAnswer] = Field(default_factory=list, max_length=24)
+    excluded_questions: list[str] = Field(default_factory=list, max_length=48)
     max_hints: int = Field(default=3, ge=1, le=3)
 
 
@@ -449,10 +445,11 @@ class RagSearchResponse(BaseModel):
     axis_coverage: list[dict[str, object]] = Field(default_factory=list)
     source_plan: dict[str, object] = Field(default_factory=dict)
     legal_rules: list[dict[str, object]] = Field(default_factory=list)
+    analysis_trace: dict[str, object] = Field(default_factory=dict)
     hits: list[RagSearchHit]
 
 
-app = FastAPI(title="aLitigator API", version="0.8.4")
+app = FastAPI(title="aLitigator API", version="0.9.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -886,6 +883,173 @@ def parse_structured_reply(reply: str) -> Optional[StructuredReply]:
     return StructuredReply(opening_statute=opening_statute, sections=sections)
 
 
+def detect_fact_timeline_issues(user_prompt: str) -> list[dict[str, str]]:
+    normalized = " ".join(user_prompt.lower().split())
+    issues: list[dict[str, str]] = []
+
+    annual_profit_match = re.search(
+        r"(zysk\w*\s+(?:roczny|za rok)\s+za\s+(20\d{2})).{0,160}(zatwierdz\w*|uchwal\w*|wypłac\w*|wyplac\w*)",
+        normalized,
+        re.IGNORECASE,
+    )
+    if annual_profit_match:
+        year = annual_profit_match.group(2)
+        same_year_december = re.search(rf"\bgrudni\w*\s+{year}\b", normalized)
+        if same_year_december:
+            issues.append(
+                {
+                    "code": "annual_profit_approved_before_period_end",
+                    "severity": "medium",
+                    "message": (
+                        f"Opis sugeruje zatwierdzenie albo wypłatę zysku rocznego za {year} jeszcze w grudniu {year}, "
+                        "co jest wewnętrznie niespójne dla zwykłego rocznego wyniku i wymaga rozróżnienia od zaliczki na poczet zysku."
+                    ),
+                }
+            )
+
+    if "zysk" in normalized and "grudni" in normalized and "zaliczk" not in normalized and "zatwierdz" in normalized:
+        issues.append(
+            {
+                "code": "ambiguous_profit_payment_nature",
+                "severity": "medium",
+                "message": "Należy rozróżnić wypłatę zaliczki na poczet zysku od wypłaty po zatwierdzeniu sprawozdania finansowego.",
+            }
+        )
+
+    deduped: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for issue in issues:
+        code = issue["code"]
+        if code in seen:
+            continue
+        seen.add(code)
+        deduped.append(issue)
+    return deduped
+
+
+def build_analysis_trace(
+    *,
+    user_prompt: str,
+    retrieved_chunks: list[RagChunk],
+    legal_rules: list[dict[str, object]],
+    missing_required_facts: list[str],
+    timeline_issues: list[dict[str, str]],
+    allowed_provision_references: set[str],
+) -> dict[str, object]:
+    return {
+        "query": user_prompt,
+        "required_missing_facts": list(missing_required_facts),
+        "timeline_issues": timeline_issues,
+        "allowed_provision_references": sorted(allowed_provision_references),
+        "claim_source_traces": [
+            {
+                "claim_id": str(rule.get("provision_id") or ""),
+                "claim": str(rule.get("directive") or ""),
+                "source_document_id": str(rule.get("source_id") or ""),
+                "provision_id": str(rule.get("provision_id") or ""),
+                "provision_reference": str(rule.get("citation") or ""),
+                "retrieval_stage": str(rule.get("retrieval_stage") or "primary_source_exact_lookup"),
+                "selected_chunk_ids": list(rule.get("supporting_chunk_ids") or []),
+                "source_span": str(rule.get("exact_source_span") or ""),
+            }
+            for rule in legal_rules
+        ],
+        "selected_documents": [
+            {
+                "document_id": chunk.document_id,
+                "chunk_id": chunk.chunk_id,
+                "source_type": chunk.source_type,
+                "publication": chunk.publication,
+                "legal_state_date": chunk.legal_state_date,
+            }
+            for chunk in retrieved_chunks
+        ],
+    }
+
+
+def build_missing_facts_context(missing_required_facts: list[str]) -> str:
+    if not missing_required_facts:
+        return ""
+    lines = [
+        "Brakujące fakty decydujące o wyborze wariantu:",
+        "Jeżeli któregoś z poniższych faktów nie da się potwierdzić z pytania lub źródeł, writer ma zwrócić wynik warunkowy i nie ustalać finalnej kwoty ani stawki:",
+    ]
+    for index, fact in enumerate(missing_required_facts, start=1):
+        lines.append(f"{index}. {fact}")
+    return "\n".join(lines)
+
+
+def build_timeline_issue_context(timeline_issues: list[dict[str, str]]) -> str:
+    if not timeline_issues:
+        return ""
+    lines = ["Wykryte wątpliwości chronologii stanu faktycznego:"]
+    for issue in timeline_issues:
+        lines.append(f"- [{issue['severity']}] {issue['message']}")
+    return "\n".join(lines)
+
+
+PROVISION_REFERENCE_RENDER_RE = re.compile(
+    r"\bart\.?\s*\d+[a-z]?(?:\s+ust\.?\s*\d+[a-z]?)?(?:\s+pkt\s*\d+[a-z]?)?(?:\s+lit\.?\s*[a-z])?",
+    re.IGNORECASE,
+)
+UNCERTAIN_PROVISION_PHRASES_RE = re.compile(
+    r"\b(lub|albo)\s+(?:inny|odpowiedni|właściwy|wlasciwy)\s+przepis\b|\bodpowiedni przepis\b",
+    re.IGNORECASE,
+)
+DEFINITIVE_PERCENT_RE = re.compile(
+    r"\b(?:wynosi|obowiązuje|obowiazuje|należy zastosować|nalezy zastosowac|stosuje się|stosuje sie)\s+(\d+(?:[.,]\d+)?)\s*%",
+    re.IGNORECASE,
+)
+
+
+def enforce_reply_guardrails(
+    reply: str,
+    *,
+    allowed_provision_references: set[str],
+    missing_required_facts: list[str],
+    timeline_issues: list[dict[str, str]],
+) -> str:
+    sanitized = UNCERTAIN_PROVISION_PHRASES_RE.sub("zweryfikowany przepis wskazany w źródłach", reply)
+
+    def replace_unverified_reference(match: re.Match[str]) -> str:
+        reference = match.group(0)
+        normalized = normalize_provision_reference(reference)
+        if normalized in allowed_provision_references:
+            return reference
+        return "zweryfikowany przepis wskazany w źródłach primary law"
+
+    sanitized = PROVISION_REFERENCE_RENDER_RE.sub(replace_unverified_reference, sanitized)
+
+    if missing_required_facts:
+        sanitized = DEFINITIVE_PERCENT_RE.sub(r"możliwy jest wariant \1%", sanitized)
+        prefix = (
+            "Teza warunkowa\n"
+            "Na obecnym materiale nie można ustalić finalnej kwoty ani jednej ostatecznej stawki, "
+            "bo brakuje faktów koniecznych do wyboru właściwego wariantu.\n\n"
+            "Potrzebne doprecyzowanie\n"
+            + "\n".join(f"- {fact}" for fact in missing_required_facts)
+            + "\n\n"
+        )
+        if not sanitized.startswith("Teza warunkowa"):
+            sanitized = prefix + sanitized
+
+    if timeline_issues:
+        timeline_block = (
+            "\n\nRyzyka i luki\n"
+            "Przed ostatecznym zastosowaniem norm trzeba wyjaśnić wątpliwości chronologii stanu faktycznego:\n"
+            + "\n".join(f"- {issue['message']}" for issue in timeline_issues)
+        )
+        if "annual_profit_approved_before_period_end" in {issue["code"] for issue in timeline_issues}:
+            timeline_block += (
+                "\n- Jeżeli była to zaliczka na poczet zysku, analiza wymaga odrębnego wariantu."
+                "\n- Jeżeli wypłata nastąpiła dopiero po zatwierdzeniu sprawozdania w kolejnym roku, skutki trzeba ocenić w tym wariancie."
+            )
+        if timeline_block not in sanitized:
+            sanitized += timeline_block
+
+    return sanitized
+
+
 def build_demo_reply(user_prompt: str, retrieved_chunks: list, *, retrieval_prompt: Optional[str] = None) -> str:
     citations = list_citations(retrieved_chunks)
     opening_quote = extract_opening_statute_quote(retrieved_chunks, query=retrieval_prompt or user_prompt)
@@ -1278,6 +1442,9 @@ def build_chat_system_prompt(
     retrieval_coverage_context: str = "",
     source_plan_context: str = "",
     legal_rules_context: str = "",
+    legal_rule_trace_context: str = "",
+    missing_facts_context: str = "",
+    timeline_issue_context: str = "",
 ) -> str:
     if not retrieved_context:
         return SYSTEM_PROMPT + "\n\nNie znaleziono trafnych fragmentów w indeksie źródeł. Nie twórz pozornych źródeł."
@@ -1330,6 +1497,27 @@ def build_chat_system_prompt(
         + "\nNajpierw przerób te normy na reguły postępowania dla kazusu użytkownika."
         + " Dopiero potem użyj interpretacji i wyroków jako secondary authority."
     ) if legal_rules_context else ""
+
+    legal_rule_trace_instruction = (
+        "\n\nTechniczny trace przepisów pobranych deterministycznie:\n"
+        + legal_rule_trace_context
+        + "\nNumery artykułów, ustępów i punktów wolno przywoływać wyłącznie z tego trace'u albo z legal rule extractora."
+        + " Nie wolno odtwarzać numerów z pamięci modelu ani pisać 'lub odpowiedni przepis'."
+    ) if legal_rule_trace_context else ""
+
+    missing_facts_instruction = (
+        "\n\nBramka brakujących faktów:\n"
+        + missing_facts_context
+        + "\nJeżeli brakuje faktu wymagającego wyboru wariantu, odpowiedź ma być warunkowa."
+        + " Pokaż konkurencyjne warianty, ale nie wybieraj finalnej stawki, kwoty ani terminu."
+        + " Nie używaj logiki typu conservative fallback."
+    ) if missing_facts_context else ""
+
+    timeline_issue_instruction = (
+        "\n\nWalidacja chronologii przed analizą:\n"
+        + timeline_issue_context
+        + "\nNajpierw nazwij niespójność czasu i rozpisz warianty zgodne z możliwą chronologią."
+    ) if timeline_issue_context else ""
 
     return (
         SYSTEM_PROMPT
@@ -1480,6 +1668,9 @@ def build_chat_system_prompt(
         + retrieval_preferences_instruction
         + source_plan_instruction
         + legal_rules_instruction
+        + legal_rule_trace_instruction
+        + missing_facts_instruction
+        + timeline_issue_instruction
         + retrieval_coverage_instruction
         + "\n\nKontekst źródłowy:\n"
         + retrieved_context
@@ -2094,8 +2285,34 @@ async def chat(
             ]
     if not retrieved_chunks and os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() == "sqlite":
         retrieved_chunks = search_chunks_supabase(effective_user_prompt)
+    source_plan = build_legal_source_plan(
+        effective_user_prompt,
+        include_interpretations=(request.retrieval_preferences.include_interpretations if request.retrieval_preferences else True),
+        include_judgments=(request.retrieval_preferences.include_judgments if request.retrieval_preferences else None),
+    )
+    legal_rules = prioritize_legal_rules_for_query(
+        extract_legal_rules_from_statute_chunks(retrieved_chunks),
+        effective_user_prompt,
+    )
+    missing_required_facts = detect_missing_required_facts(effective_user_prompt, legal_rules)
+    timeline_issues = detect_fact_timeline_issues(effective_user_prompt)
+    allowed_provision_references = build_provision_reference_registry(retrieved_chunks, legal_rules)
+    analysis_trace = build_analysis_trace(
+        user_prompt=effective_user_prompt,
+        retrieved_chunks=retrieved_chunks,
+        legal_rules=[legal_rule_to_dict(rule) for rule in legal_rules],
+        missing_required_facts=missing_required_facts,
+        timeline_issues=timeline_issues,
+        allowed_provision_references=allowed_provision_references,
+    )
     if not api_key:
         demo_reply = build_demo_reply(latest_user_message, retrieved_chunks, retrieval_prompt=effective_user_prompt)
+        demo_reply = enforce_reply_guardrails(
+            demo_reply,
+            allowed_provision_references=allowed_provision_references,
+            missing_required_facts=missing_required_facts,
+            timeline_issues=timeline_issues,
+        )
         structured_reply = parse_structured_reply(demo_reply)
         persisted_assistant_message = None
         if chat_storage_available:
@@ -2110,17 +2327,11 @@ async def chat(
             mode="demo",
             model=model,
             redactions=sorted(set(redactions)),
+            analysis_trace=analysis_trace,
             chat_id=chat_id if chat_storage_available else None,
             assistant_message_id=(persisted_assistant_message or {}).get("id"),
             structured_reply=structured_reply,
         )
-
-    source_plan = build_legal_source_plan(
-        effective_user_prompt,
-        include_interpretations=(request.retrieval_preferences.include_interpretations if request.retrieval_preferences else True),
-        include_judgments=(request.retrieval_preferences.include_judgments if request.retrieval_preferences else None),
-    )
-    legal_rules = extract_legal_rules_from_statute_chunks(retrieved_chunks)
     retrieved_context = build_answer_context_block(retrieved_chunks)
     retrieval_coverage_context = "\n\n".join(
         part
@@ -2139,6 +2350,9 @@ async def chat(
         retrieval_coverage_context=retrieval_coverage_context,
         source_plan_context=build_source_plan_context(source_plan, retrieved_chunks),
         legal_rules_context=build_legal_rules_context(legal_rules),
+        legal_rule_trace_context=build_legal_rule_trace_context(legal_rules),
+        missing_facts_context=build_missing_facts_context(missing_required_facts),
+        timeline_issue_context=build_timeline_issue_context(timeline_issues),
     )
 
     payload = {
@@ -2181,6 +2395,12 @@ async def chat(
     reply = extract_text_from_anthropic(response.json())
     if not reply:
         raise HTTPException(status_code=502, detail="Anthropic returned an empty response")
+    reply = enforce_reply_guardrails(
+        reply,
+        allowed_provision_references=allowed_provision_references,
+        missing_required_facts=missing_required_facts,
+        timeline_issues=timeline_issues,
+    )
 
     if retrieved_chunks:
         reply = (
@@ -2214,6 +2434,7 @@ async def chat(
         mode="live",
         model=model,
         redactions=sorted(set(redactions)),
+        analysis_trace=analysis_trace,
         chat_id=chat_id if chat_storage_available else None,
         assistant_message_id=(persisted_assistant_message or {}).get("id"),
         structured_reply=structured_reply,
@@ -2245,7 +2466,13 @@ def rag_search(request: RagSearchRequest) -> RagSearchResponse:
         for item in build_axis_coverage(request.query, chunks)
     ]
     source_plan = build_legal_source_plan(request.query)
-    legal_rules = extract_legal_rules_from_statute_chunks(chunks)
+    legal_rules = prioritize_legal_rules_for_query(
+        extract_legal_rules_from_statute_chunks(chunks),
+        request.query,
+    )
+    missing_required_facts = detect_missing_required_facts(request.query, legal_rules)
+    timeline_issues = detect_fact_timeline_issues(request.query)
+    allowed_provision_references = build_provision_reference_registry(chunks, legal_rules)
     return RagSearchResponse(
         query=inspection.query,
         match_query=inspection.match_query,
@@ -2258,6 +2485,14 @@ def rag_search(request: RagSearchRequest) -> RagSearchResponse:
         axis_coverage=axis_coverage,
         source_plan=legal_source_plan_to_dict(source_plan, chunks),
         legal_rules=[legal_rule_to_dict(rule) for rule in legal_rules],
+        analysis_trace=build_analysis_trace(
+            user_prompt=request.query,
+            retrieved_chunks=chunks,
+            legal_rules=[legal_rule_to_dict(rule) for rule in legal_rules],
+            missing_required_facts=missing_required_facts,
+            timeline_issues=timeline_issues,
+            allowed_provision_references=allowed_provision_references,
+        ),
         hits=[RagSearchHit(**hit) for hit in inspection.hits],
     )
 

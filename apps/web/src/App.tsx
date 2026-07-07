@@ -36,6 +36,7 @@ type ChatResponse = {
   mode: ChatMode
   model: string
   redactions: string[]
+  analysis_trace?: Record<string, unknown>
   chat_id?: string
   assistant_message_id?: string | null
   structured_reply?: StructuredReply | null
@@ -196,7 +197,7 @@ const HINT_DEBOUNCE_MS = 900
 const MIN_DRAFT_LENGTH_FOR_HINTS = 24
 const ACTIVE_HINT_COUNT = 3
 const MAX_HINT_QUESTION_COUNT = 5
-const APP_VERSION = '0.8.4'
+const APP_VERSION = '0.9.0'
 const ASSISTANT_SECTION_TITLES = [
   'Teza',
   'Analiza',
@@ -672,30 +673,35 @@ function App() {
     return payload.users
   }
 
-  async function fetchPromptHints({
-    draftText,
+async function fetchPromptHints({
+  draftText,
     answeredHints,
     excludedQuestions,
     maxHints,
   }: {
     draftText: string
     answeredHints: IntentHintAnswer[]
-    excludedQuestions: string[]
-    maxHints: number
-  }) {
-    const response = await fetch(`${API_BASE_URL}/api/chat/hints`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        draft: draftText,
+  excludedQuestions: string[]
+  maxHints: number
+}) {
+  const normalizedDraft = draftText.trim()
+  if (!normalizedDraft || maxHints < 1) {
+    return { hints: [], model: 'fallback', mode: 'fallback' as const }
+  }
+
+  const response = await fetch(`${API_BASE_URL}/api/chat/hints`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        draft: normalizedDraft,
         intent_hints: answeredHints,
-        excluded_questions: excludedQuestions,
+        excluded_questions: excludedQuestions.filter((question) => question.trim()),
         max_hints: maxHints,
       }),
     })
 
     if (!response.ok) {
-      throw new Error('Nie udało się pobrać podpowiedzi.')
+      throw new Error(await readErrorResponse(response))
     }
 
     return normalizePromptHintsResponse(await response.json())
@@ -780,12 +786,12 @@ function App() {
 
     let isMounted = true
 
-    void supabaseBrowserClient.auth.getSession().then(({ data, error: sessionError }) => {
+    void supabaseBrowserClient.auth.refreshSession().then(({ data, error: refreshError }) => {
       if (!isMounted) {
         return
       }
-      if (sessionError) {
-        setAuthError(sessionError.message)
+      if (refreshError && refreshError.message) {
+        setAuthError(refreshError.message)
       }
       setSession(data.session ?? null)
       setAuthLoading(false)
@@ -821,10 +827,9 @@ function App() {
       setError('')
 
       try {
-        const [healthResponse, modelsResponse, accountPayload] = await Promise.all([
+        const [healthResponse, modelsResponse] = await Promise.all([
           fetch(`${API_BASE_URL}/api/health`),
           fetch(`${API_BASE_URL}/api/models`),
-          refreshAccount(activeSession),
         ])
 
         const healthPayload = healthResponse.ok
@@ -844,6 +849,8 @@ function App() {
           setAvailableModels(modelsPayload.models)
           setSelectedModel(modelsPayload.default_model)
         }
+
+        const accountPayload = await refreshAccount(activeSession)
 
         if (healthPayload?.chat_storage_available) {
           const threadsResponse = await apiFetch('/api/chats', activeSession)

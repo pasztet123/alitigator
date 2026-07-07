@@ -1997,6 +1997,7 @@ class LegalRule:
     act_title: str
     publication: Optional[str]
     legal_state_date: Optional[str]
+    provision_id: str
     citation: str
     article_key: str
     paragraph: Optional[str]
@@ -2005,7 +2006,15 @@ class LegalRule:
     rule_type: str
     condition: str
     directive: str
-    source_url: Optional[str]
+    exact_source_span: str
+    required_facts: list[str] = field(default_factory=list)
+    definition_dependencies: list[str] = field(default_factory=list)
+    scope_subject_terms: list[str] = field(default_factory=list)
+    scope_object_terms: list[str] = field(default_factory=list)
+    specificity_rank: int = 0
+    retrieval_stage: str = "primary_source_exact_lookup"
+    supporting_chunk_ids: list[str] = field(default_factory=list)
+    source_url: Optional[str] = None
 
 
 def get_rag_config() -> RagConfig:
@@ -6386,6 +6395,237 @@ def build_rule_citation(article_key: str, paragraph: Optional[str], point: Optio
     return " ".join(parts)
 
 
+def normalize_provision_reference(value: str) -> str:
+    normalized = normalize_whitespace(value).lower()
+    normalized = normalized.replace("artykuł", "art.")
+    normalized = re.sub(r"\bart ?\.", "art.", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    normalized = re.sub(r"\s*,\s*", " ", normalized)
+    return normalized.strip(" .;:,")
+
+
+def build_provision_id(source_id: str, citation: str) -> str:
+    slug = re.sub(r"[^0-9a-z]+", "_", normalize_provision_reference(citation))
+    return f"{source_id}:{slug.strip('_') or 'provision'}"
+
+
+def infer_required_facts_for_rule(
+    *,
+    act_title: str,
+    citation: str,
+    condition: str,
+    directive: str,
+) -> list[str]:
+    haystack = normalize_whitespace(" ".join([act_title, citation, condition, directive])).lower()
+    facts: list[str] = []
+
+    if (
+        "stawki 9%" in haystack
+        or "stawka 9%" in haystack
+        or "9% podstawy opodatkowania" in haystack
+        or "mały podatnik" in haystack
+        or "maly podatnik" in haystack
+        or "art. 19" in haystack and "art. 4a pkt 10" in haystack
+    ):
+        facts.append("przychody ze sprzedaży za poprzedni rok i pozostałe warunki stawki 9%")
+
+    if "rzeczywist" in haystack and "właściciel" in haystack or "wlasciciel" in haystack:
+        facts.append("status rzeczywistego właściciela należności")
+    if "certyfikat rezydencji" in haystack:
+        facts.append("aktualny certyfikat rezydencji")
+    if "zakład" in haystack and "umow" in haystack:
+        facts.append("istnienie albo brak zakładu w Polsce")
+    if "fundacja rodzinna" in haystack and ("udziały" in haystack or "akcje" in haystack):
+        facts.append("czy fundacja rodzinna posiada udziały albo akcje w spółce")
+    if "po zatwierdzeniu" in haystack or "zatwierdzonego sprawozdania" in haystack:
+        facts.append("charakter wypłaty i moment zatwierdzenia sprawozdania finansowego")
+
+    normalized_condition = normalize_whitespace(condition)
+    if normalized_condition:
+        lowered_condition = normalized_condition.lower()
+        if any(marker in lowered_condition for marker in ("jeżeli", "jezeli", "pod warunkiem", "jeśli", "jesli", "gdy", "w przypadku")):
+            facts.append(normalized_condition[:240])
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for fact in facts:
+        key = fact.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(fact.strip())
+    return deduped[:4]
+
+
+def infer_definition_dependencies_for_rule(
+    *,
+    act_title: str,
+    citation: str,
+    directive: str,
+) -> list[str]:
+    haystack = normalize_whitespace(" ".join([act_title, citation, directive])).lower()
+    dependencies: list[str] = []
+
+    if "spółka komandytowa" in haystack or "spolka komandytowa" in haystack:
+        if "udział" in haystack or "udzial" in haystack or "zysk" in haystack:
+            dependencies.extend(["PIT art. 5a pkt 28", "PIT art. 5a pkt 31"])
+    if "rzeczywisty właściciel" in haystack or "rzeczywisty wlasciciel" in haystack:
+        dependencies.append("CIT art. 4a pkt 29")
+    if "mały podatnik" in haystack or "maly podatnik" in haystack:
+        dependencies.append("CIT art. 4a pkt 10")
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for dependency in dependencies:
+        key = dependency.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(dependency)
+    return deduped
+
+
+def infer_scope_terms_for_rule(text: str) -> tuple[list[str], list[str]]:
+    lowered = normalize_whitespace(text).lower()
+    subject_terms: list[str] = []
+    object_terms: list[str] = []
+
+    for term in (
+        "spółka komandytowa",
+        "fundacja rodzinna",
+        "mały podatnik",
+        "beneficjent",
+        "wspólnik",
+        "nierezydent",
+        "płatnik",
+        "podatnik",
+    ):
+        if term in lowered:
+            subject_terms.append(term)
+
+    for term in (
+        "dywidend",
+        "odset",
+        "udział w zyskach",
+        "pożycz",
+        "sprzedaż",
+        "wypłat",
+        "certyfikat rezydencji",
+        "zakład",
+        "sprawozdania finansowego",
+    ):
+        if term in lowered:
+            object_terms.append(term)
+
+    return subject_terms, object_terms
+
+
+def compute_rule_specificity_rank(
+    *,
+    citation: str,
+    directive: str,
+    chunk: RagChunk,
+) -> int:
+    score = 1
+    if re.search(r"\bust\.\s*\d+[a-z]?\b", citation, re.IGNORECASE):
+        score += 2
+    if re.search(r"\bpkt\s*\d+[a-z]?\b", citation, re.IGNORECASE):
+        score += 2
+    if re.search(r"\blit\.\s*[a-z]\b", citation, re.IGNORECASE):
+        score += 1
+
+    lowered = normalize_whitespace(" ".join([chunk.subject or "", directive])).lower()
+    if any(term in lowered for term in ("spółka komandytowa", "spolka komandytowa", "fundacja rodzinna", "mały podatnik", "maly podatnik")):
+        score += 2
+    if any(term in lowered for term in ("wyłącznie", "wylacznie", "bezpośrednio", "bezposrednio", "w tym", "dotyczy")):
+        score += 1
+    return score
+
+
+def prioritize_legal_rules_for_query(rules: list[LegalRule], query: str) -> list[LegalRule]:
+    query_tokens = {token.lower() for token in QUERY_TOKEN_RE.findall(query or "")}
+
+    def rule_score(rule: LegalRule) -> tuple[int, int, int]:
+        haystack = normalize_whitespace(
+            " ".join([rule.act_title, rule.citation, rule.directive, " ".join(rule.scope_subject_terms), " ".join(rule.scope_object_terms)])
+        ).lower()
+        overlap = sum(1 for token in query_tokens if token in haystack)
+        direct_entity_bonus = 2 if any(term in haystack for term in ("spółka komandytowa", "spolka komandytowa", "mały podatnik", "maly podatnik", "fundacja rodzinna")) else 0
+        return (rule.specificity_rank + direct_entity_bonus, overlap, len(rule.definition_dependencies))
+
+    return sorted(rules, key=rule_score, reverse=True)
+
+
+def fact_is_known_from_query(fact: str, query: str) -> bool:
+    normalized_query = normalize_whitespace(query).lower()
+    normalized_fact = normalize_whitespace(fact).lower()
+    if not normalized_query:
+        return False
+
+    if "stawki 9%" in normalized_fact or "mały podatnik" in normalized_fact or "maly podatnik" in normalized_fact:
+        return (
+            "mały podatnik" in normalized_query
+            or "maly podatnik" in normalized_query
+            or ("przychod" in normalized_query and "sprzeda" in normalized_query and ("rok" in normalized_query or "poprzedni" in normalized_query))
+        )
+    if "certyfikat rezydencji" in normalized_fact:
+        return "certyfikat rezydencji" in normalized_query
+    if "rzeczywistego właściciela" in normalized_fact or "rzeczywistego wlasciciela" in normalized_fact:
+        return "rzeczywist" in normalized_query and ("właściciel" in normalized_query or "wlasciciel" in normalized_query)
+    if "zakładu" in normalized_fact or "zakladu" in normalized_fact:
+        return "zakład" in normalized_query or "zaklad" in normalized_query
+    if "fundacja rodzinna posiada udziały albo akcje" in normalized_fact:
+        return ("udział" in normalized_query or "udzial" in normalized_query or "akcj" in normalized_query) and "fundacj" in normalized_query
+    if "sprawozdania finansowego" in normalized_fact:
+        return "sprawozd" in normalized_query and ("zatwierdz" in normalized_query or "zaliczk" in normalized_query)
+
+    tokens = [token for token in QUERY_TOKEN_RE.findall(normalized_fact) if len(token) >= 5]
+    if not tokens:
+        return False
+    matched = sum(1 for token in tokens if token.lower() in normalized_query)
+    return matched >= max(1, math.ceil(len(tokens) * 0.6))
+
+
+def detect_missing_required_facts(query: str, rules: list[LegalRule]) -> list[str]:
+    missing: list[str] = []
+    seen: set[str] = set()
+    for rule in rules:
+        for fact in rule.required_facts:
+            key = fact.strip().lower()
+            if not key or key in seen:
+                continue
+            if fact_is_known_from_query(fact, query):
+                continue
+            seen.add(key)
+            missing.append(fact.strip())
+    return missing
+
+
+def build_legal_rule_trace_context(rules: list[LegalRule]) -> str:
+    if not rules:
+        return "Trace primary law: brak."
+    lines = ["Trace primary law dla writera:"]
+    for index, rule in enumerate(rules, start=1):
+        lines.append(
+            f"{index}. rule_id={rule.provision_id} | source_document_id={rule.source_id} | provision_reference={rule.citation}"
+            f" | retrieval_stage={rule.retrieval_stage} | selected_chunk_ids={','.join(rule.supporting_chunk_ids) or '-'}"
+            f"\n   exact_source_span={rule.exact_source_span}"
+        )
+    return "\n".join(lines)
+
+
+def build_provision_reference_registry(chunks: list[RagChunk], rules: list[LegalRule]) -> set[str]:
+    registry: set[str] = set()
+    for rule in rules:
+        registry.add(normalize_provision_reference(rule.citation))
+        for dependency in rule.definition_dependencies:
+            registry.add(normalize_provision_reference(dependency))
+    for chunk in chunks:
+        for provision in chunk.legal_provisions:
+            registry.add(normalize_provision_reference(provision))
+    return {item for item in registry if item}
+
+
 def extract_legal_rules_from_statute_chunks(chunks: list[RagChunk], *, limit: int = 12) -> list[LegalRule]:
     rules: list[LegalRule] = []
     seen: set[tuple[str, str, Optional[str], Optional[str], Optional[str]]] = set()
@@ -6417,6 +6657,7 @@ def extract_legal_rules_from_statute_chunks(chunks: list[RagChunk], *, limit: in
                     act_title=extract_act_title_from_chunk(chunk),
                     publication=chunk.publication,
                     legal_state_date=chunk.legal_state_date,
+                    provision_id=build_provision_id(chunk_canonical_source_id(chunk), build_rule_citation(article_key, paragraph, point, letter)),
                     citation=build_rule_citation(article_key, paragraph, point, letter),
                     article_key=article_key,
                     paragraph=paragraph,
@@ -6425,12 +6666,31 @@ def extract_legal_rules_from_statute_chunks(chunks: list[RagChunk], *, limit: in
                     rule_type=derive_rule_type(directive),
                     condition=extract_condition_from_rule_text(directive),
                     directive=directive[:1200],
+                    exact_source_span=directive[:1200],
+                    required_facts=infer_required_facts_for_rule(
+                        act_title=extract_act_title_from_chunk(chunk),
+                        citation=build_rule_citation(article_key, paragraph, point, letter),
+                        condition=extract_condition_from_rule_text(directive),
+                        directive=directive,
+                    ),
+                    definition_dependencies=infer_definition_dependencies_for_rule(
+                        act_title=extract_act_title_from_chunk(chunk),
+                        citation=build_rule_citation(article_key, paragraph, point, letter),
+                        directive=directive,
+                    ),
+                    scope_subject_terms=infer_scope_terms_for_rule(directive)[0],
+                    scope_object_terms=infer_scope_terms_for_rule(directive)[1],
+                    specificity_rank=compute_rule_specificity_rank(
+                        citation=build_rule_citation(article_key, paragraph, point, letter),
+                        directive=directive,
+                        chunk=chunk,
+                    ),
+                    supporting_chunk_ids=[chunk.chunk_id],
                     source_url=chunk.source_url,
                 )
             )
             if len(rules) >= limit:
                 return rules
-            break
     return rules
 
 
@@ -6440,6 +6700,7 @@ def legal_rule_to_dict(rule: LegalRule) -> dict[str, Any]:
         "act_title": rule.act_title,
         "publication": rule.publication,
         "legal_state_date": rule.legal_state_date,
+        "provision_id": rule.provision_id,
         "citation": rule.citation,
         "article_key": rule.article_key,
         "paragraph": rule.paragraph,
@@ -6448,6 +6709,14 @@ def legal_rule_to_dict(rule: LegalRule) -> dict[str, Any]:
         "rule_type": rule.rule_type,
         "condition": rule.condition,
         "directive": rule.directive,
+        "exact_source_span": rule.exact_source_span,
+        "required_facts": list(rule.required_facts),
+        "definition_dependencies": list(rule.definition_dependencies),
+        "scope_subject_terms": list(rule.scope_subject_terms),
+        "scope_object_terms": list(rule.scope_object_terms),
+        "specificity_rank": rule.specificity_rank,
+        "retrieval_stage": rule.retrieval_stage,
+        "supporting_chunk_ids": list(rule.supporting_chunk_ids),
         "source_url": rule.source_url,
     }
 
@@ -6464,9 +6733,19 @@ def build_legal_rules_context(rules: list[LegalRule]) -> str:
     ]
     for index, rule in enumerate(rules, start=1):
         condition = f" | warunek: {rule.condition}" if rule.condition else ""
+        required_facts = (
+            f" | required_facts: {'; '.join(rule.required_facts)}"
+            if rule.required_facts
+            else ""
+        )
+        definition_dependencies = (
+            f" | definicje: {'; '.join(rule.definition_dependencies)}"
+            if rule.definition_dependencies
+            else ""
+        )
         legal_state = rule.legal_state_date or rule.publication or "brak daty w metadanych"
         lines.append(
-            f"{index}. {rule.act_title} | {rule.citation} | typ={rule.rule_type} | stan={legal_state}{condition}\n"
+            f"{index}. {rule.act_title} | {rule.citation} | typ={rule.rule_type} | stan={legal_state}{condition}{required_facts}{definition_dependencies}\n"
             f"   reguła: {rule.directive}"
         )
     return "\n".join(lines)

@@ -920,8 +920,8 @@ select {
 
 .status-tray {
   display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
+  flex-wrap: nowrap;
+  gap: 0;
   justify-content: flex-end;
   min-width: 0;
 }
@@ -1079,6 +1079,11 @@ select {
   align-items: end;
 }
 
+.composer-toolbar-compact {
+  grid-template-columns: minmax(0, 220px);
+  justify-content: start;
+}
+
 .model-select-shell,
 .model-select-wrap {
   display: grid;
@@ -1183,12 +1188,31 @@ textarea {
 }
 
 .composer-actions {
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto;
   align-items: center;
+  justify-content: end;
 }
 
 .submit-button {
   min-width: 140px;
+}
+
+.submit-button-icon {
+  width: 52px;
+  min-width: 52px;
+  height: 52px;
+  padding: 0;
+  border-radius: 999px;
+}
+
+.submit-button-icon svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.9;
 }
 
 .error-text {
@@ -1198,6 +1222,12 @@ textarea {
 
 .helper-text {
   margin: 0;
+}
+
+.app-version-footer {
+  font-size: 11px;
+  line-height: 1.2;
+  opacity: 0.68;
 }
 
 .helper-text-positive {

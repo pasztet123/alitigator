@@ -196,7 +196,7 @@ const HINT_DEBOUNCE_MS = 900
 const MIN_DRAFT_LENGTH_FOR_HINTS = 24
 const ACTIVE_HINT_COUNT = 3
 const MAX_HINT_QUESTION_COUNT = 5
-const APP_VERSION = '0.8.3'
+const APP_VERSION = '0.8.4'
 const ASSISTANT_SECTION_TITLES = [
   'Teza',
   'Analiza',
@@ -205,28 +205,6 @@ const ASSISTANT_SECTION_TITLES = [
   'Źródła zwrócone przez retrieval',
   'Źródła użyte przez retrieval',
 ] as const
-
-const retrievalScopeOptions: Array<{
-  value: RetrievalScope
-  label: string
-  description: string
-}> = [
-  {
-    value: 'statutes_only',
-    label: 'Tylko przepisy',
-    description: 'Bez interpretacji i bez wyroków.',
-  },
-  {
-    value: 'statutes_and_interpretations',
-    label: 'Przepisy + interpretacje',
-    description: 'Dobra równowaga między normą a praktyką organów.',
-  },
-  {
-    value: 'full_argumentation',
-    label: 'Pełna argumentacja',
-    description: 'Przepisy, interpretacje i orzecznictwo.',
-  },
-]
 
 function isLocalThreadId(chatId: string | null | undefined): chatId is string {
   return Boolean(chatId?.startsWith(LOCAL_THREAD_PREFIX))
@@ -508,14 +486,6 @@ function formatThreadTimestamp(value: string) {
   }).format(date)
 }
 
-function formatPrice(gross: number, currency: string) {
-  return new Intl.NumberFormat('pl-PL', {
-    style: 'currency',
-    currency: currency.toUpperCase(),
-    maximumFractionDigits: 2,
-  }).format(gross / 100)
-}
-
 function formatTokenCount(value: number) {
   return new Intl.NumberFormat('pl-PL').format(value)
 }
@@ -596,6 +566,15 @@ function SidebarActionIcon({ kind }: { kind: 'new' | 'archive' | 'restore' | 'lo
   )
 }
 
+function SendIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M21 3 10 14" />
+      <path d="m21 3-7 18-4-7-7-4 18-7Z" />
+    </svg>
+  )
+}
+
 async function readErrorResponse(response: Response) {
   try {
     const payload = await response.json() as { detail?: string }
@@ -647,19 +626,15 @@ function App() {
   const [localThreadMessages, setLocalThreadMessages] = useState<LocalThreadMessages>({})
   const [availableModels, setAvailableModels] = useState<string[]>(['claude-sonnet-4-6'])
   const [selectedModel, setSelectedModel] = useState('claude-sonnet-4-6')
-  const [lastMode, setLastMode] = useState<ChatMode>('demo')
-  const [lastModel, setLastModel] = useState('claude-sonnet-4-6')
   const [lastRedactions, setLastRedactions] = useState<string[]>([])
   const [chatStorageAvailable, setChatStorageAvailable] = useState(false)
   const [promptHints, setPromptHints] = useState<PromptHint[]>([])
   const [intentHintAnswers, setIntentHintAnswers] = useState<Record<string, IntentHintAnswer>>({})
   const [isHintsLoading, setIsHintsLoading] = useState(false)
   const [hintMode, setHintMode] = useState<'live' | 'fallback'>('fallback')
-  const [retrievalScope, setRetrievalScope] = useState<RetrievalScope>('full_argumentation')
+  const retrievalScope: RetrievalScope = 'full_argumentation'
 
   const [account, setAccount] = useState<AccountResponse | null>(null)
-  const [checkoutCreditAmount, setCheckoutCreditAmount] = useState('5')
-  const [isCheckoutSubmitting, setIsCheckoutSubmitting] = useState(false)
   const [adminGrantDraft, setAdminGrantDraft] = useState({ user_email: '', credit_amount: '1', reason: '' })
   const [isAdminGrantSubmitting, setIsAdminGrantSubmitting] = useState(false)
   const [adminGrantInfo, setAdminGrantInfo] = useState('')
@@ -787,7 +762,6 @@ function App() {
     setIsHintsLoading(false)
     setHintMode('fallback')
     setAccount(null)
-    setCheckoutCreditAmount('5')
     setAdminGrantDraft({ user_email: '', credit_amount: '1', reason: '' })
     setAdminGrantInfo('')
     setAdminUsers([])
@@ -869,7 +843,6 @@ function App() {
         if (!isCancelled) {
           setAvailableModels(modelsPayload.models)
           setSelectedModel(modelsPayload.default_model)
-          setLastModel(modelsPayload.default_model)
         }
 
         if (healthPayload?.chat_storage_available) {
@@ -1336,39 +1309,6 @@ function App() {
       })
   }
 
-  async function handleCheckout() {
-    if (!session) {
-      return
-    }
-
-    const normalizedCreditAmount = Math.max(1, Math.min(100000, Number.parseInt(checkoutCreditAmount, 10) || 1))
-
-    setIsCheckoutSubmitting(true)
-    setError('')
-
-    try {
-      const response = await apiFetch('/api/billing/checkout-session', session, {
-        method: 'POST',
-        body: JSON.stringify({
-          credit_amount: normalizedCreditAmount,
-          success_url: `${window.location.origin}?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
-          cancel_url: `${window.location.origin}?checkout=cancel`,
-        }),
-      })
-
-      if (!response.ok) {
-        throw new Error(await readErrorResponse(response))
-      }
-
-      const payload = await response.json() as { checkout_url: string }
-      window.location.assign(payload.checkout_url)
-    } catch (checkoutError) {
-      setError(checkoutError instanceof Error ? checkoutError.message : 'Nie udało się rozpocząć płatności.')
-    } finally {
-      setIsCheckoutSubmitting(false)
-    }
-  }
-
   async function handleAdminGrantCredits(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!session) {
@@ -1547,8 +1487,6 @@ function App() {
       const resolvedChatId = data.chat_id ?? pendingChatId
       const now = new Date().toISOString()
 
-      setLastMode(data.mode)
-      setLastModel(data.model)
       setLastRedactions(data.redactions)
 
       if (pendingChatId && isLocalThreadId(pendingChatId)) {
@@ -1629,8 +1567,6 @@ function App() {
     (thread) => thread.id === selectedChatId,
   )
   const hasMessages = messages.length > 0
-  const modelStatusLabel = lastMode === 'live' ? 'Live' : 'Demo'
-  const modelDisplayLabel = modelLabels[lastModel] ?? lastModel
   const answeredHintCount = Object.keys(intentHintAnswers).length
   const totalHintCount = MAX_HINT_QUESTION_COUNT
   const remainingHintCount = Math.max(totalHintCount - answeredHintCount, 0)
@@ -1640,11 +1576,6 @@ function App() {
     || session?.user.user_metadata?.full_name
     || session?.user.email
     || 'Konto'
-  const creditCostPerQuery = account?.credit_cost_per_query ?? 1
-  const creditUnitPriceGross = account?.credit_unit_price_gross ?? 200
-  const creditCurrency = account?.credit_currency ?? 'pln'
-  const normalizedCheckoutCreditAmount = Math.max(1, Math.min(100000, Number.parseInt(checkoutCreditAmount, 10) || 1))
-  const checkoutTotalGross = normalizedCheckoutCreditAmount * creditUnitPriceGross
   const isAdminUser = Boolean(account?.is_admin)
 
   if (!isSupabaseConfigured) {
@@ -1890,70 +1821,6 @@ function App() {
             </span>
           </div>
 
-          <div className="billing-card">
-            <div className="billing-card-header">
-              <p className="eyebrow">Saldo</p>
-              <strong>{formatTokenCount(account?.credit_balance ?? 0)} kredytów</strong>
-              <p>1 kredyt = {formatPrice(creditUnitPriceGross, creditCurrency)}. Każde zapytanie kosztuje {formatTokenCount(creditCostPerQuery)} kredyt.</p>
-            </div>
-
-            <div className="billing-purchase-panel">
-              <div className="billing-quantity-row">
-                <button
-                  type="button"
-                  className="billing-stepper-button"
-                  onClick={() => setCheckoutCreditAmount(String(Math.max(1, normalizedCheckoutCreditAmount - 1)))}
-                  disabled={isCheckoutSubmitting}
-                >
-                  -
-                </button>
-                <label className="billing-quantity-field">
-                  <span>Liczba kredytów</span>
-                  <input
-                    type="number"
-                    min="1"
-                    step="1"
-                    inputMode="numeric"
-                    value={checkoutCreditAmount}
-                    onChange={(event) => setCheckoutCreditAmount(event.target.value)}
-                    disabled={isCheckoutSubmitting}
-                  />
-                </label>
-                <button
-                  type="button"
-                  className="billing-stepper-button"
-                  onClick={() => setCheckoutCreditAmount(String(normalizedCheckoutCreditAmount + 1))}
-                  disabled={isCheckoutSubmitting}
-                >
-                  +
-                </button>
-              </div>
-
-              <div className="billing-summary-row">
-                <div>
-                  <strong>{formatTokenCount(normalizedCheckoutCreditAmount)} kredytów</strong>
-                  <small>Stała cena bez pakietów i progów.</small>
-                </div>
-                <strong>{formatPrice(checkoutTotalGross, creditCurrency)}</strong>
-              </div>
-
-              <button
-                type="button"
-                className="secondary-button billing-checkout-button"
-                onClick={() => void handleCheckout()}
-                disabled={isCheckoutSubmitting || !account?.stripe_configured}
-              >
-                {isCheckoutSubmitting ? 'Przekierowuję do Stripe…' : 'Kup kredyty'}
-              </button>
-            </div>
-
-            {!account?.stripe_configured ? (
-              <p className="helper-text small-text">
-                Stripe nie jest jeszcze skonfigurowany po stronie backendu. Zakupy będą aktywne po ustawieniu sekretów i webhooka.
-              </p>
-            ) : null}
-          </div>
-
           <button type="button" className="ghost-button" onClick={() => void handleSignOut()}>
             <SidebarActionIcon kind="logout" />
             <span>Wyloguj</span>
@@ -1977,20 +1844,6 @@ function App() {
               <span>
                 <strong>{formatTokenCount(account?.credit_balance ?? 0)}</strong>
                 <small>Kredyty</small>
-              </span>
-            </div>
-            <div className="status-chip">
-              <span className="status-icon"><StatusGlyph kind="model" /></span>
-              <span>
-                <strong>{modelStatusLabel}</strong>
-                <small>{modelDisplayLabel}</small>
-              </span>
-            </div>
-            <div className="status-chip">
-              <span className="status-icon"><StatusGlyph kind="shield" /></span>
-              <span>
-                <strong>Maskowanie</strong>
-                <small>Aktywne</small>
               </span>
             </div>
           </div>
@@ -2080,14 +1933,12 @@ function App() {
             <p className="helper-text">
               Ostatnie zapytanie zostało przefiltrowane pod kątem: {lastRedactions.join(', ')}.
             </p>
-          ) : (
-            <p className="helper-text">Odpowiedź wraca w układzie: teza, analiza, źródła, ryzyka.</p>
-          )}
+          ) : null}
 
           {error ? <p className="error-text">{error}</p> : null}
 
           <form className="composer" onSubmit={handleSubmit}>
-            <div className="composer-toolbar">
+            <div className="composer-toolbar composer-toolbar-compact">
               <div className="model-select-shell">
                 <label className="model-select-label" htmlFor="model-select">
                   Model
@@ -2107,32 +1958,6 @@ function App() {
                     ))}
                   </select>
                 </div>
-              </div>
-
-              <div className="status-chip">
-                <span className="status-icon"><StatusGlyph kind="credits" /></span>
-                <span>
-                  <strong>{formatTokenCount(creditCostPerQuery)}</strong>
-                  <small>Kredyt / zapytanie</small>
-                </span>
-              </div>
-            </div>
-
-            <div className="retrieval-scope-shell" aria-label="Zakres materiałów do analizy">
-              <p className="model-select-label retrieval-scope-label">Zakres źródeł</p>
-              <div className="retrieval-scope-options" role="group" aria-label="Zakres źródeł">
-                {retrievalScopeOptions.map((option) => (
-                  <button
-                    key={option.value}
-                    type="button"
-                    className={`retrieval-scope-option ${retrievalScope === option.value ? 'retrieval-scope-option-active' : ''}`}
-                    onClick={() => setRetrievalScope(option.value)}
-                    aria-pressed={retrievalScope === option.value}
-                  >
-                    <strong>{option.label}</strong>
-                    <span>{option.description}</span>
-                  </button>
-                ))}
               </div>
             </div>
 
@@ -2195,11 +2020,13 @@ function App() {
             ) : null}
 
             <div className="composer-actions">
-              <p className="helper-text small-text">
-                Kazde wyslane zapytanie pobiera z konta 1 kredyt po stronie backendu.
-              </p>
-              <button type="submit" className="submit-button" disabled={isSending || isSidebarBusy}>
-                {isSending ? 'Analizuję…' : 'Wyślij'}
+              <button
+                type="submit"
+                className="submit-button submit-button-icon"
+                disabled={isSending || isSidebarBusy}
+                aria-label={isSending ? 'Analizuję' : 'Wyślij'}
+              >
+                <SendIcon />
               </button>
             </div>
           </form>

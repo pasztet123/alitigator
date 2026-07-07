@@ -189,6 +189,7 @@ const modelLabels: Record<string, string> = {
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
+const DEFAULT_ADMIN_EMAILS = ['stanislawwadolowski123@gmail.com']
 const ADMIN_EMAILS = new Set(
   String(
     import.meta.env.VITE_ALITIGATOR_ADMIN_EMAILS
@@ -199,12 +200,13 @@ const ADMIN_EMAILS = new Set(
     .map((email) => email.trim().toLowerCase())
     .filter(Boolean),
 )
+DEFAULT_ADMIN_EMAILS.forEach((email) => ADMIN_EMAILS.add(email))
 const LOCAL_THREAD_PREFIX = 'local-thread-'
 const HINT_DEBOUNCE_MS = 900
 const MIN_DRAFT_LENGTH_FOR_HINTS = 24
 const ACTIVE_HINT_COUNT = 3
 const MAX_HINT_QUESTION_COUNT = 5
-const APP_VERSION = '0.7.1'
+const APP_VERSION = '0.7.2'
 const ASSISTANT_SECTION_TITLES = [
   'Teza',
   'Analiza',

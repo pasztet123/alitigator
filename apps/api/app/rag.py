@@ -28,6 +28,7 @@ DEFAULT_LAW_SOURCE_PATHS = (
     API_DIR / "data" / "laws" / "processed" / "tax_ordinance_DU_2026_622.jsonl",
     API_DIR / "data" / "laws" / "processed" / "local_taxes_act_DU_2025_707.jsonl",
     API_DIR / "data" / "laws" / "processed" / "tax_treaties_core.jsonl",
+    API_DIR / "data" / "laws" / "processed" / "ksef_2_0_current_bundle.jsonl",
     API_DIR / "data" / "processed" / "cbosa_nsa_fsk_judgments.jsonl",
 )
 DEFAULT_RAG_DB_PATH = API_DIR / "data" / "processed" / "eureka_rag.sqlite3"
@@ -125,6 +126,12 @@ KSEF_OUTSIDE_DEDUCTION_INTERPRETATION_DOCUMENT_IDS: tuple[str, ...] = (
     "694474",
     "692135",
     "695412",
+)
+KSEF_CURRENT_BUNDLE_DOCUMENT_IDS: tuple[str, ...] = (
+    "ksef-2-0-current-law-dzu-2025-1203-transition",
+    "ksef-2-0-offline24-operational-modes",
+    "ksef-2-0-scope-fixed-establishment-and-foreign-buyers",
+    "ksef-2-0-corrections-and-vat-deduction",
 )
 DEBT_ASSUMPTION_INTERPRETATION_DOCUMENT_IDS: tuple[str, ...] = ("695395", "678370")
 HOUSING_RELIEF_TEMPORARY_RENTAL_INTERPRETATION_DOCUMENT_IDS: tuple[str, ...] = ("691376",)
@@ -2031,6 +2038,62 @@ def query_targets_ksef_foreign_sale(query: str) -> bool:
     return bool(KSEF_QUERY_RE.search(normalized) and KSEF_FOREIGN_SALE_QUERY_RE.search(normalized))
 
 
+def query_targets_ksef_current_law(query: str) -> bool:
+    return bool(KSEF_QUERY_RE.search(query or ""))
+
+
+def query_targets_ksef_transition_period(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    if not KSEF_QUERY_RE.search(normalized):
+        return False
+    return bool(
+        re.search(
+            r"\b(2026|2027|pa[źz]dziernik\w*|luty\w*|kwietni\w*|termin\w*|etap\w*|"
+            r"limit\w*|10\s*000|10000|200\s*mln|sankcj\w*|kar\w*|106ni)\b",
+            normalized,
+        )
+    )
+
+
+def query_targets_ksef_operational_modes(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    if not KSEF_QUERY_RE.search(normalized):
+        return False
+    return bool(
+        re.search(
+            r"\b(offline24|offline\s*24|awari\w*|niedost[ęe]pno\w*|system\w* ksi[ęe]gow\w*|"
+            r"w[łl]asn\w* system\w*|qr|106nda|106nf|106nh)\b",
+            normalized,
+        )
+    )
+
+
+def query_targets_ksef_fixed_establishment_scope(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    if not KSEF_QUERY_RE.search(normalized):
+        return False
+    return bool(
+        re.search(
+            r"\b(smpd|sta[łl]\w* miejsce prowadzenia|fixed establishment|podmiot\w* zagraniczn\w*|"
+            r"niemieck\w*|niemc\w*|zagraniczn\w* sp[óo][łl]k\w*|uczestnicz\w*|us[łl]ugodawc\w*)\b",
+            normalized,
+        )
+    )
+
+
+def query_targets_ksef_buyer_capacity(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    if not KSEF_QUERY_RE.search(normalized):
+        return False
+    return bool(
+        re.search(
+            r"\b(b2c|b2b|konsument\w*|osob\w* fizyczn\w*|nip|prywatn\w*|mieszan\w*|"
+            r"jednoosobow\w* dzia[łl]alno[śs][ćc]|przedsi[ęe]biorc\w*)\b",
+            normalized,
+        )
+    )
+
+
 def query_targets_ksef_outside_deduction(query: str) -> bool:
     normalized = normalize_whitespace(query or "").lower()
     if not KSEF_QUERY_RE.search(normalized):
@@ -2606,6 +2669,41 @@ def build_ksef_outside_deduction_statute_targets(query: str) -> list[tuple[str, 
         ("VAT", "106nf"),
         ("VAT", "106nh"),
     ]
+    deduped_targets: list[tuple[str, str]] = []
+    seen_targets: set[tuple[str, str]] = set()
+    for target in preferred_targets:
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        deduped_targets.append(target)
+    return deduped_targets
+
+
+def build_ksef_current_law_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_ksef_current_law(query):
+        return []
+
+    preferred_targets: list[tuple[str, str]] = [
+        ("VAT", "106a"),
+        ("VAT", "106b"),
+        ("VAT", "106ga"),
+        ("VAT", "106gb"),
+        ("VAT", "106ni"),
+        ("VAT", "106nda"),
+        ("VAT", "106nf"),
+        ("VAT", "106nh"),
+    ]
+    if query_targets_ksef_transition_period(query):
+        preferred_targets.extend([("VAT", "106ni"), ("VAT", "106ga"), ("VAT", "106gb")])
+    if query_targets_ksef_outside_deduction(query):
+        preferred_targets.extend([("VAT", "86"), ("VAT", "88"), ("VAT", "108")])
+    if query_targets_ksef_correction_issue(query) or re.search(r"\b(korekt\w*|in minus|obni[żz]k\w*)\b", query or "", re.IGNORECASE):
+        preferred_targets.extend([("VAT", "29a"), ("VAT", "106j"), ("VAT", "106ga"), ("VAT", "106gb")])
+    if query_targets_ksef_operational_modes(query):
+        preferred_targets.extend([("VAT", "106nda"), ("VAT", "106nf"), ("VAT", "106nh"), ("VAT", "106gb")])
+    if query_targets_ksef_fixed_establishment_scope(query) or query_targets_ksef_buyer_capacity(query):
+        preferred_targets.extend([("VAT", "106a"), ("VAT", "106b"), ("VAT", "106ga"), ("VAT", "106gb")])
+
     deduped_targets: list[tuple[str, str]] = []
     seen_targets: set[tuple[str, str]] = set()
     for target in preferred_targets:
@@ -4491,6 +4589,8 @@ def resolve_statute_tax_domains(query: str) -> set[str]:
         domains.add("VAT")
     if query_targets_ksef_b2c_invoice(query):
         domains.add("VAT")
+    if query_targets_ksef_current_law(query):
+        domains.add("VAT")
     if query_targets_private_vehicle_pit_expense(query):
         domains.add("PIT")
     if query_targets_spolka_komandytowa_cit_status(query):
@@ -4511,6 +4611,8 @@ def infer_retrieval_tax_domains(query: str) -> set[str]:
     if query_targets_poland_germany_treaty(query):
         domains.update({"CIT", "PIT"})
     if query_targets_ksef_b2c_invoice(query):
+        domains.add("VAT")
+    if query_targets_ksef_current_law(query):
         domains.add("VAT")
     if query_targets_private_vehicle_pit_expense(query):
         domains.add("PIT")
@@ -5731,6 +5833,63 @@ def decompose_query_into_legal_axes(query: str) -> list[LegalRetrievalAxis]:
                 ),
             ]
         )
+
+    if query_targets_ksef_current_law(query):
+        axes.extend(
+            [
+                LegalRetrievalAxis(
+                    axis_id="ksef_current_law_bundle",
+                    label="KSeF 2.0: aktualna podstawa prawna i terminy",
+                    query=expand_search_query(f"{normalized} KSeF 2.0 Dz.U. 2025 poz. 1203 1 lutego 2026 1 kwietnia 2026 limit 10 000 sankcje 2027"),
+                    source_types={"statute"},
+                    tax_domains={"VAT"},
+                    preferred_targets=tuple(build_ksef_current_law_statute_targets(query)),
+                ),
+                LegalRetrievalAxis(
+                    axis_id="ksef_scope_and_buyer_capacity",
+                    label="KSeF 2.0: zakres obowiązku / B2B / B2C / nabywca zagraniczny",
+                    query=expand_search_query(f"{normalized} art. 106a 106b 106ga 106gb B2B B2C konsument NIP nabywca zagraniczny polskie przepisy fakturowania"),
+                    source_types={"statute", "interpretation"},
+                    tax_domains={"VAT"},
+                    preferred_targets=(("VAT", "106a"), ("VAT", "106b"), ("VAT", "106ga"), ("VAT", "106gb")),
+                ),
+                LegalRetrievalAxis(
+                    axis_id="ksef_receipt_and_deduction",
+                    label="KSeF 2.0: otrzymanie faktury / PDF poza KSeF / odliczenie",
+                    query=expand_search_query(f"{normalized} faktura poza KSeF PDF otrzymanie art. 86 art. 88 numer KSeF odliczenie VAT"),
+                    source_types={"statute", "interpretation"},
+                    tax_domains={"VAT"},
+                    preferred_targets=(("VAT", "86"), ("VAT", "88"), ("VAT", "106gb"), ("VAT", "106nda"), ("VAT", "106nh")),
+                ),
+                LegalRetrievalAxis(
+                    axis_id="ksef_corrections",
+                    label="KSeF 2.0: korekta in minus / faktura korygująca",
+                    query=expand_search_query(f"{normalized} korekta in minus faktura korygująca ustrukturyzowana art. 29a 13a 13b 13c KSeF"),
+                    source_types={"statute", "interpretation"},
+                    tax_domains={"VAT"},
+                    preferred_targets=(("VAT", "29a"), ("VAT", "106j"), ("VAT", "106ga"), ("VAT", "106gb")),
+                ),
+                LegalRetrievalAxis(
+                    axis_id="ksef_operational_modes",
+                    label="KSeF 2.0: offline24 / niedostępność / awaria / system podatnika",
+                    query=expand_search_query(f"{normalized} offline24 art. 106nda 106nf 106nh niedostępność awaria całkowita awaria systemu podatnika następny dzień roboczy"),
+                    source_types={"statute", "interpretation"},
+                    tax_domains={"VAT"},
+                    preferred_targets=(("VAT", "106nda"), ("VAT", "106nf"), ("VAT", "106nh"), ("VAT", "106gb")),
+                ),
+            ]
+        )
+        if query_targets_ksef_fixed_establishment_scope(query):
+            axes.append(
+                LegalRetrievalAxis(
+                    axis_id="ksef_fixed_establishment_participation",
+                    label="KSeF 2.0: SMPD i uczestnictwo w transakcji",
+                    query=expand_search_query(f"{normalized} stałe miejsce prowadzenia działalności SMPD uczestniczy w dostawie świadczeniu usług art. 106ga 106gb"),
+                    source_types={"statute", "interpretation"},
+                    tax_domains={"VAT"},
+                    preferred_targets=(("VAT", "106ga"), ("VAT", "106gb"), ("VAT", "106a")),
+                )
+            )
 
     if query_targets_wht_pay_and_refund_services(query) or query_targets_crossborder_treaty_analysis(query):
         axes.extend(

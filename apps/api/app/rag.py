@@ -1899,6 +1899,34 @@ class LegalRetrievalAxis:
     limit_fraction: float = 1.0
 
 
+@dataclass(frozen=True)
+class SourceRequirement:
+    axis_id: str
+    mandatory_primary_sources: list[str] = field(default_factory=list)
+    optional_secondary_sources: list[str] = field(default_factory=list)
+    controlling_rule_required: bool = True
+    current_law_required: bool = True
+    treaty_required: bool = False
+    eu_source_required: bool = False
+    official_guidance_required: bool = False
+
+
+@dataclass(frozen=True)
+class AxisCoverage:
+    axis_id: str
+    label: str
+    controlling_rule_present: bool
+    current_law_source_present: bool
+    relevant_resolution_present: bool
+    primary_source_present: bool
+    required_treaty_present: Optional[bool]
+    missing_source_types: list[str]
+    misleading_neighbor_present: bool
+    coverage_score: float
+    status: str
+    supporting_source_ids: list[str] = field(default_factory=list)
+
+
 def get_rag_config() -> RagConfig:
     configured_extra_sources = os.getenv("ALITIGATOR_RAG_ADDITIONAL_SOURCE_PATHS", "").strip()
     additional_source_paths = tuple(
@@ -6033,6 +6061,552 @@ def decompose_query_into_legal_axes(query: str) -> list[LegalRetrievalAxis]:
         seen_axis_ids.add(axis.axis_id)
         deduped.append(axis)
     return deduped
+
+
+def build_source_requirement_for_axis(axis: LegalRetrievalAxis) -> SourceRequirement:
+    axis_id = axis.axis_id
+    mandatory_primary_sources: list[str] = []
+    optional_secondary_sources: list[str] = []
+    treaty_required = False
+    official_guidance_required = False
+
+    if axis_id.startswith("ksef_"):
+        mandatory_primary_sources.append("ksef_2_0_current_law_bundle")
+        official_guidance_required = axis_id in {"ksef_operational_modes", "ksef_current_law_bundle"}
+    elif axis_id.startswith("family_foundation_"):
+        mandatory_primary_sources.append("family_foundation_primary_bundle")
+    elif axis_id.startswith("estonian_cit_"):
+        mandatory_primary_sources.append("current_cit_act")
+        if "ORDYNACJA" in (axis.tax_domains or set()):
+            mandatory_primary_sources.append("tax_ordinance")
+        optional_secondary_sources.append("interpretations_or_judgments")
+    elif axis_id.startswith("wht_") or axis_id in {"pay_and_refund", "interest_royalties_exemption", "beneficial_owner"}:
+        mandatory_primary_sources.append("current_cit_act")
+        optional_secondary_sources.append("official_wht_guidance_or_case_law")
+    elif axis_id.startswith("poland_") and axis_id.endswith("_treaty"):
+        mandatory_primary_sources.append("tax_treaty_text")
+        treaty_required = True
+    elif axis.source_types and "statute" in axis.source_types:
+        mandatory_primary_sources.append("current_statute")
+
+    return SourceRequirement(
+        axis_id=axis_id,
+        mandatory_primary_sources=mandatory_primary_sources,
+        optional_secondary_sources=optional_secondary_sources,
+        treaty_required=treaty_required,
+        official_guidance_required=official_guidance_required,
+    )
+
+
+def is_primary_source_chunk(chunk: RagChunk) -> bool:
+    source_type = str(chunk.source_type or "").lower()
+    source_subtype = str(chunk.source_subtype or "").lower()
+    subject = normalize_whitespace(chunk.subject or "").lower()
+    return (
+        source_type == "statute"
+        or "tax_treaty" in source_subtype
+        or subject.startswith("upo polska")
+    )
+
+
+def chunk_matches_axis_domain(axis: LegalRetrievalAxis, chunk: RagChunk) -> bool:
+    if not axis.tax_domains:
+        return True
+    chunk_domain = infer_chunk_tax_domain(chunk)
+    provision_domains = {
+        target[0]
+        for provision in chunk.legal_provisions
+        for target in [extract_statute_target_from_text(provision)]
+        if target
+    }
+    candidate_domains = {value for value in [chunk_domain, *provision_domains] if value}
+    if not candidate_domains:
+        return True
+    return bool(candidate_domains & axis.tax_domains)
+
+
+def chunk_matches_axis_source_type(axis: LegalRetrievalAxis, chunk: RagChunk) -> bool:
+    if not axis.source_types:
+        return True
+    return str(chunk.source_type or "").lower() in axis.source_types
+
+
+def chunk_has_axis_preferred_target(axis: LegalRetrievalAxis, chunk: RagChunk) -> bool:
+    if not axis.preferred_targets:
+        return False
+    preferred = set(axis.preferred_targets)
+    subject = normalize_whitespace(chunk.subject or "").lower()
+    for provision in chunk.legal_provisions:
+        target = extract_statute_target_from_text(provision)
+        if target and target in preferred:
+            return True
+        article_key = extract_article_key_from_text(provision)
+        if article_key and subject.startswith("upo polska") and any(article_key == target[1] for target in preferred):
+            return True
+        chunk_domain = infer_chunk_tax_domain(chunk)
+        if article_key and chunk_domain and (chunk_domain, article_key) in preferred:
+            return True
+    return False
+
+
+def chunk_is_direct_axis_source(axis: LegalRetrievalAxis, chunk: RagChunk) -> bool:
+    subject = normalize_whitespace(chunk.subject or "").lower()
+    document_id = str(chunk.document_id or "")
+    if axis.direct_subject_prefix and subject.startswith(axis.direct_subject_prefix.lower()):
+        return True
+    if axis.axis_id.startswith("ksef_") and document_id in KSEF_CURRENT_BUNDLE_DOCUMENT_IDS:
+        return True
+    if axis.axis_id.startswith("family_foundation_") and document_id in FAMILY_FOUNDATION_PRIMARY_BUNDLE_DOCUMENT_IDS:
+        return True
+    return False
+
+
+def chunk_matches_axis(axis: LegalRetrievalAxis, chunk: RagChunk) -> bool:
+    if not chunk_matches_axis_source_type(axis, chunk):
+        return False
+    if chunk_is_direct_axis_source(axis, chunk):
+        return True
+    if chunk_has_axis_preferred_target(axis, chunk):
+        return True
+    return chunk_matches_axis_domain(axis, chunk) and not axis.preferred_targets
+
+
+def chunk_is_current_law_for_axis(axis: LegalRetrievalAxis, chunk: RagChunk) -> bool:
+    if not is_primary_source_chunk(chunk):
+        return False
+    document_id = str(chunk.document_id or "")
+    text = " ".join(
+        part
+        for part in [chunk.subject, chunk.publication or "", chunk.legal_state_date or "", chunk.chunk_text[:1600]]
+        if part
+    )
+    if axis.axis_id.startswith("ksef_"):
+        return document_id in KSEF_CURRENT_BUNDLE_DOCUMENT_IDS or bool(
+            re.search(r"KSeF\s*2\.0|Dz\.U\.\s*2025\s*poz\.\s*1203", text, re.IGNORECASE)
+        )
+    if axis.axis_id.startswith("family_foundation_"):
+        return document_id in FAMILY_FOUNDATION_PRIMARY_BUNDLE_DOCUMENT_IDS or bool(
+            re.search(r"fundacj\w* rodzinn\w*|art\.\s*5|art\.\s*24q|art\.\s*24r", text, re.IGNORECASE)
+            or chunk.source_type == "statute"
+        )
+    return True
+
+
+def chunk_is_relevant_resolution_for_axis(axis: LegalRetrievalAxis, chunk: RagChunk) -> bool:
+    if str(chunk.source_type or "").lower() not in {"interpretation", "judgment"}:
+        return False
+    if not chunk_matches_axis_domain(axis, chunk):
+        return False
+    role = classify_chunk_evidence_role(chunk)
+    return role in {"authority_assessment", "operative_conclusion", "reasoning", "supporting_source"}
+
+
+def chunk_is_axis_misleading_neighbor(axis: LegalRetrievalAxis, chunk: RagChunk) -> bool:
+    text = normalize_whitespace(" ".join([chunk.subject or "", chunk.chunk_text[:1800]])).lower()
+    if axis.axis_id == "wht_interest":
+        return bool(re.search(r"zarządz|zarzadz|doradcz|księgow|ksiegow", text)) and not re.search(r"odset", text)
+    if axis.axis_id == "wht_management_services":
+        return bool(re.search(r"odset", text)) and not re.search(r"zarządz|zarzadz|doradcz|księgow|ksiegow", text)
+    if axis.axis_id == "estonian_cit_loan_principal":
+        return bool(re.search(r"odset", text)) and not re.search(r"kapitał|kapital|wkład|wklad|przekształc", text)
+    if axis.axis_id == "estonian_cit_interest":
+        return bool(re.search(r"zwrot kapitał|zwrot kapital|wkład|wklad", text)) and not re.search(r"odset", text)
+    if axis.axis_id == "ksef_scope_and_buyer_capacity":
+        return bool(re.search(r"odliczeni|korekt", text)) and not re.search(r"b2b|b2c|konsument|nabywca|106ga|106gb", text)
+    if axis.axis_id == "family_foundation_allowed_activity_catalog":
+        return bool(re.search(r"ukryte zyski|świadczeni", text)) and not re.search(r"art\.\s*5|dozwolon", text)
+    return False
+
+
+def axis_coverage_to_dict(coverage: AxisCoverage) -> dict[str, Any]:
+    return {
+        "axis_id": coverage.axis_id,
+        "label": coverage.label,
+        "controlling_rule_present": coverage.controlling_rule_present,
+        "current_law_source_present": coverage.current_law_source_present,
+        "relevant_resolution_present": coverage.relevant_resolution_present,
+        "primary_source_present": coverage.primary_source_present,
+        "required_treaty_present": coverage.required_treaty_present,
+        "missing_source_types": coverage.missing_source_types,
+        "misleading_neighbor_present": coverage.misleading_neighbor_present,
+        "coverage_score": coverage.coverage_score,
+        "status": coverage.status,
+        "supporting_source_ids": coverage.supporting_source_ids,
+    }
+
+
+def build_axis_coverage(query: str, chunks: list[RagChunk]) -> list[AxisCoverage]:
+    axes = decompose_query_into_legal_axes(query)
+    if not axes:
+        return []
+
+    coverages: list[AxisCoverage] = []
+    for axis in axes:
+        requirement = build_source_requirement_for_axis(axis)
+        matching_chunks = [chunk for chunk in chunks if chunk_matches_axis(axis, chunk)]
+        primary_chunks = [chunk for chunk in matching_chunks if is_primary_source_chunk(chunk)]
+        current_law_chunks = [chunk for chunk in primary_chunks if chunk_is_current_law_for_axis(axis, chunk)]
+        controlling_chunks = [
+            chunk for chunk in matching_chunks
+            if chunk_is_direct_axis_source(axis, chunk) or chunk_has_axis_preferred_target(axis, chunk)
+        ]
+        resolution_chunks = [chunk for chunk in matching_chunks if chunk_is_relevant_resolution_for_axis(axis, chunk)]
+
+        required_treaty_present: Optional[bool] = None
+        if requirement.treaty_required:
+            required_treaty_present = any(
+                chunk.subject.lower().startswith("upo polska")
+                or "tax_treaty" in str(chunk.source_subtype or "").lower()
+                for chunk in matching_chunks
+            )
+
+        missing_source_types: list[str] = []
+        if requirement.controlling_rule_required and not controlling_chunks:
+            missing_source_types.append("controlling_rule")
+        if requirement.current_law_required and not current_law_chunks:
+            missing_source_types.append("current_law_source")
+        if requirement.mandatory_primary_sources and not primary_chunks:
+            missing_source_types.extend(requirement.mandatory_primary_sources)
+        if requirement.treaty_required and not required_treaty_present:
+            missing_source_types.append("tax_treaty_text")
+
+        misleading_neighbor_present = any(chunk_is_axis_misleading_neighbor(axis, chunk) for chunk in matching_chunks)
+        primary_source_present = bool(primary_chunks)
+        controlling_rule_present = bool(controlling_chunks)
+        current_law_source_present = bool(current_law_chunks)
+        relevant_resolution_present = bool(resolution_chunks)
+
+        score = 0.0
+        score += 0.35 if primary_source_present else 0.0
+        score += 0.35 if controlling_rule_present else 0.0
+        score += 0.20 if current_law_source_present else 0.0
+        score += 0.10 if (required_treaty_present is not False) else 0.0
+        if misleading_neighbor_present and not controlling_rule_present:
+            score = max(0.0, score - 0.25)
+        score = round(min(score, 1.0), 2)
+
+        if (
+            score >= 0.80
+            and primary_source_present
+            and controlling_rule_present
+            and current_law_source_present
+            and required_treaty_present is not False
+            and not (misleading_neighbor_present and not controlling_rule_present)
+        ):
+            status = "covered"
+        elif score >= 0.45 and primary_source_present:
+            status = "partially_covered"
+        else:
+            status = "unresolved"
+
+        supporting_source_ids = list(
+            dict.fromkeys(chunk_canonical_source_id(chunk) for chunk in [*controlling_chunks, *current_law_chunks, *resolution_chunks])
+        )[:8]
+        coverages.append(
+            AxisCoverage(
+                axis_id=axis.axis_id,
+                label=axis.label,
+                controlling_rule_present=controlling_rule_present,
+                current_law_source_present=current_law_source_present,
+                relevant_resolution_present=relevant_resolution_present,
+                primary_source_present=primary_source_present,
+                required_treaty_present=required_treaty_present,
+                missing_source_types=list(dict.fromkeys(missing_source_types)),
+                misleading_neighbor_present=misleading_neighbor_present,
+                coverage_score=score,
+                status=status,
+                supporting_source_ids=supporting_source_ids,
+            )
+        )
+    return coverages
+
+
+def build_axis_coverage_context(query: str, chunks: list[RagChunk]) -> str:
+    coverages = build_axis_coverage(query, chunks)
+    if not coverages:
+        return ""
+
+    lines = [
+        "Bramka pokrycia per oś prawna:",
+        "Reguła twarda: dla osi ze statusem unresolved nie wolno formułować materialnego rozstrzygnięcia; wolno wskazać tylko brakujące źródło lub fakt.",
+        "Reguła twarda: stawki, limity, terminy, numery artykułów i skutki podatkowe wymagają controlling source w tej samej osi.",
+    ]
+    for coverage in coverages:
+        treaty_value = "n/d" if coverage.required_treaty_present is None else str(coverage.required_treaty_present).lower()
+        missing = ", ".join(coverage.missing_source_types) if coverage.missing_source_types else "brak"
+        sources = ", ".join(coverage.supporting_source_ids) if coverage.supporting_source_ids else "brak"
+        lines.append(
+            "- "
+            f"{coverage.axis_id} | {coverage.status} | score={coverage.coverage_score:.2f} | "
+            f"primary={str(coverage.primary_source_present).lower()} | "
+            f"controlling={str(coverage.controlling_rule_present).lower()} | "
+            f"current={str(coverage.current_law_source_present).lower()} | "
+            f"treaty={treaty_value} | "
+            f"misleading_neighbor={str(coverage.misleading_neighbor_present).lower()} | "
+            f"missing={missing} | sources={sources}"
+        )
+    return "\n".join(lines)
+
+
+def processed_record_to_rag_chunk(
+    record: dict[str, Any],
+    *,
+    chunk_index: int = 0,
+    score: float = 100.0,
+    chunk_id_suffix: str = "source-fallback",
+) -> Optional[RagChunk]:
+    document_id = str(record.get("document_id") or "").strip()
+    if not document_id:
+        return None
+    text = clean_document_text(record)
+    if not text:
+        return None
+    source_type = normalize_source_type(record)
+    return RagChunk(
+        chunk_id=f"{document_id}:{chunk_id_suffix}:{chunk_index}",
+        document_id=document_id,
+        chunk_index=chunk_index,
+        score=score,
+        chunk_text=text,
+        subject=normalize_whitespace(str(record.get("subject") or "Bez tytułu")) or "Bez tytułu",
+        signature=normalize_whitespace(str(record.get("signature") or "")) or None,
+        published_date=normalize_whitespace(str(record.get("published_date") or "")) or None,
+        source_url=normalize_whitespace(str(record.get("source_url") or "")) or None,
+        category=normalize_whitespace(str(record.get("category") or "")) or None,
+        source=normalize_whitespace(str(record.get("source") or "")),
+        source_type=source_type,
+        source_subtype=derive_source_subtype(record) or None,
+        authority=normalize_whitespace(str(record.get("authority") or "")) or None,
+        publication=normalize_whitespace(str(record.get("publication") or "")) or None,
+        legal_state_date=normalize_whitespace(str(record.get("legal_state_date") or "")) or None,
+        source_pages=[int(page) for page in record.get("source_pages") or [] if str(page).isdigit()],
+        legal_provisions=[
+            str(value).strip() for value in record.get("legal_provisions") or [] if str(value).strip()
+        ],
+        evidence_role="primary_source_fallback" if source_type == "statute" else "",
+    )
+
+
+def load_processed_document_chunks_by_ids(
+    document_ids: list[str] | tuple[str, ...],
+    *,
+    source_paths: Optional[Iterable[Path]] = None,
+    chunk_limit_per_document: int = 1,
+) -> list[RagChunk]:
+    wanted = {str(document_id).strip() for document_id in document_ids if str(document_id).strip()}
+    if not wanted:
+        return []
+
+    configured_paths = tuple(source_paths) if source_paths is not None else get_rag_config().additional_source_paths
+    chunks: list[RagChunk] = []
+    counts: dict[str, int] = {}
+    for path in configured_paths:
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    document_id = str(record.get("document_id") or "").strip()
+                    if document_id not in wanted:
+                        continue
+                    if counts.get(document_id, 0) >= chunk_limit_per_document:
+                        continue
+                    chunk = processed_record_to_rag_chunk(
+                        record,
+                        chunk_index=counts.get(document_id, 0),
+                        chunk_id_suffix="source-fallback",
+                    )
+                    if chunk is None:
+                        continue
+                    chunks.append(chunk)
+                    counts[document_id] = counts.get(document_id, 0) + 1
+                    if wanted.issubset({chunk.document_id for chunk in chunks}):
+                        return chunks
+        except OSError:
+            continue
+    return chunks
+
+
+def load_processed_statute_chunks_by_targets(
+    targets: list[tuple[str, str]] | tuple[tuple[str, str], ...],
+    *,
+    source_paths: Optional[Iterable[Path]] = None,
+    chunk_limit_per_target: int = 1,
+) -> list[RagChunk]:
+    wanted = {(domain.upper(), article_key.lower()) for domain, article_key in targets if domain and article_key}
+    if not wanted:
+        return []
+
+    configured_paths = tuple(source_paths) if source_paths is not None else get_rag_config().additional_source_paths
+    chunks: list[RagChunk] = []
+    counts: dict[tuple[str, str], int] = {}
+    for path in configured_paths:
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if normalize_source_type(record) != "statute":
+                        continue
+                    domain = derive_tax_domain(record).upper()
+                    if not domain:
+                        continue
+                    matched_targets = []
+                    for value in record.get("legal_provisions") or []:
+                        article_key = extract_article_key_from_text(str(value))
+                        if article_key and (domain, article_key) in wanted:
+                            matched_targets.append((domain, article_key))
+                    if not matched_targets:
+                        continue
+                    if all(counts.get(target, 0) >= chunk_limit_per_target for target in matched_targets):
+                        continue
+                    chunk = processed_record_to_rag_chunk(record, chunk_id_suffix="target-fallback")
+                    if chunk is None:
+                        continue
+                    chunks.append(chunk)
+                    for target in matched_targets:
+                        counts[target] = counts.get(target, 0) + 1
+                    if all(counts.get(target, 0) >= chunk_limit_per_target for target in wanted):
+                        return chunks
+        except OSError:
+            continue
+    return chunks
+
+
+def load_processed_statute_chunks_by_subject_prefix(
+    subject_prefix: str,
+    *,
+    targets: list[tuple[str, str]] | tuple[tuple[str, str], ...] = (),
+    source_paths: Optional[Iterable[Path]] = None,
+    chunk_limit: int = 6,
+) -> list[RagChunk]:
+    prefix = normalize_whitespace(subject_prefix).lower()
+    if not prefix:
+        return []
+    wanted_articles = {article_key.lower() for _domain, article_key in targets if article_key}
+    configured_paths = tuple(source_paths) if source_paths is not None else get_rag_config().additional_source_paths
+    chunks: list[RagChunk] = []
+    for path in configured_paths:
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if normalize_source_type(record) != "statute":
+                        continue
+                    subject = normalize_whitespace(str(record.get("subject") or "")).lower()
+                    if not subject.startswith(prefix):
+                        continue
+                    if wanted_articles:
+                        article_keys = {
+                            extract_article_key_from_text(str(value))
+                            for value in record.get("legal_provisions") or []
+                        }
+                        if not (article_keys & wanted_articles):
+                            continue
+                    chunk = processed_record_to_rag_chunk(record, chunk_id_suffix="subject-fallback")
+                    if chunk is None:
+                        continue
+                    chunks.append(chunk)
+                    if len(chunks) >= chunk_limit:
+                        return chunks
+        except OSError:
+            continue
+    return chunks
+
+
+def add_primary_source_fallback_chunks(query: str, chunks: list[RagChunk]) -> list[RagChunk]:
+    required_document_ids: list[str] = []
+    if query_targets_ksef_current_law(query):
+        required_document_ids.extend(KSEF_CURRENT_BUNDLE_DOCUMENT_IDS)
+    if query_targets_family_foundation_mechanism(query):
+        required_document_ids.extend(FAMILY_FOUNDATION_PRIMARY_BUNDLE_DOCUMENT_IDS)
+
+    required_fallback_chunks: list[RagChunk] = []
+    if required_document_ids:
+        existing_document_ids = {str(chunk.document_id or "") for chunk in chunks}
+        missing_document_ids = [
+            document_id
+            for document_id in dict.fromkeys(required_document_ids)
+            if document_id not in existing_document_ids
+        ]
+        fallback_chunks = load_processed_document_chunks_by_ids(missing_document_ids, chunk_limit_per_document=1)
+        if fallback_chunks:
+            seen_chunk_ids = {chunk.chunk_id for chunk in chunks}
+            for chunk in fallback_chunks:
+                if chunk.chunk_id in seen_chunk_ids:
+                    continue
+                seen_chunk_ids.add(chunk.chunk_id)
+                required_fallback_chunks.append(chunk)
+
+    target_fallback_chunks_by_axis: list[list[RagChunk]] = []
+    for axis in decompose_query_into_legal_axes(query):
+        if not axis.preferred_targets or (axis.source_types and "statute" not in axis.source_types):
+            continue
+        current_chunks = [*required_fallback_chunks, *chunks]
+        if axis.direct_subject_prefix:
+            axis_fallback_chunks = load_processed_statute_chunks_by_subject_prefix(
+                axis.direct_subject_prefix,
+                targets=axis.preferred_targets,
+                chunk_limit=max(4, len(axis.preferred_targets)),
+            )
+            if axis_fallback_chunks:
+                target_fallback_chunks_by_axis.append(axis_fallback_chunks)
+            continue
+        missing_targets = [
+            target
+            for target in axis.preferred_targets
+            if not any(
+                chunk_has_axis_preferred_target(
+                    replace(axis, source_types={"statute"}, preferred_targets=(target,)),
+                    chunk,
+                )
+                for chunk in current_chunks
+            )
+        ]
+        if missing_targets:
+            axis_fallback_chunks = load_processed_statute_chunks_by_targets(
+                missing_targets,
+                chunk_limit_per_target=1,
+            )
+            if axis_fallback_chunks:
+                target_fallback_chunks_by_axis.append(axis_fallback_chunks)
+
+    target_fallback_chunks: list[RagChunk] = []
+    if target_fallback_chunks_by_axis:
+        max_axis_chunks = max(len(axis_chunks) for axis_chunks in target_fallback_chunks_by_axis)
+        for position in range(max_axis_chunks):
+            for axis_chunks in target_fallback_chunks_by_axis:
+                if position < len(axis_chunks):
+                    target_fallback_chunks.append(axis_chunks[position])
+    if not target_fallback_chunks:
+        return [*required_fallback_chunks, *chunks]
+    seen_chunk_ids = {chunk.chunk_id for chunk in [*required_fallback_chunks, *chunks]}
+    deduped_target_fallback_chunks: list[RagChunk] = []
+    for chunk in target_fallback_chunks:
+        if chunk.chunk_id in seen_chunk_ids:
+            continue
+        seen_chunk_ids.add(chunk.chunk_id)
+        deduped_target_fallback_chunks.append(chunk)
+    return [*required_fallback_chunks, *deduped_target_fallback_chunks, *chunks]
 
 
 def _search_chunks_single_query(

@@ -37,7 +37,10 @@ from app.billing import (
 from app.eureka_ingest import DEFAULT_CONCURRENCY, DEFAULT_PAGE_SIZE, DEFAULT_SORT, FetchConfig, run_ingest
 from app.rag import (
     RagChunk,
+    add_primary_source_fallback_chunks,
     build_answer_context_block,
+    build_axis_coverage,
+    build_axis_coverage_context,
     build_context_block,
     detect_domains,
     detect_mechanisms,
@@ -402,6 +405,8 @@ class RagSearchHit(BaseModel):
     signature: Optional[str]
     published_date: Optional[str]
     source_url: Optional[str]
+    canonical_source_id: Optional[str] = None
+    evidence_role: Optional[str] = None
     category: Optional[str]
     source: str
     source_type: str
@@ -425,6 +430,7 @@ class RagSearchResponse(BaseModel):
     selected_context_chars: int
     citations: str
     context_block: str
+    axis_coverage: list[dict[str, object]] = Field(default_factory=list)
     hits: list[RagSearchHit]
 
 
@@ -1286,6 +1292,9 @@ def build_chat_system_prompt(
         "\n\nDodatkowa ocena jakości pokrycia retrievalu:\n"
         + retrieval_coverage_context
         + "\nTa ocena ma pierwszeństwo nad pokusą dopowiadania brakującego obrazu z pamięci modelu."
+        + " Status osi jest bramką odpowiedzi: dla osi unresolved nie podawaj skutku podatkowego,"
+        + " stawki, limitu, terminu ani numeru przepisu jako konkluzji. Dla osi partially_covered"
+        + " oddziel to, co wynika z primary source, od tego, czego nie potwierdzono."
     ) if retrieval_coverage_context else ""
 
     return (
@@ -2020,6 +2029,7 @@ async def chat(
         include_interpretations=(request.retrieval_preferences.include_interpretations if request.retrieval_preferences else True),
         include_judgments=(request.retrieval_preferences.include_judgments if request.retrieval_preferences else None),
     )
+    retrieved_chunks = add_primary_source_fallback_chunks(effective_user_prompt, retrieved_chunks)
     if query_mentions_ksef(effective_user_prompt):
         has_current_ksef_source = any(
             "Dz.U. 2025 poz. 1203" in " ".join(
@@ -2067,7 +2077,14 @@ async def chat(
         )
 
     retrieved_context = build_answer_context_block(retrieved_chunks)
-    retrieval_coverage_context = build_retrieval_coverage_context(effective_user_prompt, retrieved_chunks)
+    retrieval_coverage_context = "\n\n".join(
+        part
+        for part in [
+            build_retrieval_coverage_context(effective_user_prompt, retrieved_chunks),
+            build_axis_coverage_context(effective_user_prompt, retrieved_chunks),
+        ]
+        if part
+    )
     system_prompt = build_chat_system_prompt(
         latest_user_message,
         retrieved_context,
@@ -2161,6 +2178,25 @@ def rag_search(request: RagSearchRequest) -> RagSearchResponse:
     source_types = set(request.source_types or []) or None
     inspection = inspect_search(request.query, limit=request.limit, source_types=source_types)
     chunks = search_chunks(request.query, limit=request.limit, source_types=source_types)
+    if source_types is None or "statute" in source_types:
+        chunks = add_primary_source_fallback_chunks(request.query, chunks)
+    axis_coverage = [
+        {
+            "axis_id": item.axis_id,
+            "label": item.label,
+            "controlling_rule_present": item.controlling_rule_present,
+            "current_law_source_present": item.current_law_source_present,
+            "relevant_resolution_present": item.relevant_resolution_present,
+            "primary_source_present": item.primary_source_present,
+            "required_treaty_present": item.required_treaty_present,
+            "missing_source_types": item.missing_source_types,
+            "misleading_neighbor_present": item.misleading_neighbor_present,
+            "coverage_score": item.coverage_score,
+            "status": item.status,
+            "supporting_source_ids": item.supporting_source_ids,
+        }
+        for item in build_axis_coverage(request.query, chunks)
+    ]
     return RagSearchResponse(
         query=inspection.query,
         match_query=inspection.match_query,
@@ -2170,6 +2206,7 @@ def rag_search(request: RagSearchRequest) -> RagSearchResponse:
         selected_context_chars=inspection.selected_context_chars,
         citations=list_citations(chunks),
         context_block=build_answer_context_block(chunks),
+        axis_coverage=axis_coverage,
         hits=[RagSearchHit(**hit) for hit in inspection.hits],
     )
 

@@ -82,7 +82,7 @@ Ważne założenie MVP:
 2. Ustaw backendowe sekrety w `apps/api/.env`:
    - `SUPABASE_URL`
    - `SUPABASE_SECRET_KEY`
-   - opcjonalnie `ALITIGATOR_ADMIN_EMAILS=admin@twojadomena.pl`
+   - opcjonalnie `ALITIGATOR_ADMIN_EMAILS=admin@twojadomena.pl` jako jednorazowy bootstrap `profiles.is_admin`
    - `STRIPE_SECRET_KEY`
    - `STRIPE_WEBHOOK_SECRET`
    - `ALITIGATOR_STRIPE_SUCCESS_URL`
@@ -90,7 +90,6 @@ Ważne założenie MVP:
 3. Ustaw frontend:
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_PUBLISHABLE_KEY`
-   - opcjonalnie `VITE_ALITIGATOR_ADMIN_EMAILS=admin@twojadomena.pl`
 4. Ustaw cenę kredytów:
    - `ALITIGATOR_CREDIT_UNIT_PRICE_GROSS` (domyślnie `200`, czyli 2,00 zł za 1 kredyt)
    - `ALITIGATOR_CREDIT_CURRENCY` (domyślnie `pln`)
@@ -103,10 +102,18 @@ Stripe webhook powinien wskazywać na:
 
 Ręczne granty kredytów:
 
-- backend traktuje użytkownika jako admina, jeśli jego e-mail jest na liście `ALITIGATOR_ADMIN_EMAILS`
-- frontend może pokazywać panel admina dla tych samych adresów przez `VITE_ALITIGATOR_ADMIN_EMAILS`
+- źródłem prawdy o adminie jest `public.profiles.is_admin`
+- `ALITIGATOR_ADMIN_EMAILS` można zostawić tymczasowo do zbootstrapowania istniejących adminów do `profiles.is_admin = true`
 - admin może przyznać kredyty bez Stripe przez `POST /api/admin/credits/grant`
 - w UI pojawia się wtedy prosty formularz do dopisywania kredytów po e-mailu użytkownika
+
+Przyznanie admina bezpośrednio w Supabase:
+
+```sql
+update public.profiles
+set is_admin = true
+where email = 'stanislawwadolowski123@gmail.com';
+```
 
 ### Lokalny webhook przez Stripe CLI
 

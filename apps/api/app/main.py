@@ -260,6 +260,7 @@ class ProfileResponse(BaseModel):
     email: Optional[str] = None
     full_name: Optional[str] = None
     law_firm: Optional[str] = None
+    is_admin: bool = False
     stripe_customer_id: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -330,6 +331,7 @@ class AdminUserSummary(BaseModel):
     email: Optional[str] = None
     full_name: Optional[str] = None
     law_firm: Optional[str] = None
+    is_admin: bool = False
     credit_balance: int
     created_at: Optional[str] = None
 
@@ -1613,6 +1615,12 @@ def list_models() -> ModelsResponse:
 
 def build_account_response(user: AuthenticatedUser) -> AccountResponse:
     profile_row = ensure_profile(user)
+    resolved_is_admin = is_admin_user(user)
+    if resolved_is_admin and not profile_row.get("is_admin"):
+        profile_row = {
+            **profile_row,
+            "is_admin": True,
+        }
     billing_available = True
 
     try:
@@ -1628,7 +1636,7 @@ def build_account_response(user: AuthenticatedUser) -> AccountResponse:
         user_id=user.id,
         email=user.email,
         profile=ProfileResponse(**profile_row),
-        is_admin=is_admin_user(user),
+        is_admin=resolved_is_admin,
         credit_balance=credit_balance,
         credit_cost_per_query=get_credit_cost_per_query(),
         credit_unit_price_gross=get_credit_unit_price_gross(),
@@ -1742,6 +1750,7 @@ def list_admin_users(
             email=profile.get("email"),
             full_name=profile.get("full_name"),
             law_firm=profile.get("law_firm"),
+            is_admin=bool(profile.get("is_admin")),
             credit_balance=int(profile.get("credit_balance") or 0),
             created_at=profile.get("created_at"),
         )

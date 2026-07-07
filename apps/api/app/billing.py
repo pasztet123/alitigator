@@ -480,6 +480,7 @@ def list_profiles_with_credit_balances() -> list[dict[str, Any]]:
                 "id": user_id,
                 "email": profile.get("email") or auth_user.get("email"),
                 "full_name": profile.get("full_name") or metadata.get("full_name"),
+                "is_admin": bool(profile.get("is_admin")),
                 "created_at": profile.get("created_at") or auth_user.get("created_at"),
                 "credit_balance": balances.get(user_id, 0),
             }
@@ -492,6 +493,7 @@ def list_profiles_with_credit_balances() -> list[dict[str, Any]]:
         result.append(
             {
                 **profile,
+                "is_admin": bool(profile.get("is_admin")),
                 "credit_balance": balances.get(user_id, 0),
             }
         )

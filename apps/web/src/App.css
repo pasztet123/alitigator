@@ -671,6 +671,27 @@ select {
   color: #f4fbf4;
 }
 
+.admin-user-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.admin-user-role {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(224, 241, 210, 0.14);
+  border: 1px solid rgba(224, 241, 210, 0.12);
+  color: #eef8e5;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .admin-user-copy small,
 .admin-user-balance small {
   color: rgba(225, 236, 225, 0.76);

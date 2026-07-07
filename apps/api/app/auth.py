@@ -6,8 +6,9 @@ from typing import Optional
 
 import httpx
 from fastapi import Header, HTTPException
+from postgrest.exceptions import APIError
 
-from app.supabase_client import is_supabase_configured
+from app.supabase_client import get_supabase_service_client, is_supabase_configured
 
 
 @dataclass(frozen=True)
@@ -18,13 +19,45 @@ class AuthenticatedUser:
 
 
 def is_admin_user(user: AuthenticatedUser) -> bool:
-    configured = os.getenv("ALITIGATOR_ADMIN_EMAILS", "")
-    allowed_emails = {
+    client = get_supabase_service_client()
+    if client is None:
+        return False
+
+    configured = {
         email.strip().lower()
-        for email in configured.split(",")
+        for email in str(os.getenv("ALITIGATOR_ADMIN_EMAILS") or "").split(",")
         if email.strip()
     }
-    return bool(user.email and user.email.strip().lower() in allowed_emails)
+    should_seed_admin = bool(user.email and user.email.strip().lower() in configured)
+
+    try:
+        response = client.table("profiles").select("is_admin").eq("id", user.id).limit(1).execute()
+    except APIError:
+        return False
+
+    rows = response.data or []
+    if rows:
+        if rows[0].get("is_admin"):
+            return True
+        if not should_seed_admin:
+            return False
+    elif not should_seed_admin:
+        return False
+
+    try:
+        seeded = client.table("profiles").upsert(
+            {
+                "id": user.id,
+                "email": user.email,
+                "full_name": user.full_name,
+                "is_admin": True,
+            }
+        ).execute()
+    except APIError:
+        return False
+
+    seeded_rows = seeded.data or []
+    return bool(seeded_rows and seeded_rows[0].get("is_admin"))
 
 
 def _extract_bearer_token(authorization: Optional[str]) -> str:

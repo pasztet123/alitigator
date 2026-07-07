@@ -15,6 +15,7 @@ create table if not exists public.profiles (
     email text,
     full_name text,
     law_firm text,
+    is_admin boolean not null default false,
     stripe_customer_id text unique,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
@@ -137,6 +138,7 @@ alter table if exists public.chat_threads add column if not exists archived bool
 alter table if exists public.chat_threads add column if not exists last_message_preview text not null default '';
 alter table if exists public.chat_threads add column if not exists created_at timestamptz not null default now();
 alter table if exists public.chat_threads add column if not exists updated_at timestamptz not null default now();
+alter table if exists public.profiles add column if not exists is_admin boolean not null default false;
 
 create index if not exists chat_threads_user_id_updated_at_idx
 on public.chat_threads(user_id, updated_at desc);
@@ -146,6 +148,8 @@ create index if not exists chat_threads_archived_updated_at_idx
 on public.chat_threads(archived, updated_at desc);
 create index if not exists chat_messages_chat_id_created_at_idx
 on public.chat_messages(chat_id, created_at asc);
+create index if not exists profiles_is_admin_email_idx
+on public.profiles(is_admin, email);
 
 alter table if exists public.profiles enable row level security;
 alter table if exists public.credit_ledger enable row level security;

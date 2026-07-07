@@ -115,6 +115,7 @@ type Profile = {
   email?: string | null
   full_name?: string | null
   law_firm?: string | null
+  is_admin?: boolean
   stripe_customer_id?: string | null
   created_at?: string | null
   updated_at?: string | null
@@ -154,6 +155,7 @@ type AdminUserSummary = {
   email?: string | null
   full_name?: string | null
   law_firm?: string | null
+  is_admin: boolean
   credit_balance: number
   created_at?: string | null
 }
@@ -189,18 +191,6 @@ const modelLabels: Record<string, string> = {
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
-const DEFAULT_ADMIN_EMAILS = ['stanislawwadolowski123@gmail.com']
-const ADMIN_EMAILS = new Set(
-  String(
-    import.meta.env.VITE_ALITIGATOR_ADMIN_EMAILS
-    ?? import.meta.env.NEXT_PUBLIC_ALITIGATOR_ADMIN_EMAILS
-    ?? '',
-  )
-    .split(',')
-    .map((email) => email.trim().toLowerCase())
-    .filter(Boolean),
-)
-DEFAULT_ADMIN_EMAILS.forEach((email) => ADMIN_EMAILS.add(email))
 const LOCAL_THREAD_PREFIX = 'local-thread-'
 const HINT_DEBOUNCE_MS = 900
 const MIN_DRAFT_LENGTH_FOR_HINTS = 24
@@ -695,10 +685,6 @@ function App() {
     }
   }, [draft, isSending, messages.length, selectedChatId])
 
-  const isConfiguredAdminEmail = Boolean(
-    session?.user.email && ADMIN_EMAILS.has(session.user.email.trim().toLowerCase()),
-  )
-
   async function refreshAdminUsers(activeSession: Session) {
     setAdminUsersError('')
     const response = await apiFetch('/api/admin/users', activeSession)
@@ -918,7 +904,7 @@ function App() {
           await reconcileCheckoutReturn(activeSession)
         }
 
-        if (accountPayload.is_admin || isConfiguredAdminEmail) {
+        if (accountPayload.is_admin) {
           setIsAdminUsersLoading(true)
           try {
             await refreshAdminUsers(activeSession)
@@ -1659,7 +1645,7 @@ function App() {
   const creditCurrency = account?.credit_currency ?? 'pln'
   const normalizedCheckoutCreditAmount = Math.max(1, Math.min(100000, Number.parseInt(checkoutCreditAmount, 10) || 1))
   const checkoutTotalGross = normalizedCheckoutCreditAmount * creditUnitPriceGross
-  const isAdminUser = Boolean(account?.is_admin || isConfiguredAdminEmail)
+  const isAdminUser = Boolean(account?.is_admin)
 
   if (!isSupabaseConfigured) {
     return (
@@ -2268,7 +2254,10 @@ function App() {
                   {adminUsers.map((user) => (
                     <article key={user.user_id} className="admin-user-card">
                       <div className="admin-user-copy">
-                        <strong>{user.full_name || user.email || user.user_id}</strong>
+                        <div className="admin-user-heading">
+                          <strong>{user.full_name || user.email || user.user_id}</strong>
+                          {user.is_admin ? <span className="admin-user-role">Admin</span> : null}
+                        </div>
                         <small>{user.email || 'Brak e-maila'}</small>
                         <small>{user.law_firm || 'Bez kancelarii'}</small>
                       </div>

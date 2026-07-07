@@ -80,7 +80,17 @@ AVAILABLE_MODELS = [
 ]
 HINTS_MODEL = os.getenv("ANTHROPIC_HINTS_MODEL", "claude-haiku-4-5-20251001")
 CHAT_MAX_TOKENS = max(1024, int(os.getenv("ANTHROPIC_CHAT_MAX_TOKENS", "6000")))
-ANTHROPIC_CHAT_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ANTHROPIC_CHAT_TIMEOUT_SECONDS", "180")))
+PUBLIC_HTTP_RESPONSE_DEADLINE_SECONDS = max(
+    20.0,
+    float(os.getenv("ALITIGATOR_PUBLIC_HTTP_RESPONSE_DEADLINE_SECONDS", "55")),
+)
+ANTHROPIC_CHAT_TIMEOUT_SECONDS = max(
+    15.0,
+    min(
+        float(os.getenv("ANTHROPIC_CHAT_TIMEOUT_SECONDS", "50")),
+        PUBLIC_HTTP_RESPONSE_DEADLINE_SECONDS - 5.0,
+    ),
+)
 
 SYSTEM_PROMPT = """
 Jesteś asystentem aLitigator dla polskich prawników podatkowych.
@@ -442,7 +452,7 @@ class RagSearchResponse(BaseModel):
     hits: list[RagSearchHit]
 
 
-app = FastAPI(title="aLitigator API", version="0.8.0")
+app = FastAPI(title="aLitigator API", version="0.8.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

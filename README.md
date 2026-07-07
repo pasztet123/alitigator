@@ -48,6 +48,14 @@ Ta wersja zawiera:
 - podstawowe maskowanie danych wrażliwych
 - RAG lokalny i opcjonalny storage w Supabase
 
+## Wersjonowanie
+
+Przyjmujemy prostą zasadę numeracji wersji:
+
+- małe zmiany podbijają wersję o `0.0.1`
+- większe zmiany podbijają wersję o `0.1.0`
+- major update podbija wersję o `1.0.0`
+
 ## Konta, kredyty i Stripe
 
 Nowy schemat pod konta i billing znajduje się w:

@@ -452,7 +452,7 @@ class RagSearchResponse(BaseModel):
     hits: list[RagSearchHit]
 
 
-app = FastAPI(title="aLitigator API", version="0.8.1")
+app = FastAPI(title="aLitigator API", version="0.8.3")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

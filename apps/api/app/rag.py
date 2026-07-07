@@ -2285,7 +2285,11 @@ def query_targets_family_foundation_mechanism(query: str) -> bool:
     normalized = normalize_whitespace(query or "").lower()
     has_foundation = bool(re.search(r"\b(fundacj\w*\s+rodzinn\w*|ufr\b|beneficjent\w*)\b", normalized))
     has_activity = bool(
-        re.search(r"\b(najem\w*|wynaj\w*|sprzeda\w*|zbyc\w*|świadczen\w*|swiadczen\w*|lokal\w*|nieruchomo\w*|turyst\w*)\b", normalized)
+        re.search(
+            r"\b(najem\w*|wynaj\w*|sprzeda\w*|zbyc\w*|pożycz\w*|pozycz\w*|spółk\w*|spolk\w*|"
+            r"udział\w*|udzial\w*|akcj\w*|świadczen\w*|swiadczen\w*|lokal\w*|nieruchomo\w*|turyst\w*)\b",
+            normalized,
+        )
     )
     return has_foundation and has_activity
 
@@ -3083,7 +3087,7 @@ def query_targets_poland_germany_treaty(query: str) -> bool:
         re.search(
             r"\b(upo|umow\w* o unikaniu podwójnego opodatkowania|"
             r"rezydent\w*|rezydencj\w*|zakład\w*|zaklad\w*|"
-            r"dywidend\w*|odsetk\w*|należno\w* licencyjn\w*|nalezn\w* licencyjn\w*|"
+            r"dywidend\w*|odset(?:k|ek|e?k)\w*|należno\w* licencyjn\w*|nalezn\w* licencyjn\w*|"
             r"beneficial owner|rzeczywist\w* właściciel\w*|"
             r"double taxation|tax treaty|mli)\b",
             normalized,
@@ -3160,7 +3164,7 @@ def build_poland_germany_treaty_statute_targets(query: str) -> list[tuple[str, s
     normalized = normalize_whitespace(query or "").lower()
     if re.search(r"\b(dywidend\w*|dividend\w*|udział\w*)\b", normalized):
         preferred_targets: list[tuple[str, str]] = [("CIT", "10"), ("CIT", "26"), ("CIT", "7"), ("CIT", "23"), ("CIT", "4")]
-    elif re.search(r"\b(odsetk\w*|interest\w*)\b", normalized):
+    elif re.search(r"\b(odset(?:k|ek|e?k)\w*|interest\w*)\b", normalized):
         preferred_targets = [("CIT", "11"), ("CIT", "26"), ("CIT", "7"), ("CIT", "23"), ("CIT", "4")]
     elif re.search(r"\b(należno\w* licencyjn\w*|nalezn\w* licencyjn\w*|royalt(?:y|ies))\b", normalized):
         preferred_targets = [("CIT", "12"), ("CIT", "26"), ("CIT", "7"), ("CIT", "23"), ("CIT", "4")]
@@ -5981,6 +5985,40 @@ def decompose_query_into_legal_axes(query: str) -> list[LegalRetrievalAxis]:
             ]
         )
 
+    if query_targets_spolka_komandytowa_cit_status(query):
+        axes.append(
+            LegalRetrievalAxis(
+                axis_id="limited_partnership_current_cit_status",
+                label="spółka komandytowa: aktualny status podatnika CIT",
+                query=expand_search_query(f"{normalized} spółka komandytowa podatnik CIT aktualny stan prawny 2026 transparentność podatkowa"),
+                source_types={"statute", "interpretation"},
+                tax_domains={"CIT"},
+                preferred_targets=tuple(build_spolka_komandytowa_cit_status_statute_targets(query)),
+            )
+        )
+
+    if query_targets_private_vehicle_pit_expense(query):
+        axes.extend(
+            [
+                LegalRetrievalAxis(
+                    axis_id="pit_private_vehicle_20_percent_cost_limit",
+                    label="PIT: prywatny samochód niewprowadzony do działalności / limit 20%",
+                    query=expand_search_query(f"{normalized} PIT samochód prywatny niewprowadzony do działalności art. 23 ust. 1 pkt 46 20% wydatki eksploatacyjne"),
+                    source_types={"statute", "interpretation"},
+                    tax_domains={"PIT"},
+                    preferred_targets=tuple(build_private_vehicle_pit_expense_statute_targets(query)),
+                ),
+                LegalRetrievalAxis(
+                    axis_id="pit_business_vehicle_mixed_use_75_percent_cost_limit",
+                    label="PIT: samochód firmowy używany mieszanie / limit 75%",
+                    query=expand_search_query(f"{normalized} PIT samochód środek trwały używany prywatnie art. 23 ust. 1 pkt 46a 75% wydatki eksploatacyjne"),
+                    source_types={"statute", "interpretation"},
+                    tax_domains={"PIT"},
+                    preferred_targets=tuple(build_private_vehicle_pit_expense_statute_targets(query)),
+                ),
+            ]
+        )
+
     if query_targets_wht_pay_and_refund_services(query) or query_targets_crossborder_treaty_analysis(query):
         axes.extend(
             [
@@ -6460,6 +6498,8 @@ def load_processed_statute_chunks_by_targets(
                         continue
                     if normalize_source_type(record) != "statute":
                         continue
+                    if str(record.get("source_subtype") or "").lower() == "tax_treaty":
+                        continue
                     domain = derive_tax_domain(record).upper()
                     if not domain:
                         continue
@@ -6496,6 +6536,7 @@ def load_processed_statute_chunks_by_subject_prefix(
     if not prefix:
         return []
     wanted_articles = {article_key.lower() for _domain, article_key in targets if article_key}
+    target_order = {article_key.lower(): index for index, (_domain, article_key) in enumerate(targets)}
     configured_paths = tuple(source_paths) if source_paths is not None else get_rag_config().additional_source_paths
     chunks: list[RagChunk] = []
     for path in configured_paths:
@@ -6526,11 +6567,20 @@ def load_processed_statute_chunks_by_subject_prefix(
                     if chunk is None:
                         continue
                     chunks.append(chunk)
-                    if len(chunks) >= chunk_limit:
-                        return chunks
         except OSError:
             continue
-    return chunks
+    if wanted_articles:
+        chunks = sorted(
+            chunks,
+            key=lambda chunk: min(
+                [
+                    target_order.get(extract_article_key_from_text(provision), len(target_order))
+                    for provision in chunk.legal_provisions
+                ]
+                or [len(target_order)]
+            ),
+        )
+    return chunks[:chunk_limit]
 
 
 def add_primary_source_fallback_chunks(query: str, chunks: list[RagChunk]) -> list[RagChunk]:
@@ -7851,6 +7901,43 @@ def build_document_context_block(chunks: list[RagChunk]) -> str:
     config = get_rag_config()
     document_ids = select_context_document_ids(chunks, limit=config.document_context_document_limit)
     documents = fetch_document_contexts(document_ids, seed_chunks=chunks)
+    existing_document_ids = {document.document_id for document in documents}
+    fallback_documents: list[RagDocumentContext] = []
+    for document_id in document_ids:
+        if document_id in existing_document_ids:
+            continue
+        document_chunks = [chunk for chunk in chunks if chunk.document_id == document_id]
+        if not document_chunks:
+            continue
+        first = document_chunks[0]
+        fallback_documents.append(
+            RagDocumentContext(
+                document_id=document_id,
+                subject=first.subject,
+                signature=first.signature,
+                published_date=first.published_date,
+                source_url=first.source_url,
+                category=first.category,
+                source=first.source,
+                source_type=first.source_type,
+                source_subtype=first.source_subtype,
+                authority=first.authority,
+                publication=first.publication,
+                legal_state_date=first.legal_state_date,
+                source_pages=first.source_pages,
+                legal_provisions=first.legal_provisions,
+                text=merge_chunk_texts_in_order(
+                    [
+                        chunk.chunk_text
+                        for chunk in sorted(document_chunks, key=lambda item: item.chunk_index)
+                    ]
+                ),
+                seed_chunk_ids=[chunk.chunk_id for chunk in document_chunks],
+            )
+        )
+    if fallback_documents:
+        by_document_id = {document.document_id: document for document in [*documents, *fallback_documents]}
+        documents = [by_document_id[document_id] for document_id in document_ids if document_id in by_document_id]
     if not documents:
         return ""
 

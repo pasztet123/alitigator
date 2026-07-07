@@ -75,7 +75,7 @@ SECTION_HEADING_RE = re.compile(
     re.IGNORECASE,
 )
 SIGNATURE_FAMILY_RE = re.compile(r"\b(KD[A-Z]{2}\d?)\b")
-ARTICLE_ID_RE = re.compile(r"\bart\.\s*(\d+)([a-z]*)\b", re.IGNORECASE)
+ARTICLE_ID_RE = re.compile(r"\bart\.?\s*(\d+)([a-z]*)\b", re.IGNORECASE)
 ARTICLE_SPLIT_SUFFIX_RE = re.compile(r"\bart\.?\s*(\d+)\s+([a-z]{1,4})\b", re.IGNORECASE)
 BARE_ARTICLE_SPLIT_SUFFIX_RE = re.compile(r"\b(\d{2,4})\s+([a-z]{1,4})\b", re.IGNORECASE)
 OFFLINE_SPLIT_RE = re.compile(r"\boffline\s+(\d{1,3})\b", re.IGNORECASE)
@@ -615,10 +615,59 @@ RANKING_STOPWORDS = {
     "wraz", "wtedy", "został", "została", "zostały", "związku",
 }
 DOMAIN_MARKERS: dict[str, tuple[str, ...]] = {
-    "vat": ("vat", "ksef", "faktur", "odliczen", "sprzedaż", "sprzedaz"),
-    "cit": ("cit", "estońsk", "estonsk", "spółk", "spolk", "holding"),
-    "pit": ("pit", "ryczałt", "ryczalt", "ulga", "rezydenc"),
-    "pcc": ("pcc", "czynności", "czynnosci", "aport", "współwłas", "wspolwlas"),
+    "vat": (
+        "vat",
+        "ksef",
+        "faktur",
+        "odliczen",
+        "sprzedaż",
+        "sprzedaz",
+        "podatku od towarów i usług",
+        "podatku od towarow i uslug",
+        "towarów i usług",
+        "towarow i uslug",
+        "ustawa o vat",
+        "ustawy o vat",
+    ),
+    "cit": (
+        "cit",
+        "estońsk",
+        "estonsk",
+        "spółk",
+        "spolk",
+        "holding",
+        "podatku dochodowym od osób prawnych",
+        "podatku dochodowym od osob prawnych",
+        "dochodowym od osób prawnych",
+        "dochodowym od osob prawnych",
+        "ustawa o cit",
+        "ustawy o cit",
+    ),
+    "pit": (
+        "pit",
+        "ryczałt",
+        "ryczalt",
+        "ulga",
+        "rezydenc",
+        "podatku dochodowym od osób fizycznych",
+        "podatku dochodowym od osob fizycznych",
+        "dochodowym od osób fizycznych",
+        "dochodowym od osob fizycznych",
+        "ustawa o pit",
+        "ustawy o pit",
+    ),
+    "pcc": (
+        "pcc",
+        "czynności cywilnoprawnych",
+        "czynnosci cywilnoprawnych",
+        "podatek od czynności cywilnoprawnych",
+        "podatek od czynnosci cywilnoprawnych",
+        "ustawa o pcc",
+        "ustawy o pcc",
+        "aport",
+        "współwłas",
+        "wspolwlas",
+    ),
     "sd": ("podatek od spadków i darowizn", "podatek od spadkow i darowizn", "sd-z2", "spadków", "spadkow", "darowizn"),
     "nieruchomości": (
         "nieruchomoś",
@@ -651,6 +700,8 @@ DOMAIN_MARKERS: dict[str, tuple[str, ...]] = {
         "rygor",
         "postępowan",
         "postepowan",
+        "ordynacja podatkowa",
+        "ordynacji podatkowej",
     ),
 }
 MECHANISM_RULES: dict[str, tuple[str, ...]] = {
@@ -4380,7 +4431,15 @@ def normalize_legal_query_refs(query: str) -> str:
     normalized = normalize_whitespace(query)
     if not normalized:
         return ""
-    normalized = ARTICLE_SPLIT_SUFFIX_RE.sub(lambda match: f"art. {match.group(1)}{match.group(2).lower()}", normalized)
+    def join_article_suffix(match: re.Match[str]) -> str:
+        suffix = match.group(2).lower()
+        if suffix in {"ust", "pkt", "lit", "par"}:
+            return match.group(0)
+        if len(suffix) == 1 or suffix in {"ga", "gb", "gc", "na", "nb", "nda", "nf", "nh", "ni"}:
+            return f"art. {match.group(1)}{suffix}"
+        return match.group(0)
+
+    normalized = ARTICLE_SPLIT_SUFFIX_RE.sub(join_article_suffix, normalized)
     normalized = BARE_ARTICLE_SPLIT_SUFFIX_RE.sub(
         lambda match: f"{match.group(1)}{match.group(2).lower()}"
         if match.group(2).lower() in {"na", "nda", "nh", "nf", "nb", "ga", "gb", "gc"}
@@ -4506,7 +4565,7 @@ def extract_statute_target_from_text(value: str) -> tuple[str, str] | None:
 def build_statute_target_order(targets: list[tuple[str, str]]) -> dict[tuple[str, str], int]:
     order: dict[tuple[str, str], int] = {}
     for position, (domain, article_key) in enumerate(targets):
-        order.setdefault((domain.upper(), article_key), position)
+        order.setdefault((domain.upper(), article_key.lower()), position)
     return order
 
 
@@ -4541,6 +4600,191 @@ def detect_procedural_article_targets(query: str) -> tuple[set[str], set[str]]:
             family_prefixes.update(families)
             exact_articles.update(exacts)
     return family_prefixes, exact_articles
+
+
+def extract_article_keys_from_query(query: str) -> list[str]:
+    normalized = normalize_legal_query_refs(query or "")
+    article_keys: list[str] = []
+    for match in ARTICLE_ID_RE.finditer(normalized):
+        key = f"{match.group(1)}{match.group(2).lower()}"
+        if key not in article_keys:
+            article_keys.append(key)
+    return article_keys
+
+
+def normalize_statute_domain(domain: str) -> str:
+    value = domain.upper()
+    if value == "OP":
+        return "ORDYNACJA"
+    if value == "EXCISE":
+        return "AKCYZA"
+    return value
+
+
+def detect_explicit_statute_domains(query: str) -> set[str]:
+    normalized = normalize_whitespace(query or "").lower()
+    domains: set[str] = set()
+    if re.search(r"\b(vat|ustaw\w* o vat|ustaw\w* vat|podatku od towar[óo]w i us[łl]ug|towar[óo]w i us[łl]ug)\b", normalized):
+        domains.add("VAT")
+    if re.search(r"\b(cit|ustaw\w* o cit|ustaw\w* cit|podatku dochodowym od os[óo]b prawnych|dochodowym od os[óo]b prawnych)\b", normalized):
+        domains.add("CIT")
+    if re.search(r"\b(pit|ustaw\w* o pit|ustaw\w* pit|podatku dochodowym od os[óo]b fizycznych|dochodowym od os[óo]b fizycznych)\b", normalized):
+        domains.add("PIT")
+    if re.search(r"\b(pcc|ustaw\w* o pcc|ustaw\w* pcc|podatku od czynno[śs]ci cywilnoprawnych|czynno[śs]ci cywilnoprawnych)\b", normalized):
+        domains.add("PCC")
+    if re.search(r"\b(ustaw\w* o podatku od spadk[óo]w i darowizn|spadk[óo]w i darowizn|sd-z2)\b", normalized):
+        domains.add("SD")
+    if re.search(r"\b(ordynacj\w* podatkow\w*|ordynacji podatkowej)\b", normalized):
+        domains.add("ORDYNACJA")
+    if re.search(r"\b(ustaw\w* akcyzow\w*|akcyz\w*)\b", normalized):
+        domains.add("AKCYZA")
+    if re.search(r"\b(podatk\w* od nieruchomo[śs]ci|ustaw\w* o podatkach i op[łl]atach lokalnych|u\.?p\.?o\.?l\.?)\b", normalized):
+        domains.add("NIERUCHOMOŚCI")
+    return domains
+
+
+def build_mechanism_statute_targets(query: str) -> list[tuple[str, str]]:
+    targets: list[tuple[str, str]] = []
+    for axis in decompose_query_into_legal_axes(query):
+        if axis.source_types and "statute" not in axis.source_types:
+            continue
+        targets.extend(axis.preferred_targets or ())
+
+    target_builders = (
+        build_ksef_current_law_statute_targets,
+        build_ksef_b2c_invoice_statute_targets,
+        build_ksef_outside_deduction_statute_targets,
+        lambda value: [("VAT", "106k")] if query_targets_ksef_correction_issue(value) else [],
+        build_vat_dropshipping_ioss_statute_targets,
+        build_private_vehicle_pit_expense_statute_targets,
+        build_spolka_komandytowa_cit_status_statute_targets,
+        build_invoice_address_error_statute_targets,
+        build_fixed_establishment_vat_statute_targets,
+        build_family_foundation_statute_targets,
+        build_wht_pay_and_refund_service_statute_targets,
+        build_wht_crossborder_payment_statute_targets,
+        build_poland_germany_treaty_statute_targets,
+        build_poland_spain_treaty_statute_targets,
+        build_debt_assumption_statute_targets,
+        build_housing_relief_temporary_rental_statute_targets,
+        build_housing_relief_loan_repayment_statute_targets,
+        build_mortgage_settlement_refund_statute_targets,
+        build_developer_land_sale_statute_targets,
+        build_post_leasing_vehicle_gift_sale_statute_targets,
+        build_leased_movable_six_year_statute_targets,
+        build_gifted_asset_cost_basis_statute_targets,
+        build_spouse_gift_sd_statute_targets,
+        build_estonian_cit_hidden_profit_statute_targets,
+        build_transformation_share_cost_statute_targets,
+        build_shareholder_company_asset_sale_statute_targets,
+    )
+    for builder in target_builders:
+        targets.extend(builder(query))
+    return list(dict.fromkeys(targets))
+
+
+def build_explicit_statute_article_targets(query: str) -> list[tuple[str, str]]:
+    article_keys = extract_article_keys_from_query(query)
+    if not article_keys:
+        return []
+
+    explicit_domains = detect_explicit_statute_domains(query)
+    domains = explicit_domains or {
+        normalize_statute_domain(domain)
+        for domain in resolve_statute_tax_domains(query)
+        if normalize_statute_domain(domain) not in {"WHT"}
+    }
+    if not domains:
+        return []
+
+    preferred_domain_order = ["VAT", "CIT", "PIT", "PCC", "SD", "ORDYNACJA", "AKCYZA", "NIERUCHOMOŚCI"]
+    ordered_domains = [domain for domain in preferred_domain_order if domain in domains]
+    ordered_domains.extend(sorted(domains - set(ordered_domains)))
+    return [(domain, article_key) for domain in ordered_domains for article_key in article_keys]
+
+
+def query_is_statute_focused(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    return bool(
+        re.search(
+            r"\b(przepis\w*|ustaw\w*|podstaw\w* prawn\w*|uregulowan\w*|reguluj\w*|"
+            r"co mówi|co wynika|przytocz|zacytuj|jak brzmi|pokaż|pokaz|podaj|treść|tresc|brzmieni\w*)\b",
+            normalized,
+        )
+    )
+
+
+def build_general_statute_concept_targets(query: str) -> list[tuple[str, str]]:
+    if build_explicit_statute_article_targets(query) or not query_is_statute_focused(query):
+        return []
+
+    normalized = normalize_whitespace(query or "").lower()
+    mechanism_targets = build_mechanism_statute_targets(query)
+    domains = detect_explicit_statute_domains(query) or {
+        normalize_statute_domain(domain)
+        for domain in resolve_statute_tax_domains(query)
+        if normalize_statute_domain(domain) not in {"WHT"}
+    }
+    targets: list[tuple[str, str]] = [*mechanism_targets]
+
+    if "VAT" in domains:
+        if re.search(r"\b(ksef|faktur\w*)\b", normalized):
+            targets.extend([("VAT", "106a"), ("VAT", "106b"), ("VAT", "106ga"), ("VAT", "106gb")])
+        elif re.search(r"\b(odlicz\w*|naliczon\w*)\b", normalized):
+            targets.extend([("VAT", "86"), ("VAT", "88")])
+        elif re.search(r"\b(nieruchomo\w*|grunt\w*|budyn\w*|zwolnien\w*)\b", normalized):
+            targets.extend([("VAT", "5"), ("VAT", "7"), ("VAT", "15"), ("VAT", "43"), ("VAT", "2")])
+        else:
+            targets.extend([("VAT", "5"), ("VAT", "7"), ("VAT", "8"), ("VAT", "15"), ("VAT", "29a")])
+
+    if "CIT" in domains:
+        if re.search(r"\b(wht|u [źz]r[óo]d[łl]a|odset(?:k|ek|e?k)\w*|zarz[ąa]dz\w*|nierezydent\w*)\b", normalized):
+            targets.extend([("CIT", "21"), ("CIT", "22"), ("CIT", "26")])
+        elif re.search(r"\b(koszt\w*|kup|uzyskania przychod)\b", normalized):
+            targets.extend([("CIT", "15"), ("CIT", "16")])
+        else:
+            targets.extend([("CIT", "7"), ("CIT", "12"), ("CIT", "15"), ("CIT", "16")])
+
+    if "PIT" in domains:
+        if re.search(r"\b(samochod\w*|samochód\w*|pojazd\w*|koszt\w*|wydatk\w*)\b", normalized):
+            targets.extend([("PIT", "22"), ("PIT", "23")])
+        elif re.search(r"\b(sprzeda\w*|nieruchomo\w*|mieszkani\w*)\b", normalized):
+            targets.extend([("PIT", "10"), ("PIT", "21"), ("PIT", "30e")])
+        else:
+            targets.extend([("PIT", "9"), ("PIT", "10"), ("PIT", "14"), ("PIT", "21"), ("PIT", "22"), ("PIT", "23")])
+
+    if "PCC" in domains:
+        targets.extend([("PCC", "1"), ("PCC", "2"), ("PCC", "4"), ("PCC", "6"), ("PCC", "7")])
+
+    if "SD" in domains:
+        targets.extend([("SD", "1"), ("SD", "4a"), ("SD", "9"), ("SD", "14"), ("SD", "15")])
+
+    if "ORDYNACJA" in domains:
+        if re.search(r"\b(sukcesj\w*|przekszta[łl]c\w*)\b", normalized):
+            targets.extend([("ORDYNACJA", "93a"), ("ORDYNACJA", "93e")])
+        elif re.search(r"\b(przedawn\w*)\b", normalized):
+            targets.extend([("ORDYNACJA", "70")])
+        elif re.search(r"\b(interpretacj\w*)\b", normalized):
+            targets.extend([("ORDYNACJA", "14b"), ("ORDYNACJA", "14k"), ("ORDYNACJA", "14na")])
+        else:
+            targets.extend([("ORDYNACJA", "14b"), ("ORDYNACJA", "70"), ("ORDYNACJA", "81"), ("ORDYNACJA", "93a")])
+
+    if "AKCYZA" in domains:
+        targets.extend([("AKCYZA", "1"), ("AKCYZA", "8"), ("AKCYZA", "21")])
+
+    if "NIERUCHOMOŚCI" in domains:
+        targets.extend([("NIERUCHOMOŚCI", "2"), ("NIERUCHOMOŚCI", "3"), ("NIERUCHOMOŚCI", "4"), ("NIERUCHOMOŚCI", "5"), ("NIERUCHOMOŚCI", "7")])
+
+    return list(dict.fromkeys(targets))
+
+
+def query_is_direct_statute_lookup(query: str) -> bool:
+    if not (build_explicit_statute_article_targets(query) or build_general_statute_concept_targets(query)):
+        return False
+    normalized = normalize_whitespace(query or "").lower()
+    if re.search(r"\b(interpretacj\w*|wyrok\w*|orzecze(?:nie|nia|ń)|orzecznictw\w*|nsa|wsa|fsk)\b", normalized):
+        return False
+    return query_is_statute_focused(query)
 
 
 def build_article_family_match_score(row: sqlite3.Row, *, query: str) -> float:
@@ -5794,7 +6038,8 @@ def fetch_statute_rows_by_targets(
 def infer_chunk_tax_domain(chunk: RagChunk) -> str:
     subject = normalize_whitespace(chunk.subject or "").lower()
     publication = normalize_whitespace(chunk.publication or "").lower()
-    haystack = f"{subject} {publication} {chunk.source_url or ''}".lower()
+    legal_provisions = " ".join(chunk.legal_provisions).lower()
+    haystack = f"{subject} {publication} {chunk.source_url or ''} {legal_provisions}".lower()
     if "towarów i usług" in haystack or "towarow i uslug" in haystack or "vat_act" in haystack:
         return "VAT"
     if "dochodowym od osób fizycznych" in haystack or "dochodowym od osob fizycznych" in haystack or "pit_act" in haystack:
@@ -5805,6 +6050,12 @@ def infer_chunk_tax_domain(chunk: RagChunk) -> str:
         return "PCC"
     if "dochodowym od osób prawnych" in haystack or "dochodowym od osob prawnych" in haystack:
         return "CIT"
+    if "ordynacja podatkowa" in haystack or "[op]" in haystack or "[ordynacja]" in haystack:
+        return "ORDYNACJA"
+    if "akcyz" in haystack or "[akcyza]" in haystack or "[excise]" in haystack:
+        return "AKCYZA"
+    if "podatek od nieruchomości" in haystack or "podatek od nieruchomosci" in haystack or "u.p.o.l." in haystack:
+        return "NIERUCHOMOŚCI"
     return ""
 
 
@@ -6481,6 +6732,20 @@ def load_processed_statute_chunks_by_targets(
     if not wanted:
         return []
 
+    target_order = {(domain.upper(), article_key.lower()): index for index, (domain, article_key) in enumerate(targets)}
+
+    def sort_by_target_order(items: list[RagChunk]) -> list[RagChunk]:
+        def sort_key(chunk: RagChunk) -> tuple[int, int, str]:
+            domain = infer_chunk_tax_domain(chunk)
+            positions: list[int] = []
+            for provision in chunk.legal_provisions:
+                article_key = extract_article_key_from_text(provision)
+                if article_key:
+                    positions.append(target_order.get((domain, article_key), len(target_order)))
+            return min(positions or [len(target_order)]), chunk.chunk_index, chunk.document_id
+
+        return sorted(items, key=sort_key)
+
     configured_paths = tuple(source_paths) if source_paths is not None else get_rag_config().additional_source_paths
     chunks: list[RagChunk] = []
     counts: dict[tuple[str, str], int] = {}
@@ -6519,10 +6784,10 @@ def load_processed_statute_chunks_by_targets(
                     for target in matched_targets:
                         counts[target] = counts.get(target, 0) + 1
                     if all(counts.get(target, 0) >= chunk_limit_per_target for target in wanted):
-                        return chunks
+                        return sort_by_target_order(chunks)
         except OSError:
             continue
-    return chunks
+    return sort_by_target_order(chunks)
 
 
 def load_processed_statute_chunks_by_subject_prefix(
@@ -6583,7 +6848,33 @@ def load_processed_statute_chunks_by_subject_prefix(
     return chunks[:chunk_limit]
 
 
+def dedupe_chunks_by_chunk_id(chunks: list[RagChunk]) -> list[RagChunk]:
+    deduped: list[RagChunk] = []
+    seen_chunk_ids: set[str] = set()
+    for chunk in chunks:
+        if chunk.chunk_id in seen_chunk_ids:
+            continue
+        seen_chunk_ids.add(chunk.chunk_id)
+        deduped.append(chunk)
+    return deduped
+
+
 def add_primary_source_fallback_chunks(query: str, chunks: list[RagChunk]) -> list[RagChunk]:
+    explicit_fallback_chunks: list[RagChunk] = []
+    explicit_targets = build_explicit_statute_article_targets(query)
+    if explicit_targets:
+        explicit_fallback_chunks = load_processed_statute_chunks_by_targets(
+            explicit_targets,
+            chunk_limit_per_target=6,
+        )
+    else:
+        general_targets = build_general_statute_concept_targets(query)
+        if general_targets:
+            explicit_fallback_chunks = load_processed_statute_chunks_by_targets(
+                general_targets,
+                chunk_limit_per_target=1,
+            )
+
     required_document_ids: list[str] = []
     if query_targets_ksef_current_law(query):
         required_document_ids.extend(KSEF_CURRENT_BUNDLE_DOCUMENT_IDS)
@@ -6611,7 +6902,7 @@ def add_primary_source_fallback_chunks(query: str, chunks: list[RagChunk]) -> li
     for axis in decompose_query_into_legal_axes(query):
         if not axis.preferred_targets or (axis.source_types and "statute" not in axis.source_types):
             continue
-        current_chunks = [*required_fallback_chunks, *chunks]
+        current_chunks = [*explicit_fallback_chunks, *required_fallback_chunks, *chunks]
         if axis.direct_subject_prefix:
             axis_fallback_chunks = load_processed_statute_chunks_by_subject_prefix(
                 axis.direct_subject_prefix,
@@ -6648,15 +6939,15 @@ def add_primary_source_fallback_chunks(query: str, chunks: list[RagChunk]) -> li
                 if position < len(axis_chunks):
                     target_fallback_chunks.append(axis_chunks[position])
     if not target_fallback_chunks:
-        return [*required_fallback_chunks, *chunks]
-    seen_chunk_ids = {chunk.chunk_id for chunk in [*required_fallback_chunks, *chunks]}
+        return dedupe_chunks_by_chunk_id([*explicit_fallback_chunks, *required_fallback_chunks, *chunks])
+    seen_chunk_ids = {chunk.chunk_id for chunk in [*explicit_fallback_chunks, *required_fallback_chunks, *chunks]}
     deduped_target_fallback_chunks: list[RagChunk] = []
     for chunk in target_fallback_chunks:
         if chunk.chunk_id in seen_chunk_ids:
             continue
         seen_chunk_ids.add(chunk.chunk_id)
         deduped_target_fallback_chunks.append(chunk)
-    return [*required_fallback_chunks, *deduped_target_fallback_chunks, *chunks]
+    return dedupe_chunks_by_chunk_id([*explicit_fallback_chunks, *required_fallback_chunks, *deduped_target_fallback_chunks, *chunks])
 
 
 def _search_chunks_single_query(
@@ -7163,6 +7454,10 @@ def search_chunks(
     query: str, *, limit: Optional[int] = None, source_types: Optional[set[str]] = None,
     enforce_query_domain: bool = False, tax_domains: Optional[set[str]] = None,
 ) -> list[RagChunk]:
+    if (source_types is None or "statute" in source_types) and query_is_direct_statute_lookup(query):
+        direct_statutes = add_primary_source_fallback_chunks(query, [])
+        if direct_statutes:
+            return direct_statutes[: limit or get_rag_config().retrieval_limit]
     if os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}:
         from app.mysql_rag import search_chunks_mysql
 
@@ -7207,6 +7502,10 @@ def search_chat_chunks(
     include_interpretations: bool = True,
     include_judgments: Optional[bool] = None,
 ) -> list[RagChunk]:
+    if query_is_direct_statute_lookup(query):
+        direct_statutes = add_primary_source_fallback_chunks(query, [])
+        if direct_statutes:
+            return direct_statutes[: limit or get_rag_config().retrieval_limit]
     if os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}:
         from app.mysql_rag import search_chat_chunks_mysql
 
@@ -7640,6 +7939,48 @@ def inspect_search(
     query: str, *, limit: Optional[int] = None, source_types: Optional[set[str]] = None,
     enforce_query_domain: bool = False, tax_domains: Optional[set[str]] = None,
 ) -> RetrievalInspection:
+    if (source_types is None or "statute" in source_types) and query_is_direct_statute_lookup(query):
+        effective_limit = limit or get_rag_config().retrieval_limit
+        chunks = add_primary_source_fallback_chunks(query, [])[:effective_limit]
+        selected_context_chars = sum(len(chunk.chunk_text.strip()) for chunk in chunks)
+        return RetrievalInspection(
+            query=query,
+            match_query=None,
+            requested_limit=effective_limit,
+            retrieved_count=len(chunks),
+            selected_count=len(chunks),
+            selected_context_chars=selected_context_chars,
+            hits=[
+                {
+                    "rank": position,
+                    "chunk_id": chunk.chunk_id,
+                    "document_id": chunk.document_id,
+                    "chunk_index": chunk.chunk_index,
+                    "score": chunk.score,
+                    "canonical_source_id": chunk_canonical_source_id(chunk),
+                    "evidence_role": classify_chunk_evidence_role(chunk),
+                    "subject": chunk.subject,
+                    "signature": chunk.signature,
+                    "published_date": chunk.published_date,
+                    "source_url": chunk.source_url,
+                    "category": chunk.category,
+                    "source": chunk.source,
+                    "source_type": chunk.source_type,
+                    "source_subtype": chunk.source_subtype,
+                    "authority": chunk.authority,
+                    "publication": chunk.publication,
+                    "legal_state_date": chunk.legal_state_date,
+                    "source_pages": chunk.source_pages,
+                    "legal_provisions": chunk.legal_provisions,
+                    "chunk_chars": len(chunk.chunk_text),
+                    "preview": chunk.chunk_text[:280].strip(),
+                    "selected_for_context": True,
+                }
+                for position, chunk in enumerate(chunks, start=1)
+            ],
+            chunks=chunks,
+            raw_candidate_pool=[],
+        )
     if os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}:
         from app.mysql_rag import inspect_search_mysql
 
@@ -7900,7 +8241,10 @@ def fetch_document_contexts(document_ids: list[str], *, seed_chunks: list[RagChu
 def build_document_context_block(chunks: list[RagChunk]) -> str:
     config = get_rag_config()
     document_ids = select_context_document_ids(chunks, limit=config.document_context_document_limit)
-    documents = fetch_document_contexts(document_ids, seed_chunks=chunks)
+    try:
+        documents = fetch_document_contexts(document_ids, seed_chunks=chunks)
+    except Exception:
+        documents = []
     existing_document_ids = {document.document_id for document in documents}
     fallback_documents: list[RagDocumentContext] = []
     for document_id in document_ids:

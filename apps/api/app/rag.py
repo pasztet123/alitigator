@@ -6570,6 +6570,8 @@ def search_chat_chunks(
             statute_limit = min(effective_limit - 1, max(4, math.ceil(effective_limit * 0.6)))
         elif query_targets_ksef_outside_deduction(query):
             statute_limit = min(effective_limit - 1, max(5, math.ceil(effective_limit * 0.7)))
+        elif query_targets_ksef_current_law(query):
+            statute_limit = min(effective_limit - 1, max(6, math.ceil(effective_limit * 0.75)))
         elif query_targets_vat_dropshipping_ioss(query):
             statute_limit = min(effective_limit - 1, max(5, math.ceil(effective_limit * 0.7)))
         elif query_targets_private_vehicle_pit_expense(query):
@@ -6714,6 +6716,12 @@ def search_chat_chunks(
         config=config,
         source_type="statute",
     ) if query_targets_poland_germany_treaty(query) and statute_limit else []
+    direct_ksef_bundle_rows = fetch_rows_by_document_ids(
+        KSEF_CURRENT_BUNDLE_DOCUMENT_IDS,
+        config=config,
+        source_type="statute",
+        chunk_limit_per_document=1,
+    ) if query_targets_ksef_current_law(query) and statute_limit else []
     statutes = [] if query_targets_ksef_foreign_sale(query) else (
         search_chunks(
             query,
@@ -6727,6 +6735,8 @@ def search_chat_chunks(
     preferred_targets: list[tuple[str, str]] = []
     if query_targets_ksef_foreign_sale(query):
         preferred_targets.extend(KSEF_FOREIGN_SALE_STATUTE_TARGETS)
+    if query_targets_ksef_current_law(query):
+        preferred_targets.extend(build_ksef_current_law_statute_targets(query))
     if query_targets_ksef_b2c_invoice(query):
         preferred_targets.extend(build_ksef_b2c_invoice_statute_targets(query))
     if query_targets_ksef_outside_deduction(query):
@@ -6812,6 +6822,7 @@ def search_chat_chunks(
             or query_targets_estonian_cit_hidden_profit(query)
             or query_targets_poland_germany_treaty(query)
             or query_targets_ksef_outside_deduction(query)
+            or query_targets_ksef_current_law(query)
             or query_targets_ksef_correction_issue(query)
             or query_targets_debt_assumption_effectiveness(query)
             or query_targets_housing_relief_temporary_rental(query)
@@ -6819,8 +6830,8 @@ def search_chat_chunks(
             or query_targets_mortgage_settlement_refund(query)
         ) else statute_limit,
     ) if statute_limit else []
-    if direct_treaty_rows or direct_germany_treaty_rows:
-        hinted_statute_rows = [*hinted_statute_rows, *direct_treaty_rows, *direct_germany_treaty_rows]
+    if direct_ksef_bundle_rows or direct_treaty_rows or direct_germany_treaty_rows:
+        hinted_statute_rows = [*direct_ksef_bundle_rows, *hinted_statute_rows, *direct_treaty_rows, *direct_germany_treaty_rows]
     hinted_statutes = rank_hybrid_local_candidates(
         hinted_statute_rows,
         query=query if query_targets_poland_spain_treaty(query) else expanded_query,
@@ -6832,6 +6843,7 @@ def search_chat_chunks(
             or query_targets_estonian_cit_transformation_share_cost(query)
             or query_targets_estonian_cit_hidden_profit(query)
             or query_targets_poland_germany_treaty(query)
+            or query_targets_ksef_current_law(query)
             or query_targets_debt_assumption_effectiveness(query)
             or query_targets_housing_relief_temporary_rental(query)
             or query_targets_housing_relief_loan_repayment(query)
@@ -6849,6 +6861,7 @@ def search_chat_chunks(
         or query_targets_estonian_cit_transformation_share_cost(query)
         or query_targets_estonian_cit_hidden_profit(query)
         or query_targets_poland_germany_treaty(query)
+        or query_targets_ksef_current_law(query)
         or query_targets_debt_assumption_effectiveness(query)
         or query_targets_housing_relief_temporary_rental(query)
         or query_targets_housing_relief_loan_repayment(query)
@@ -6863,6 +6876,7 @@ def search_chat_chunks(
         or query_targets_poland_spain_treaty(query)
         or query_targets_wht_pay_and_refund_services(query)
         or query_targets_estonian_cit_hidden_profit(query)
+        or query_targets_ksef_current_law(query)
     ):
         bundle_statute_candidates = sorted(
             enumerate(bundle_statute_candidates),

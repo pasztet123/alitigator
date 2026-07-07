@@ -13,6 +13,7 @@ from pymysql.cursors import DictCursor
 from app.rag import (
     JUDGMENT_INTENT_RE,
     JUDGMENT_ONLY_CONTEXT_RE,
+    KSEF_CURRENT_BUNDLE_DOCUMENT_IDS,
     KSEF_FOREIGN_SALE_INTERPRETATION_DOCUMENT_IDS,
     KSEF_FOREIGN_SALE_STATUTE_TARGETS,
     QUERY_TOKEN_RE,
@@ -25,6 +26,7 @@ from app.rag import (
     build_context_block,
     build_match_query,
     annotate_chunk_evidence_role,
+    build_ksef_current_law_statute_targets,
     chunk_canonical_source_id,
     build_estonian_cit_hidden_profit_statute_targets,
     build_poland_germany_treaty_statute_targets,
@@ -49,6 +51,7 @@ from app.rag import (
     join_search_text,
     normalize_source_type,
     query_targets_interpretation_procedure,
+    query_targets_ksef_current_law,
     query_targets_ksef_foreign_sale,
     query_targets_estonian_cit_hidden_profit,
     query_targets_poland_germany_treaty,
@@ -1091,6 +1094,8 @@ def search_chat_chunks_mysql(
     else:
         judgment_limit = 0
         statute_limit = effective_limit if not include_interpretations else max(1, effective_limit // 2)
+        if query_targets_ksef_current_law(query):
+            statute_limit = min(effective_limit - 1, max(6, math.ceil(effective_limit * 0.75)))
         interpretation_limit = max(1, effective_limit - statute_limit) if include_interpretations else 0
 
     if interpretation_limit and query_targets_ksef_foreign_sale(query):
@@ -1156,10 +1161,17 @@ def search_chat_chunks_mysql(
         if statute_limit and not query_targets_ksef_foreign_sale(query)
         else []
     )
+    direct_ksef_bundle_rows = fetch_rows_by_document_ids_mysql(
+        KSEF_CURRENT_BUNDLE_DOCUMENT_IDS,
+        source_type="statute",
+        chunk_limit_per_document=1,
+    ) if query_targets_ksef_current_law(query) and statute_limit else []
 
     preferred_targets: list[tuple[str, str]] = []
     if query_targets_ksef_foreign_sale(query):
         preferred_targets.extend(KSEF_FOREIGN_SALE_STATUTE_TARGETS)
+    if query_targets_ksef_current_law(query):
+        preferred_targets.extend(build_ksef_current_law_statute_targets(query))
     if query_targets_wht_pay_and_refund_services(query):
         preferred_targets.extend(build_wht_pay_and_refund_service_statute_targets(query))
     if query_targets_poland_germany_treaty(query):
@@ -1184,7 +1196,9 @@ def search_chat_chunks_mysql(
                 if target not in preferred_targets:
                     preferred_targets.append(target)
 
-    hinted_rows = fetch_statute_rows_by_targets_mysql(preferred_targets, limit=statute_limit) if statute_limit else []
+    hinted_rows = fetch_statute_rows_by_targets_mysql(preferred_targets, limit=None if query_targets_ksef_current_law(query) else statute_limit) if statute_limit else []
+    if direct_ksef_bundle_rows:
+        hinted_rows = [*direct_ksef_bundle_rows, *hinted_rows]
     hinted_statutes = (
         rank_hybrid_local_candidates(
             hinted_rows,
@@ -1210,6 +1224,7 @@ def search_chat_chunks_mysql(
         query_targets_poland_germany_treaty(query)
         or query_targets_wht_pay_and_refund_services(query)
         or query_targets_estonian_cit_hidden_profit(query)
+        or query_targets_ksef_current_law(query)
     ):
         bundle_cap = 10
     bundle_limit = min(bundle_cap, max(0, len(hinted_statutes)))

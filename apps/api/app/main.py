@@ -905,6 +905,30 @@ OPENING_STATUTE_STOPWORDS = {
 
 RETRIEVAL_COVERAGE_RULES = (
     {
+        "id": "ksef_2_0_current_law",
+        "label": "KSeF 2.0: aktualna podstawa Dz.U. 2025 poz. 1203 / terminy / limit / sankcje",
+        "query_patterns": (r"\b(ksef|krajow(?:y|ego) system(?:u)? e[ -]?faktur|faktur\w* ustrukturyzowan\w*)\b",),
+        "chunk_patterns": (r"\b(Dz\.U\.\s*2025\s*poz\.\s*1203|5 sierpnia 2025|1 lutego 2026|1 kwietnia 2026|10 000 zł|art\.\s*106ni|1 stycznia 2027)\b",),
+    },
+    {
+        "id": "ksef_2_0_offline_modes",
+        "label": "KSeF 2.0: offline24 / niedostępność / awaria / awaria podatnika",
+        "query_patterns": (r"\b(ksef).{0,180}\b(offline24|offline\s*24|awari\w*|niedost[ęe]pno\w*|system\w* ksi[ęe]gow\w*)\b|\b(offline24|offline\s*24|awari\w*|niedost[ęe]pno\w*)\b.{0,180}\b(ksef)\b",),
+        "chunk_patterns": (r"\b(art\.\s*106nda|art\.\s*106nf|art\.\s*106nh|następnym dniu roboczym|całkowita awaria|awaria KSeF)\b",),
+    },
+    {
+        "id": "ksef_2_0_receipt_deduction_corrections",
+        "label": "KSeF 2.0: otrzymanie faktury / odliczenie / korekta in minus",
+        "query_patterns": (r"\b(ksef).{0,220}\b(pdf|poza\s+ksef|odliczen\w*|korekt\w*|in minus|pusta faktur\w*)\b|\b(pdf|poza\s+ksef|odliczen\w*|korekt\w*|in minus|pusta faktur\w*)\b.{0,220}\b(ksef)\b",),
+        "chunk_patterns": (r"\b(art\.\s*86|art\.\s*88|art\.\s*29a|faktycznego otrzymania|nie przesuwa automatycznie|czynności niedokonane|faktura korygująca ustrukturyzowana)\b",),
+    },
+    {
+        "id": "ksef_2_0_scope_smpd_buyer_capacity",
+        "label": "KSeF 2.0: zakres obowiązku / SMPD uczestniczy / B2C / capacity nabywcy",
+        "query_patterns": (r"\b(ksef).{0,220}\b(smpd|sta[łl]\w* miejsce|zagraniczn\w*|b2c|konsument\w*|nip|prywatn\w*|mieszan\w*)\b|\b(smpd|sta[łl]\w* miejsce|zagraniczn\w*|b2c|konsument\w*|nip|prywatn\w*|mieszan\w*)\b.{0,220}\b(ksef)\b",),
+        "chunk_patterns": (r"\b(stałe miejsce.*nie uczestniczy|nie uczestniczy w dostawie|art\.\s*106gb\s*ust\.\s*4|osoby fizycznej nieprowadzącej działalności|faktury konsumenckie|capacity_of_buyer|NIP jest dowodem pomocniczym)\b",),
+    },
+    {
         "id": "wht_core_statutes",
         "label": "WHT: przepisy CIT o dywidendach, odsetkach, preferencjach i pay-and-refund",
         "query_patterns": (r"\b(wht|podatek u źr[óo]dła|beneficial owner|rzeczywist\w* właściciel\w*|certyfikat\w* rezydencji|pay and refund|należyt\w* staranno\w*)\b",),
@@ -1026,6 +1050,10 @@ def _normalize_matching_text(value: str) -> str:
         .replace("ł", "l").replace("ń", "n").replace("ó", "o")
         .replace("ś", "s").replace("ż", "z").replace("ź", "z")
     )
+
+
+def query_mentions_ksef(value: str) -> bool:
+    return bool(re.search(r"\b(ksef|krajow(?:y|ego) system(?:u)? e[ -]?faktur|faktur\w* ustrukturyzowan\w*)\b", value or "", re.IGNORECASE))
 
 
 def _chunk_domain_labels(chunk: RagChunk) -> set[str]:
@@ -1332,6 +1360,22 @@ def build_chat_system_prompt(
         + " Jeśli w materiale są interpretacje lub wyroki, używaj ich jako wsparcia argumentacji, ale wyraźnie odróżniaj je od treści ustawy."
         + " Przy pytaniach o KSeF wykonaj wewnętrznie checklistę: art. 106a, art. 106b, art. 106ga ust. 2,"
         + " art. 106gb ust. 4. Nie wyprowadzaj braku KSeF wyłącznie z tego, że miejsce dostawy lub świadczenia jest poza Polską."
+        + " Przy pytaniach o KSeF po 1 września 2025 r. jako aktualnego źródła kontrolnego wymagaj KSeF 2.0,"
+        + " w szczególności ustawy z 5 sierpnia 2025 r., Dz.U. 2025 poz. 1203, oraz aktualnych materiałów MF."
+        + " Nie opieraj rozstrzygnięcia wyłącznie na ustawie z 9 maja 2024 r.; jeżeli nie masz Dz.U. 2025 poz. 1203 albo aktualnego bundle KSeF 2.0 w materiale, oznacz oś jako nierozstrzygniętą."
+        + " Dla dat w 2026 r. sprawdź etapowanie: 1 lutego 2026 dla podatników z wartością sprzedaży brutto za 2024 r. ponad 200 mln zł oraz 1 kwietnia 2026 dla pozostałych."
+        + " Do końca 2026 r. sprawdź przejściowy miesięczny limit 10 000 zł brutto dla faktur objętych obowiązkowym KSeF; jeżeli brak wartości sprzedaży miesięcznej albo informacji o wcześniejszym przekroczeniu, wskaż brak faktów."
+        + " Nie wskazuj kar KSeF za naruszenia w 2026 r.; sankcje z art. 106ni analizuj dopiero od 1 stycznia 2027 r., jeśli materiał to potwierdza."
+        + " Rozróżnij tryby: online, offline24, niedostępność KSeF, awaria KSeF, całkowita awaria KSeF oraz awaria systemu podatnika."
+        + " Offline24 nie wymaga oficjalnej awarii KSeF; standardowy termin przesłania to najpóźniej następny dzień roboczy, chyba że w źródłach wynika szczególny tryb awaryjny."
+        + " Przy fakturze PDF wystawionej poza KSeF z naruszeniem obowiązku nie przesuwaj automatycznie odliczenia na datę późniejszego numeru KSeF; badaj faktyczne otrzymanie i art. 86 oraz 88."
+        + " Przy korekcie in minus nie stosuj automatycznie historycznego SLIM VAT; oddziel korektę ustrukturyzowaną od korekty poza KSeF, offline24, niedostępności i awarii."
+        + " Przy podmiocie zagranicznym odróżnij samo istnienie SMPD od uczestnictwa tego SMPD w konkretnej dostawie albo usłudze."
+        + " Dla usługodawcy badaj zasoby potrzebne do świadczenia usługi i ich uczestnictwo w transakcji, nie test odbioru usług przez nabywcę."
+        + " Przy B2B/B2C klasyfikuj charakter nabywcy per transakcja: business, private albo mixed_or_unclear; NIP jest tylko przesłanką pomocniczą, nie rozstrzygającą."
+        + " Jeżeli użytkownik podaje listę transakcji lub przypadków KSeF, odpowiedz macierzą obejmującą każdy przypadek z osobna."
+        + " Przed zakończeniem policz, ile przypadków wskazał użytkownik i ile opisałeś; jeśli brakuje któregoś przypadku, dopisz go zamiast kończyć odpowiedź."
+        + " Dla każdego przypadku KSeF podaj co najmniej: obowiązek KSeF, tryb/wyjątek, data lub fakt brakujący, skutek dla odliczenia/korekty/sankcji oraz źródło."
         + " Jeżeli źródła pokazują, że polskie przepisy fakturowe mają zastosowanie do transakcji poza terytorium kraju,"
         + " rozróżnij obowiązek wystawienia faktury ustrukturyzowanej od sposobu jej udostępnienia nabywcy."
         + " Nie uzależniaj obowiązku KSeF wyłącznie od tego, czy podatnik jest czynnym podatnikiem VAT."
@@ -1938,6 +1982,29 @@ async def chat(
         include_interpretations=(request.retrieval_preferences.include_interpretations if request.retrieval_preferences else True),
         include_judgments=(request.retrieval_preferences.include_judgments if request.retrieval_preferences else None),
     )
+    if query_mentions_ksef(effective_user_prompt):
+        has_current_ksef_source = any(
+            "Dz.U. 2025 poz. 1203" in " ".join(
+                part for part in [chunk.publication or "", chunk.subject or "", chunk.chunk_text[:1400]] if part
+            )
+            or "KSeF 2.0" in " ".join(
+                part for part in [chunk.subject or "", chunk.chunk_text[:1400]] if part
+            )
+            for chunk in retrieved_chunks
+        )
+        if not has_current_ksef_source:
+            fallback_chunks = search_chunks(
+                effective_user_prompt + " KSeF 2.0 Dz.U. 2025 poz. 1203 offline24 10 000 zł art. 106ni art. 106nda art. 106nh art. 29a art. 86 art. 88",
+                limit=max(10, len(retrieved_chunks) + 6),
+                source_types={"statute"},
+                enforce_query_domain=True,
+                tax_domains={"VAT"},
+            )
+            seen = {chunk.chunk_id for chunk in retrieved_chunks}
+            retrieved_chunks = [
+                *retrieved_chunks,
+                *[chunk for chunk in fallback_chunks if chunk.chunk_id not in seen],
+            ]
     if not retrieved_chunks and os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() == "sqlite":
         retrieved_chunks = search_chunks_supabase(effective_user_prompt)
     if not api_key:

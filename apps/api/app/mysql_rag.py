@@ -11,6 +11,7 @@ import pymysql
 from pymysql.cursors import DictCursor
 
 from app.rag import (
+    FAMILY_FOUNDATION_PRIMARY_BUNDLE_DOCUMENT_IDS,
     JUDGMENT_INTENT_RE,
     JUDGMENT_ONLY_CONTEXT_RE,
     KSEF_CURRENT_BUNDLE_DOCUMENT_IDS,
@@ -54,6 +55,7 @@ from app.rag import (
     query_targets_ksef_current_law,
     query_targets_ksef_foreign_sale,
     query_targets_estonian_cit_hidden_profit,
+    query_targets_family_foundation_mechanism,
     query_targets_poland_germany_treaty,
     query_targets_shareholder_company_asset_sale,
     query_targets_small_taxpayer_foreign_vat,
@@ -1166,6 +1168,11 @@ def search_chat_chunks_mysql(
         source_type="statute",
         chunk_limit_per_document=1,
     ) if query_targets_ksef_current_law(query) and statute_limit else []
+    direct_family_foundation_bundle_rows = fetch_rows_by_document_ids_mysql(
+        FAMILY_FOUNDATION_PRIMARY_BUNDLE_DOCUMENT_IDS,
+        source_type="statute",
+        chunk_limit_per_document=1,
+    ) if query_targets_family_foundation_mechanism(query) and statute_limit else []
 
     preferred_targets: list[tuple[str, str]] = []
     if query_targets_ksef_foreign_sale(query):
@@ -1197,8 +1204,8 @@ def search_chat_chunks_mysql(
                     preferred_targets.append(target)
 
     hinted_rows = fetch_statute_rows_by_targets_mysql(preferred_targets, limit=None if query_targets_ksef_current_law(query) else statute_limit) if statute_limit else []
-    if direct_ksef_bundle_rows:
-        hinted_rows = [*direct_ksef_bundle_rows, *hinted_rows]
+    if direct_ksef_bundle_rows or direct_family_foundation_bundle_rows:
+        hinted_rows = [*direct_ksef_bundle_rows, *direct_family_foundation_bundle_rows, *hinted_rows]
     hinted_statutes = (
         rank_hybrid_local_candidates(
             hinted_rows,
@@ -1225,6 +1232,7 @@ def search_chat_chunks_mysql(
         or query_targets_wht_pay_and_refund_services(query)
         or query_targets_estonian_cit_hidden_profit(query)
         or query_targets_ksef_current_law(query)
+        or query_targets_family_foundation_mechanism(query)
     ):
         bundle_cap = 10
     bundle_limit = min(bundle_cap, max(0, len(hinted_statutes)))

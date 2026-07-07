@@ -958,13 +958,25 @@ RETRIEVAL_COVERAGE_RULES = (
         "id": "family_foundation_permitted_activity",
         "label": "fundacja rodzinna: dozwolona działalność / art. 5",
         "query_patterns": (r"\b(fundacj\w* rodzinn\w*|beneficjent\w*|fundator\w*)\b",),
-        "chunk_patterns": (r"\b(fundacj\w* rodzinn\w*|art\.\s*5\b|dozwolon\w* działalno\w*|nabyte wyłącznie w celu dalszego zbycia|spółkom kapitałowym, w których fundacja rodzinna posiada udziały albo akcje)\b",),
+        "chunk_patterns": (r"\b(fundacj\w* rodzinn\w*|art\.\s*5\b|art\.\s*5\s*ust\.\s*1\s*pkt\s*2|art\.\s*5\s*ust\.\s*1\s*pkt\s*5\s*lit\.\s*a|dozwolon\w* działalno\w*|nabyte wyłącznie w celu dalszego zbycia|spółkom kapitałowym, w których fundacja rodzinna posiada udziały albo akcje)\b",),
+    },
+    {
+        "id": "family_foundation_cit_hidden_profit_24q_24r",
+        "label": "fundacja rodzinna: CIT 24q / 24r / ukryte zyski / dochód z działalności niedozwolonej",
+        "query_patterns": (r"\b(fundacj\w* rodzinn\w*).{0,180}\b(ukryt\w* zysk\w*|pożyczk\w*|pozyczk\w*|odsetk\w*|25%|24q|24r|usług\w* praw\w*|księgow\w*|zarządz\w*)\b",),
+        "chunk_patterns": (r"\b(art\.\s*24q|art\.\s*24r|ukryty zysk|dochód z działalności wykraczającej|usługi prawne|księgowe|zarządzania)\b",),
     },
     {
         "id": "family_foundation_pit_exemption",
         "label": "fundacja rodzinna: PIT beneficjenta / proporcja zwolnienia",
         "query_patterns": (r"\b(fundacj\w* rodzinn\w*).{0,120}\b(beneficjent\w*|syn\w* fundator\w*|wypłat\w*|świadczeni\w*)\b|\b(beneficjent\w*|syn\w* fundator\w*).{0,120}\b(fundacj\w* rodzinn\w*)\b",),
-        "chunk_patterns": (r"\b(art\.\s*21\s*ust\.\s*1\s*pkt\s*157|art\.\s*21\s*ust\.\s*49|grup\w* zerow\w*|zwolnien\w*.*fundacj\w* rodzin\w*)\b",),
+        "chunk_patterns": (r"\b(art\.\s*21\s*ust\.\s*1\s*pkt\s*157|art\.\s*21\s*ust\.\s*49|grup\w* zerow\w*|fundator\w*|10%|15%|zwolnien\w*.*fundacj\w* rodzin\w*)\b",),
+    },
+    {
+        "id": "family_foundation_vat_related_party",
+        "label": "fundacja rodzinna: VAT / art. 32 / najem / sprzedaż poniżej wartości rynkowej",
+        "query_patterns": (r"\b(fundacj\w* rodzinn\w*).{0,180}\b(vat|najem\w*|samochod\w*|warto[śs][ćc] rynkow\w*|połow\w* warto[śs]ci|podmiot\w* powi[ąa]zan\w*)\b",),
+        "chunk_patterns": (r"\b(art\.\s*32|art\.\s*43|wartość rynkowa|podmiot powiązany|najem mieszkalny)\b",),
     },
     {
         "id": "real_estate_vat_first_occupancy",
@@ -1283,6 +1295,8 @@ def build_chat_system_prompt(
         + " Odpowiadaj wyłącznie na ich podstawie w części źródłowej, a własne wnioski oznaczaj jako wnioski."
         + " Nie traktuj kilku fragmentów albo części tego samego dokumentu jako niezależnych źródeł."
         + " Jeśli źródła są niejednoznaczne albo częściowe, napisz to wprost zamiast domyślać stanowisko."
+        + " Jeżeli pytanie dotyczy przyszłej daty, podaj datę weryfikacji researchu, docelową datę skutku i zastrzeż,"
+        + " że opierasz się na przepisach już ogłoszonych oraz źródłach dostępnych w materiale; nie gwarantuj braku późniejszych nowelizacji."
         + " Najpierw wykonaj wewnętrznie selekcję materiału: sporządź robocze podsumowanie każdego dokumentu,"
         + " oddziel źródła trafne, częściowo trafne i nietrafne wobec pytania, a potem wybierz tylko elementy ważne dla odpowiedzi."
         + " W odpowiedzi pokaż przede wszystkim treść wynikającą ze źródeł trafnych i częściowo trafnych."
@@ -1324,8 +1338,23 @@ def build_chat_system_prompt(
         + " Rozwijaj praktyczne konsekwencje dla każdej strony transakcji, zamiast kończyć na jednym ogólnym zdaniu."
         + " W pytaniach o fundację rodzinną nie zakładaj automatycznie, że pożyczka dla spółki jest dozwolona tylko dlatego, że beneficjent jest z nią personalnie związany."
         + " Jeżeli w materiale nie ma potwierdzenia, że fundacja jest wspólnikiem lub akcjonariuszem tej spółki, wskaż to jako brakującą przesłankę."
+        + " Jeżeli materiał zawiera art. 5 UFR, traktuj go jako katalog enumeratywny i mapuj czynność do konkretnego punktu lub litery."
+        + " Nie przedstawiaj jako spornego tego, co jest wprost wymienione w art. 5 UFR."
+        + " Najem, dzierżawa i udostępnianie mienia do korzystania to art. 5 ust. 1 pkt 2 UFR."
+        + " Pożyczka dla spółki kapitałowej, w której fundacja posiada udziały albo akcje, to art. 5 ust. 1 pkt 5 lit. a UFR."
+        + " Pożyczka dla niezależnej spółki bez udziałów/akcji fundacji zasadniczo nie mieści się w tej regule."
         + " W pytaniach o sprzedaż mienia przez fundację rodzinną oceń osobno, czy materiał pozwala stwierdzić, że mienie nie zostało nabyte wyłącznie w celu dalszego zbycia."
         + " W pytaniach o świadczenia dla beneficjenta fundacji rodzinnej nie zakładaj pełnego zwolnienia PIT bez sprawdzenia, czy źródła potwierdzają zakres zwolnienia i ewentualną proporcję przypisaną fundatorowi."
+        + " Dla fundacji rodzinnej buduj osobno drzewo CIT fundacji i PIT odbiorcy; ukryty zysk w CIT nie jest automatycznie statutowym świadczeniem w PIT."
+        + " Przy art. 24r CIT wskazuj jako podstawę 25% CIT dochód z działalności wykraczającej poza art. 5, nie sam przychód; odsetki są przychodem, a koszty finansowania i obsługi trzeba zbadać."
+        + " Pożyczony kapitał nie jest podstawą 25% CIT."
+        + " Zwolnienia PIT fundatora nie uzasadniaj pokrewieństwem fundatora z samym sobą; ustawa PIT obejmuje fundatora wprost."
+        + " Proporcja zwolnienia PIT zależy od mienia wniesionego przez fundatorów i mienia uznawanego za wniesione przez fundację według art. 27-29 UFR, a nie od relacji funduszu założycielskiego do aktualnego majątku."
+        + " Dziecko fundatora traktuj jako zstępnego/grupę zerową; pokaż hierarchię: zwolnienie według proporcji, potem 10% dla I/II grupy w niezwolnionym zakresie, potem 15% dla pozostałych."
+        + " Przy sprzedaży fundatorowi lub beneficjentowi poniżej wartości rynkowej oceń osobno: dozwolone zbywanie mienia, ukryty zysk/różnicę cenową, PIT odbiorcy oraz VAT art. 32."
+        + " Usługi prawne, księgowe, doradcze, zarządzania lub podobne świadczone przez fundatora, beneficjenta albo podmiot powiązany sprawdź pod art. 24q ust. 1a pkt 3 niezależnie od rynkowości ceny."
+        + " Jeżeli użytkownik podaje wiele czynności fundacji rodzinnej, odpowiedz macierzą dla każdej czynności i nie kończ przed omówieniem wszystkich."
+        + " Dla każdej czynności fundacji rodzinnej podaj: allowed_activity, foundation_cit, hidden_profit, beneficiary_pit, vat, tax_base, tax_rate, tax_point, missing_facts."
         + " W pytaniach o mieszane wykorzystanie nieruchomości dla VAT nie utożsamiaj automatycznie proporcji sprzedaży z prewspółczynnikiem."
         + " Użyj prewspółczynnika tylko wtedy, gdy źródła rzeczywiście wskazują na mieszanie działalności gospodarczej z użyciem pozostającym poza działalnością gospodarczą."
         + " W pytaniach o PCC przy nieruchomości nie uogólniaj, że każde zwolnienie z VAT wyłącza PCC."

@@ -29,6 +29,7 @@ DEFAULT_LAW_SOURCE_PATHS = (
     API_DIR / "data" / "laws" / "processed" / "local_taxes_act_DU_2025_707.jsonl",
     API_DIR / "data" / "laws" / "processed" / "tax_treaties_core.jsonl",
     API_DIR / "data" / "laws" / "processed" / "ksef_2_0_current_bundle.jsonl",
+    API_DIR / "data" / "laws" / "processed" / "family_foundation_primary_bundle.jsonl",
     API_DIR / "data" / "processed" / "cbosa_nsa_fsk_judgments.jsonl",
 )
 DEFAULT_RAG_DB_PATH = API_DIR / "data" / "processed" / "eureka_rag.sqlite3"
@@ -132,6 +133,12 @@ KSEF_CURRENT_BUNDLE_DOCUMENT_IDS: tuple[str, ...] = (
     "ksef-2-0-offline24-operational-modes",
     "ksef-2-0-scope-fixed-establishment-and-foreign-buyers",
     "ksef-2-0-corrections-and-vat-deduction",
+)
+FAMILY_FOUNDATION_PRIMARY_BUNDLE_DOCUMENT_IDS: tuple[str, ...] = (
+    "family-foundation-primary-ufr-art-5-27-29",
+    "family-foundation-primary-cit-24q-24r",
+    "family-foundation-primary-pit-beneficiary-rates",
+    "family-foundation-primary-vat-related-party-transactions",
 )
 DEBT_ASSUMPTION_INTERPRETATION_DOCUMENT_IDS: tuple[str, ...] = ("695395", "678370")
 HOUSING_RELIEF_TEMPORARY_RENTAL_INTERPRETATION_DOCUMENT_IDS: tuple[str, ...] = ("691376",)
@@ -2747,7 +2754,16 @@ def build_fixed_establishment_vat_statute_targets(query: str) -> list[tuple[str,
 def build_family_foundation_statute_targets(query: str) -> list[tuple[str, str]]:
     if not query_targets_family_foundation_mechanism(query):
         return []
-    return [("CIT", "5"), ("CIT", "6"), ("CIT", "24q"), ("CIT", "24r")]
+    return [
+        ("CIT", "24q"),
+        ("CIT", "24r"),
+        ("CIT", "6"),
+        ("PIT", "21"),
+        ("PIT", "30"),
+        ("VAT", "32"),
+        ("VAT", "43"),
+        ("VAT", "29a"),
+    ]
 
 
 def build_wht_pay_and_refund_service_statute_targets(query: str) -> list[tuple[str, str]]:
@@ -3186,7 +3202,7 @@ def query_targets_estonian_cit_hidden_profit(query: str) -> bool:
     normalized = normalize_whitespace(query or "").lower()
     has_estonian_cit = bool(
         re.search(
-            r"\b(esto[ńn]sk\w*\s+cit|rycza[łl]t\w*\s+od\s+dochod\w*\s+sp[óo]łek|ukryte\s+zysk\w*)\b",
+            r"\b(esto[ńn]sk\w*\s+cit|rycza[łl]t\w*\s+od\s+dochod\w*\s+sp[óo]łek)\b",
             normalized,
         )
     )
@@ -4600,7 +4616,7 @@ def resolve_statute_tax_domains(query: str) -> set[str]:
     if query_targets_fixed_establishment_vat(query):
         domains.add("VAT")
     if query_targets_family_foundation_mechanism(query):
-        domains.add("CIT")
+        domains.update({"CIT", "PIT", "VAT"})
     if query_targets_wht_pay_and_refund_services(query):
         domains.add("CIT")
     return domains
@@ -4623,7 +4639,7 @@ def infer_retrieval_tax_domains(query: str) -> set[str]:
     if query_targets_fixed_establishment_vat(query):
         domains.add("VAT")
     if query_targets_family_foundation_mechanism(query):
-        domains.add("CIT")
+        domains.update({"CIT", "PIT", "VAT"})
     if query_targets_wht_pay_and_refund_services(query):
         domains.add("CIT")
     return domains
@@ -5891,6 +5907,52 @@ def decompose_query_into_legal_axes(query: str) -> list[LegalRetrievalAxis]:
                 )
             )
 
+    if query_targets_family_foundation_mechanism(query):
+        axes.extend(
+            [
+                LegalRetrievalAxis(
+                    axis_id="family_foundation_allowed_activity_catalog",
+                    label="fundacja rodzinna: katalog art. 5 UFR",
+                    query=expand_search_query(f"{normalized} fundacja rodzinna art. 5 UFR najem dzierżawa pożyczka spółce kapitałowej udziały akcje zbywanie mienia"),
+                    source_types={"statute"},
+                    tax_domains={"CIT", "PIT", "VAT"},
+                    preferred_targets=tuple(build_family_foundation_statute_targets(query)),
+                ),
+                LegalRetrievalAxis(
+                    axis_id="family_foundation_cit_hidden_profit",
+                    label="fundacja rodzinna: CIT 24q / ukryte zyski / świadczenia",
+                    query=expand_search_query(f"{normalized} fundacja rodzinna CIT art. 24q ukryte zyski świadczenie beneficjent fundator usługi prawne księgowe zarządzania"),
+                    source_types={"statute", "interpretation"},
+                    tax_domains={"CIT"},
+                    preferred_targets=(("CIT", "24q"), ("CIT", "24r"), ("CIT", "6")),
+                ),
+                LegalRetrievalAxis(
+                    axis_id="family_foundation_disallowed_income_25_percent",
+                    label="fundacja rodzinna: CIT 24r / dochód z działalności niedozwolonej",
+                    query=expand_search_query(f"{normalized} fundacja rodzinna art. 24r 25% CIT dochód działalność wykraczająca poza art. 5 koszty odsetki pożyczka"),
+                    source_types={"statute", "interpretation"},
+                    tax_domains={"CIT"},
+                    preferred_targets=(("CIT", "24r"), ("CIT", "24q"), ("CIT", "18")),
+                ),
+                LegalRetrievalAxis(
+                    axis_id="family_foundation_beneficiary_pit",
+                    label="fundacja rodzinna: PIT beneficjenta / fundatora / grupy podatkowe",
+                    query=expand_search_query(f"{normalized} fundacja rodzinna PIT fundator beneficjent dziecko grupa zerowa proporcja zwolnienie 10% 15%"),
+                    source_types={"statute", "interpretation"},
+                    tax_domains={"PIT"},
+                    preferred_targets=(("PIT", "21"), ("PIT", "30"), ("PIT", "20")),
+                ),
+                LegalRetrievalAxis(
+                    axis_id="family_foundation_vat_related_party",
+                    label="fundacja rodzinna: VAT najem / sprzedaż mienia / art. 32",
+                    query=expand_search_query(f"{normalized} fundacja rodzinna VAT najem mieszkalny sprzedaż samochodu wartość rynkowa podmiot powiązany art. 32"),
+                    source_types={"statute", "interpretation"},
+                    tax_domains={"VAT"},
+                    preferred_targets=(("VAT", "32"), ("VAT", "43"), ("VAT", "29a"), ("VAT", "5")),
+                ),
+            ]
+        )
+
     if query_targets_wht_pay_and_refund_services(query) or query_targets_crossborder_treaty_analysis(query):
         axes.extend(
             [
@@ -6722,6 +6784,12 @@ def search_chat_chunks(
         source_type="statute",
         chunk_limit_per_document=1,
     ) if query_targets_ksef_current_law(query) and statute_limit else []
+    direct_family_foundation_bundle_rows = fetch_rows_by_document_ids(
+        FAMILY_FOUNDATION_PRIMARY_BUNDLE_DOCUMENT_IDS,
+        config=config,
+        source_type="statute",
+        chunk_limit_per_document=1,
+    ) if query_targets_family_foundation_mechanism(query) and statute_limit else []
     statutes = [] if query_targets_ksef_foreign_sale(query) else (
         search_chunks(
             query,
@@ -6824,14 +6892,21 @@ def search_chat_chunks(
             or query_targets_ksef_outside_deduction(query)
             or query_targets_ksef_current_law(query)
             or query_targets_ksef_correction_issue(query)
+            or query_targets_family_foundation_mechanism(query)
             or query_targets_debt_assumption_effectiveness(query)
             or query_targets_housing_relief_temporary_rental(query)
             or query_targets_housing_relief_loan_repayment(query)
             or query_targets_mortgage_settlement_refund(query)
         ) else statute_limit,
     ) if statute_limit else []
-    if direct_ksef_bundle_rows or direct_treaty_rows or direct_germany_treaty_rows:
-        hinted_statute_rows = [*direct_ksef_bundle_rows, *hinted_statute_rows, *direct_treaty_rows, *direct_germany_treaty_rows]
+    if direct_ksef_bundle_rows or direct_family_foundation_bundle_rows or direct_treaty_rows or direct_germany_treaty_rows:
+        hinted_statute_rows = [
+            *direct_ksef_bundle_rows,
+            *direct_family_foundation_bundle_rows,
+            *hinted_statute_rows,
+            *direct_treaty_rows,
+            *direct_germany_treaty_rows,
+        ]
     hinted_statutes = rank_hybrid_local_candidates(
         hinted_statute_rows,
         query=query if query_targets_poland_spain_treaty(query) else expanded_query,
@@ -6844,6 +6919,7 @@ def search_chat_chunks(
             or query_targets_estonian_cit_hidden_profit(query)
             or query_targets_poland_germany_treaty(query)
             or query_targets_ksef_current_law(query)
+            or query_targets_family_foundation_mechanism(query)
             or query_targets_debt_assumption_effectiveness(query)
             or query_targets_housing_relief_temporary_rental(query)
             or query_targets_housing_relief_loan_repayment(query)
@@ -6862,6 +6938,7 @@ def search_chat_chunks(
         or query_targets_estonian_cit_hidden_profit(query)
         or query_targets_poland_germany_treaty(query)
         or query_targets_ksef_current_law(query)
+        or query_targets_family_foundation_mechanism(query)
         or query_targets_debt_assumption_effectiveness(query)
         or query_targets_housing_relief_temporary_rental(query)
         or query_targets_housing_relief_loan_repayment(query)
@@ -6877,6 +6954,7 @@ def search_chat_chunks(
         or query_targets_wht_pay_and_refund_services(query)
         or query_targets_estonian_cit_hidden_profit(query)
         or query_targets_ksef_current_law(query)
+        or query_targets_family_foundation_mechanism(query)
     ):
         bundle_statute_candidates = sorted(
             enumerate(bundle_statute_candidates),

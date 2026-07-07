@@ -695,6 +695,10 @@ function App() {
     }
   }, [draft, isSending, messages.length, selectedChatId])
 
+  const isConfiguredAdminEmail = Boolean(
+    session?.user.email && ADMIN_EMAILS.has(session.user.email.trim().toLowerCase()),
+  )
+
   async function refreshAdminUsers(activeSession: Session) {
     setAdminUsersError('')
     const response = await apiFetch('/api/admin/users', activeSession)
@@ -914,7 +918,7 @@ function App() {
           await reconcileCheckoutReturn(activeSession)
         }
 
-        if (accountPayload.is_admin) {
+        if (accountPayload.is_admin || isConfiguredAdminEmail) {
           setIsAdminUsersLoading(true)
           try {
             await refreshAdminUsers(activeSession)
@@ -1655,9 +1659,6 @@ function App() {
   const creditCurrency = account?.credit_currency ?? 'pln'
   const normalizedCheckoutCreditAmount = Math.max(1, Math.min(100000, Number.parseInt(checkoutCreditAmount, 10) || 1))
   const checkoutTotalGross = normalizedCheckoutCreditAmount * creditUnitPriceGross
-  const isConfiguredAdminEmail = Boolean(
-    session?.user.email && ADMIN_EMAILS.has(session.user.email.trim().toLowerCase()),
-  )
   const isAdminUser = Boolean(account?.is_admin || isConfiguredAdminEmail)
 
   if (!isSupabaseConfigured) {

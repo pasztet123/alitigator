@@ -66,6 +66,7 @@ from app.rag import (
     rank_hybrid_local_candidates,
     ranking_terms,
     resolve_statute_tax_domains,
+    row_to_rag_chunk,
     select_diverse_chunks,
     split_into_chunks,
     utc_now_iso,
@@ -83,6 +84,11 @@ from app.rag import (
     _merge_axis_search_chunks,
     resolve_cross_blend_weight,
     LegalRetrievalAxis,
+    LegalSourcePlan,
+    build_legal_source_plan,
+    dedupe_chunks_by_canonical_source,
+    legal_source_plan_primary_satisfied,
+    required_primary_document_ids_for_query,
 )
 
 
@@ -752,6 +758,44 @@ def fetch_statute_rows_by_targets_mysql(
     return deduped
 
 
+def retrieve_deterministic_statute_chunks_mysql(
+    query: str,
+    *,
+    plan: Optional[LegalSourcePlan] = None,
+    limit: Optional[int] = None,
+) -> list[RagChunk]:
+    config = get_rag_config()
+    source_plan = plan or build_legal_source_plan(query)
+    target_limit = max(limit or config.retrieval_limit, len(source_plan.statute_targets) or 1)
+
+    rows: list[dict[str, Any]] = []
+    if source_plan.statute_targets:
+        rows.extend(fetch_statute_rows_by_targets_mysql(list(source_plan.statute_targets), limit=None))
+    for axis in source_plan.axes:
+        if not axis.direct_subject_prefix:
+            continue
+        rows.extend(fetch_rows_by_subject_prefix_mysql(axis.direct_subject_prefix, source_type="statute"))
+    required_document_ids = required_primary_document_ids_for_query(query)
+    if required_document_ids:
+        rows.extend(
+            fetch_rows_by_document_ids_mysql(
+                required_document_ids,
+                source_type="statute",
+                chunk_limit_per_document=1,
+            )
+        )
+
+    ranked_chunks = [
+        row_to_rag_chunk(row, score=200.0, evidence_role="deterministic_primary_law")
+        for row in rows
+    ]
+    ordered_chunks = order_chunks_by_statute_targets(ranked_chunks, list(source_plan.statute_targets))
+    return [
+        annotate_chunk_evidence_role(chunk, "deterministic_primary_law")
+        for chunk in dedupe_chunks_by_canonical_source(ordered_chunks)
+    ][:target_limit]
+
+
 def fetch_candidate_rows_mysql(
     query: str,
     *,
@@ -1074,6 +1118,16 @@ def search_chat_chunks_mysql(
     expanded_query = expand_search_query(query)
     judgment_requested_by_query = bool(JUDGMENT_INTENT_RE.search(query) or extract_judgment_signatures(query))
     include_judgments = judgment_requested_by_query if include_judgments is None else include_judgments
+    source_plan = build_legal_source_plan(
+        query,
+        include_interpretations=include_interpretations,
+        include_judgments=include_judgments,
+    )
+    deterministic_statutes = retrieve_deterministic_statute_chunks_mysql(
+        query,
+        plan=source_plan,
+        limit=max(effective_limit, len(source_plan.statute_targets) or 1),
+    )
     judgment_only_context = bool(JUDGMENT_ONLY_CONTEXT_RE.search(query))
     statute_domains = resolve_statute_tax_domains(query)
     explicit_query_domains = bool(statute_domains)
@@ -1163,6 +1217,10 @@ def search_chat_chunks_mysql(
         if statute_limit and not query_targets_ksef_foreign_sale(query)
         else []
     )
+    statutes = order_chunks_by_statute_targets(
+        dedupe_chunks_by_canonical_source([*deterministic_statutes, *statutes]),
+        list(source_plan.statute_targets),
+    )
     direct_ksef_bundle_rows = fetch_rows_by_document_ids_mysql(
         KSEF_CURRENT_BUNDLE_DOCUMENT_IDS,
         source_type="statute",
@@ -1246,13 +1304,12 @@ def search_chat_chunks_mysql(
         if len(bundle_statutes) >= bundle_limit:
             break
 
-    mixed: list[RagChunk] = []
-    for position in range(max(len(judgments), len(merged_statutes), len(interpretations))):
-        if include_judgments and position < len(judgments):
-            mixed.append(judgments[position])
-        if position < len(merged_statutes):
-            mixed.append(merged_statutes[position])
-        if position < len(interpretations):
-            mixed.append(interpretations[position])
-    mixed.extend(bundle_statutes)
+    primary_chunks = [*merged_statutes, *bundle_statutes]
+    if source_plan.primary_required and not legal_source_plan_primary_satisfied(source_plan, primary_chunks):
+        return primary_chunks[:effective_limit] if primary_chunks else []
+
+    mixed: list[RagChunk] = [*primary_chunks]
+    if include_judgments:
+        mixed.extend(judgments)
+    mixed.extend(interpretations)
     return mixed[: effective_limit + len(bundle_statutes)]

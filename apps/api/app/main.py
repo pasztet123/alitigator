@@ -42,15 +42,21 @@ from app.rag import (
     build_axis_coverage,
     build_axis_coverage_context,
     build_context_block,
+    build_legal_rules_context,
+    build_legal_source_plan,
     detect_domains,
     detect_mechanisms,
+    extract_legal_rules_from_statute_chunks,
     get_rag_config,
     inspect_search,
     index_exists,
+    legal_rule_to_dict,
+    legal_source_plan_to_dict,
     list_citations,
     reindex_corpus,
     search_chat_chunks,
     search_chunks,
+    build_source_plan_context,
 )
 from app.supabase_rag import (
     is_supabase_rag_configured,
@@ -431,10 +437,12 @@ class RagSearchResponse(BaseModel):
     citations: str
     context_block: str
     axis_coverage: list[dict[str, object]] = Field(default_factory=list)
+    source_plan: dict[str, object] = Field(default_factory=dict)
+    legal_rules: list[dict[str, object]] = Field(default_factory=list)
     hits: list[RagSearchHit]
 
 
-app = FastAPI(title="aLitigator API", version="0.1.0")
+app = FastAPI(title="aLitigator API", version="0.8.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -1258,6 +1266,8 @@ def build_chat_system_prompt(
     intent_hint_context: str = "",
     retrieval_preferences_context: str = "",
     retrieval_coverage_context: str = "",
+    source_plan_context: str = "",
+    legal_rules_context: str = "",
 ) -> str:
     if not retrieved_context:
         return SYSTEM_PROMPT + "\n\nNie znaleziono trafnych fragmentów w indeksie źródeł. Nie twórz pozornych źródeł."
@@ -1296,6 +1306,20 @@ def build_chat_system_prompt(
         + " stawki, limitu, terminu ani numeru przepisu jako konkluzji. Dla osi partially_covered"
         + " oddziel to, co wynika z primary source, od tego, czego nie potwierdzono."
     ) if retrieval_coverage_context else ""
+
+    source_plan_instruction = (
+        "\n\nPlan źródeł i orkiestracja agentów:\n"
+        + source_plan_context
+        + "\nTraktuj to jako wynik plannera. Nie pokazuj pełnego planu użytkownikowi,"
+        + " ale podporządkuj mu selekcję materiału i kolejność analizy."
+    ) if source_plan_context else ""
+
+    legal_rules_instruction = (
+        "\n\nWynik legal rule extractora:\n"
+        + legal_rules_context
+        + "\nNajpierw przerób te normy na reguły postępowania dla kazusu użytkownika."
+        + " Dopiero potem użyj interpretacji i wyroków jako secondary authority."
+    ) if legal_rules_context else ""
 
     return (
         SYSTEM_PROMPT
@@ -1372,6 +1396,9 @@ def build_chat_system_prompt(
         + " (na przykład zgoda wierzyciela przy przejęciu długu z art. 519-521 KC albo ważność darowizny z art. 888-890 KC),"
         + " a dopiero potem przechodź do podatków. Nie ustawiaj PIT, PCC i SD jako równorzędnych hipotez bez ustalenia tytułu prawnego."
         + " Jeśli materiał nie pozwala rozstrzygnąć skuteczności cywilnoprawnej, zadaj krótkie pytanie doprecyzowujące zamiast zgadywać skutki podatkowe."
+        + " Wewnętrznie pracuj w rolach: planner ustala wymagane źródła, legal rule extractor zamienia przepisy na normy,"
+        + " a writer pisze odpowiedź opartą najpierw na tych normach. Nie mieszaj tych etapów."
+        + " W każdej odpowiedzi zacznij analizę od primary law. Interpretacje i wyroki mogą tylko objaśniać lub potwierdzać regułę wynikającą z przepisu."
         + " W pytaniach o przekształcenie spółki komandytowej w sp. z o.o. rozdziel osobno:"
         + " (a) skutki samego przekształcenia i sukcesji, (b) wejście w estoński CIT i ewentualne ukryte zyski,"
         + " (c) PCC, oraz (d) koszt podatkowy udziałów przy późniejszej sprzedaży."
@@ -1441,6 +1468,8 @@ def build_chat_system_prompt(
         + opening_instruction
         + hint_instruction
         + retrieval_preferences_instruction
+        + source_plan_instruction
+        + legal_rules_instruction
         + retrieval_coverage_instruction
         + "\n\nKontekst źródłowy:\n"
         + retrieved_context
@@ -2076,6 +2105,12 @@ async def chat(
             structured_reply=structured_reply,
         )
 
+    source_plan = build_legal_source_plan(
+        effective_user_prompt,
+        include_interpretations=(request.retrieval_preferences.include_interpretations if request.retrieval_preferences else True),
+        include_judgments=(request.retrieval_preferences.include_judgments if request.retrieval_preferences else None),
+    )
+    legal_rules = extract_legal_rules_from_statute_chunks(retrieved_chunks)
     retrieved_context = build_answer_context_block(retrieved_chunks)
     retrieval_coverage_context = "\n\n".join(
         part
@@ -2092,6 +2127,8 @@ async def chat(
         intent_hint_context=intent_hint_context,
         retrieval_preferences_context=retrieval_preferences_context,
         retrieval_coverage_context=retrieval_coverage_context,
+        source_plan_context=build_source_plan_context(source_plan, retrieved_chunks),
+        legal_rules_context=build_legal_rules_context(legal_rules),
     )
 
     payload = {
@@ -2197,6 +2234,8 @@ def rag_search(request: RagSearchRequest) -> RagSearchResponse:
         }
         for item in build_axis_coverage(request.query, chunks)
     ]
+    source_plan = build_legal_source_plan(request.query)
+    legal_rules = extract_legal_rules_from_statute_chunks(chunks)
     return RagSearchResponse(
         query=inspection.query,
         match_query=inspection.match_query,
@@ -2207,6 +2246,8 @@ def rag_search(request: RagSearchRequest) -> RagSearchResponse:
         citations=list_citations(chunks),
         context_block=build_answer_context_block(chunks),
         axis_coverage=axis_coverage,
+        source_plan=legal_source_plan_to_dict(source_plan, chunks),
+        legal_rules=[legal_rule_to_dict(rule) for rule in legal_rules],
         hits=[RagSearchHit(**hit) for hit in inspection.hits],
     )
 

@@ -1951,6 +1951,19 @@ class LegalRetrievalAxis:
 
 
 @dataclass(frozen=True)
+class LegalSourcePlan:
+    query: str
+    axes: tuple[LegalRetrievalAxis, ...]
+    primary_source_types: tuple[str, ...]
+    secondary_source_types: tuple[str, ...]
+    statute_targets: tuple[tuple[str, str], ...]
+    explicit_statute_targets: tuple[tuple[str, str], ...]
+    tax_domains: tuple[str, ...]
+    primary_required: bool
+    stage_order: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class SourceRequirement:
     axis_id: str
     mandatory_primary_sources: list[str] = field(default_factory=list)
@@ -1976,6 +1989,23 @@ class AxisCoverage:
     coverage_score: float
     status: str
     supporting_source_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class LegalRule:
+    source_id: str
+    act_title: str
+    publication: Optional[str]
+    legal_state_date: Optional[str]
+    citation: str
+    article_key: str
+    paragraph: Optional[str]
+    point: Optional[str]
+    letter: Optional[str]
+    rule_type: str
+    condition: str
+    directive: str
+    source_url: Optional[str]
 
 
 def get_rag_config() -> RagConfig:
@@ -4726,9 +4756,17 @@ def build_general_statute_concept_targets(query: str) -> list[tuple[str, str]]:
         if normalize_statute_domain(domain) not in {"WHT"}
     }
     targets: list[tuple[str, str]] = [*mechanism_targets]
+    asks_act_scope = bool(
+        re.search(
+            r"\b(co\s+reguluje|zakres\s+ustaw\w*|przedmiot\s+ustaw\w*|ustaw\w*\s+reguluje|regulacj\w*\s+ustaw\w*)\b",
+            normalized,
+        )
+    )
 
     if "VAT" in domains:
-        if re.search(r"\b(ksef|faktur\w*)\b", normalized):
+        if asks_act_scope:
+            targets.extend([("VAT", "1")])
+        elif re.search(r"\b(ksef|faktur\w*)\b", normalized):
             targets.extend([("VAT", "106a"), ("VAT", "106b"), ("VAT", "106ga"), ("VAT", "106gb")])
         elif re.search(r"\b(odlicz\w*|naliczon\w*)\b", normalized):
             targets.extend([("VAT", "86"), ("VAT", "88")])
@@ -4738,7 +4776,9 @@ def build_general_statute_concept_targets(query: str) -> list[tuple[str, str]]:
             targets.extend([("VAT", "5"), ("VAT", "7"), ("VAT", "8"), ("VAT", "15"), ("VAT", "29a")])
 
     if "CIT" in domains:
-        if re.search(r"\b(wht|u [źz]r[óo]d[łl]a|odset(?:k|ek|e?k)\w*|zarz[ąa]dz\w*|nierezydent\w*)\b", normalized):
+        if asks_act_scope:
+            targets.extend([("CIT", "1")])
+        elif re.search(r"\b(wht|u [źz]r[óo]d[łl]a|odset(?:k|ek|e?k)\w*|zarz[ąa]dz\w*|nierezydent\w*)\b", normalized):
             targets.extend([("CIT", "21"), ("CIT", "22"), ("CIT", "26")])
         elif re.search(r"\b(koszt\w*|kup|uzyskania przychod)\b", normalized):
             targets.extend([("CIT", "15"), ("CIT", "16")])
@@ -4746,7 +4786,9 @@ def build_general_statute_concept_targets(query: str) -> list[tuple[str, str]]:
             targets.extend([("CIT", "7"), ("CIT", "12"), ("CIT", "15"), ("CIT", "16")])
 
     if "PIT" in domains:
-        if re.search(r"\b(samochod\w*|samochód\w*|pojazd\w*|koszt\w*|wydatk\w*)\b", normalized):
+        if asks_act_scope:
+            targets.extend([("PIT", "1")])
+        elif re.search(r"\b(samochod\w*|samochód\w*|pojazd\w*|koszt\w*|wydatk\w*)\b", normalized):
             targets.extend([("PIT", "22"), ("PIT", "23")])
         elif re.search(r"\b(sprzeda\w*|nieruchomo\w*|mieszkani\w*)\b", normalized):
             targets.extend([("PIT", "10"), ("PIT", "21"), ("PIT", "30e")])
@@ -4754,10 +4796,10 @@ def build_general_statute_concept_targets(query: str) -> list[tuple[str, str]]:
             targets.extend([("PIT", "9"), ("PIT", "10"), ("PIT", "14"), ("PIT", "21"), ("PIT", "22"), ("PIT", "23")])
 
     if "PCC" in domains:
-        targets.extend([("PCC", "1"), ("PCC", "2"), ("PCC", "4"), ("PCC", "6"), ("PCC", "7")])
+        targets.extend([("PCC", "1")] if asks_act_scope else [("PCC", "1"), ("PCC", "2"), ("PCC", "4"), ("PCC", "6"), ("PCC", "7")])
 
     if "SD" in domains:
-        targets.extend([("SD", "1"), ("SD", "4a"), ("SD", "9"), ("SD", "14"), ("SD", "15")])
+        targets.extend([("SD", "1")] if asks_act_scope else [("SD", "1"), ("SD", "4a"), ("SD", "9"), ("SD", "14"), ("SD", "15")])
 
     if "ORDYNACJA" in domains:
         if re.search(r"\b(sukcesj\w*|przekszta[łl]c\w*)\b", normalized):
@@ -4785,6 +4827,198 @@ def query_is_direct_statute_lookup(query: str) -> bool:
     if re.search(r"\b(interpretacj\w*|wyrok\w*|orzecze(?:nie|nia|ń)|orzecznictw\w*|nsa|wsa|fsk)\b", normalized):
         return False
     return query_is_statute_focused(query)
+
+
+def build_preferred_statute_targets(query: str) -> list[tuple[str, str]]:
+    targets: list[tuple[str, str]] = []
+    targets.extend(build_explicit_statute_article_targets(query))
+    if query_targets_ksef_foreign_sale(query):
+        targets.extend(KSEF_FOREIGN_SALE_STATUTE_TARGETS)
+    targets.extend(build_mechanism_statute_targets(query))
+    targets.extend(build_general_statute_concept_targets(query))
+    if query_targets_ksef_correction_issue(query):
+        targets.append(("VAT", "106k"))
+    if query_targets_small_taxpayer_foreign_vat(query):
+        targets.extend([("CIT", "4a"), ("CIT", "19"), ("CIT", "12")])
+
+    _, procedural_exact_articles = detect_procedural_article_targets(query)
+    if procedural_exact_articles:
+        hinted_domains = resolve_statute_tax_domains(query) or {
+            "VAT",
+            "CIT",
+            "PIT",
+            "PCC",
+            "AKCYZA",
+            "ORDYNACJA",
+            "NIERUCHOMOŚCI",
+        }
+        for domain in sorted(hinted_domains):
+            for article_key in sorted(procedural_exact_articles):
+                targets.append((normalize_statute_domain(domain), article_key))
+    return list(dict.fromkeys((domain.upper(), article_key.lower()) for domain, article_key in targets if domain and article_key))
+
+
+def build_legal_source_plan(
+    query: str,
+    *,
+    include_interpretations: bool = True,
+    include_judgments: Optional[bool] = None,
+) -> LegalSourcePlan:
+    judgment_requested_by_query = bool(JUDGMENT_INTENT_RE.search(query) or extract_judgment_signatures(query))
+    effective_include_judgments = judgment_requested_by_query if include_judgments is None else include_judgments
+    secondary_source_types: list[str] = []
+    if include_interpretations:
+        secondary_source_types.append("interpretation")
+    if effective_include_judgments:
+        secondary_source_types.append("judgment")
+
+    axes = tuple(decompose_query_into_legal_axes(query))
+    explicit_targets = tuple(build_explicit_statute_article_targets(query))
+    statute_targets = tuple(build_preferred_statute_targets(query))
+    tax_domains = tuple(sorted(resolve_statute_tax_domains(query)))
+    return LegalSourcePlan(
+        query=query,
+        axes=axes,
+        primary_source_types=("statute",),
+        secondary_source_types=tuple(secondary_source_types),
+        statute_targets=statute_targets,
+        explicit_statute_targets=explicit_targets,
+        tax_domains=tax_domains,
+        primary_required=True,
+        stage_order=(
+            "planner",
+            "primary_law_deterministic_retrieval",
+            "primary_law_semantic_retrieval",
+            "secondary_sources_retrieval",
+            "legal_rule_extraction",
+            "writer",
+        ),
+    )
+
+
+def chunk_matches_statute_target(chunk: RagChunk, target: tuple[str, str]) -> bool:
+    domain, article_key = target
+    wanted_domain = normalize_statute_domain(domain)
+    wanted_article = article_key.lower()
+    chunk_domain = normalize_statute_domain(infer_chunk_tax_domain(chunk)) if infer_chunk_tax_domain(chunk) else ""
+    subject = normalize_whitespace(chunk.subject or "").lower()
+    for provision in chunk.legal_provisions:
+        provision_target = extract_statute_target_from_text(provision)
+        if provision_target == (wanted_domain, wanted_article):
+            return True
+        provision_article = extract_article_key_from_text(provision)
+        if not provision_article or provision_article != wanted_article:
+            continue
+        if chunk_domain == wanted_domain:
+            return True
+        if subject.startswith("upo polska"):
+            return True
+    return False
+
+
+def legal_source_plan_primary_satisfied(plan: LegalSourcePlan, chunks: list[RagChunk]) -> bool:
+    if not plan.primary_required:
+        return True
+    primary_chunks = [chunk for chunk in chunks if is_primary_source_chunk(chunk)]
+    if not primary_chunks:
+        return False
+
+    coverages = build_axis_coverage(plan.query, chunks)
+    if coverages:
+        return all(
+            coverage.primary_source_present
+            and coverage.controlling_rule_present
+            and coverage.current_law_source_present
+            and coverage.required_treaty_present is not False
+            for coverage in coverages
+        )
+
+    if plan.explicit_statute_targets:
+        return all(
+            any(chunk_matches_statute_target(chunk, target) for chunk in primary_chunks)
+            for target in plan.explicit_statute_targets
+        )
+
+    if plan.statute_targets:
+        return any(
+            chunk_matches_statute_target(chunk, target)
+            for target in plan.statute_targets
+            for chunk in primary_chunks
+        )
+
+    return True
+
+
+def dedupe_chunks_by_canonical_source(chunks: list[RagChunk]) -> list[RagChunk]:
+    deduped: list[RagChunk] = []
+    seen_sources: set[str] = set()
+    for chunk in chunks:
+        canonical_source_id = chunk_canonical_source_id(chunk)
+        if canonical_source_id in seen_sources:
+            continue
+        seen_sources.add(canonical_source_id)
+        deduped.append(chunk)
+    return deduped
+
+
+def legal_source_plan_to_dict(plan: LegalSourcePlan, chunks: Optional[list[RagChunk]] = None) -> dict[str, Any]:
+    primary_chunks = [chunk for chunk in chunks or [] if is_primary_source_chunk(chunk)]
+    secondary_chunks = [
+        chunk for chunk in chunks or []
+        if str(chunk.source_type or "").lower() in {"interpretation", "judgment", "commentary"}
+    ]
+    return {
+        "primary_required": plan.primary_required,
+        "primary_source_types": list(plan.primary_source_types),
+        "secondary_source_types": list(plan.secondary_source_types),
+        "tax_domains": list(plan.tax_domains),
+        "statute_targets": [
+            {"domain": domain, "article": article_key}
+            for domain, article_key in plan.statute_targets
+        ],
+        "explicit_statute_targets": [
+            {"domain": domain, "article": article_key}
+            for domain, article_key in plan.explicit_statute_targets
+        ],
+        "axes": [
+            {
+                "axis_id": axis.axis_id,
+                "label": axis.label,
+                "source_types": sorted(axis.source_types or []),
+                "tax_domains": sorted(axis.tax_domains or []),
+                "preferred_targets": [
+                    {"domain": domain, "article": article_key}
+                    for domain, article_key in axis.preferred_targets
+                ],
+            }
+            for axis in plan.axes
+        ],
+        "stage_order": list(plan.stage_order),
+        "primary_satisfied": legal_source_plan_primary_satisfied(plan, chunks or []),
+        "primary_source_count": len(primary_chunks),
+        "secondary_source_count": len(secondary_chunks),
+    }
+
+
+def build_source_plan_context(plan: LegalSourcePlan, chunks: list[RagChunk]) -> str:
+    plan_dict = legal_source_plan_to_dict(plan, chunks)
+    target_text = ", ".join(
+        f"{item['domain']} art. {item['article']}" for item in plan_dict["statute_targets"]
+    ) or "brak dokładnego celu artykułowego"
+    axes_text = ", ".join(axis["axis_id"] for axis in plan_dict["axes"]) or "brak osi specjalistycznej"
+    return "\n".join(
+        [
+            "Plan źródeł przed odpowiedzią:",
+            "- primary sources są obowiązkowe: akty prawa powszechnie obowiązującego, w tym ustawy, rozporządzenia i UPO.",
+            "- secondary sources są uzupełniające: interpretacje, objaśnienia, interpretacje ogólne i wyroki.",
+            f"- kolejność etapów: {' -> '.join(plan.stage_order)}",
+            f"- osie prawne: {axes_text}",
+            f"- docelowe przepisy/akty: {target_text}",
+            f"- primary source present/satisfied: {str(plan_dict['primary_satisfied']).lower()} "
+            f"({plan_dict['primary_source_count']} primary, {plan_dict['secondary_source_count']} secondary)",
+            "- twarda reguła: jeżeli primary source nie jest spełnione dla osi, nie wolno oprzeć rozstrzygnięcia na interpretacji ani wyroku.",
+        ]
+    )
 
 
 def build_article_family_match_score(row: sqlite3.Row, *, query: str) -> float:
@@ -6059,6 +6293,185 @@ def infer_chunk_tax_domain(chunk: RagChunk) -> str:
     return ""
 
 
+def extract_act_title_from_chunk(chunk: RagChunk) -> str:
+    subject = normalize_whitespace(chunk.subject or "")
+    match = re.search(r"\s+-\s+art\.", subject, re.IGNORECASE)
+    if match:
+        return subject[:match.start()].strip()
+    return subject or chunk.signature or "Akt prawny"
+
+
+def derive_rule_type(text: str) -> str:
+    normalized = normalize_whitespace(text).lower()
+    if re.search(r"\b(nie stosuje się|wyłącza się|nie podlega|z wyjątkiem|chyba że)\b", normalized):
+        return "exclusion"
+    if re.search(r"\b(zwalnia się|jest zwolnion\w*|zwolnienie)\b", normalized):
+        return "exemption"
+    if re.search(r"\b(jest obowiązan\w*|są obowiązan\w*|ma obowiązek|powinien|należy)\b", normalized):
+        return "obligation"
+    if re.search(r"\b(może|mogą|uprawnion\w*)\b", normalized):
+        return "permission"
+    if re.search(r"\b(wynosi|stawka|podatek pobiera się|opodatkowaniu podlega)\b", normalized):
+        return "tax_effect"
+    if re.search(r"\b(ilekroć|rozumie się przez to|oznacza)\b", normalized):
+        return "definition"
+    return "rule"
+
+
+def extract_condition_from_rule_text(text: str) -> str:
+    normalized = normalize_whitespace(text)
+    match = re.search(
+        r"\b(jeżeli|jezeli|w przypadku gdy|w razie gdy|pod warunkiem że|pod warunkiem ze|gdy)\b(.{0,360})",
+        normalized,
+        re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    condition = normalize_whitespace(match.group(0))
+    return condition[:360]
+
+
+def extract_rule_unit_blocks(text: str) -> list[tuple[Optional[str], str]]:
+    normalized = normalize_whitespace(text)
+    if not normalized:
+        return []
+    paragraph_pattern = re.compile(
+        r"(?:^|\n)\s*(\d+[a-z]?)\.\s+(.+?)(?=(?:\n\s*\d+[a-z]?\.\s+)|\Z)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    blocks = [
+        (match.group(1), normalize_whitespace(match.group(2)))
+        for match in paragraph_pattern.finditer(text)
+        if normalize_whitespace(match.group(2))
+    ]
+    if blocks:
+        return blocks
+    article_stripped = re.sub(
+        r"^.*?Art\.\s*\d+[a-z]?\.\s*",
+        "",
+        text,
+        count=1,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    inline_paragraph_pattern = re.compile(
+        r"(?:^|\s)(\d+[a-z]?)\.\s+(.+?)(?=(?:\s+\d+[a-z]?\.\s+)|\Z)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    inline_blocks = [
+        (match.group(1), normalize_whitespace(match.group(2)))
+        for match in inline_paragraph_pattern.finditer(article_stripped)
+        if normalize_whitespace(match.group(2))
+    ]
+    if inline_blocks:
+        return inline_blocks
+    return [(None, normalized)]
+
+
+def extract_point_and_letter(text: str) -> tuple[Optional[str], Optional[str]]:
+    point_match = re.search(r"^\s*(\d+[a-z]?)\)", text)
+    letter_match = re.search(r"^\s*([a-z])\)", text) if point_match is None else None
+    point = point_match.group(1) if point_match else None
+    letter = letter_match.group(1) if letter_match else None
+    return point, letter
+
+
+def build_rule_citation(article_key: str, paragraph: Optional[str], point: Optional[str], letter: Optional[str]) -> str:
+    parts = [f"art. {article_key}" if article_key else "przepis"]
+    if paragraph:
+        parts.append(f"ust. {paragraph}")
+    if point:
+        parts.append(f"pkt {point}")
+    if letter:
+        parts.append(f"lit. {letter}")
+    return " ".join(parts)
+
+
+def extract_legal_rules_from_statute_chunks(chunks: list[RagChunk], *, limit: int = 12) -> list[LegalRule]:
+    rules: list[LegalRule] = []
+    seen: set[tuple[str, str, Optional[str], Optional[str], Optional[str]]] = set()
+    for chunk in chunks:
+        if not is_primary_source_chunk(chunk):
+            continue
+        article_key = ""
+        for provision in chunk.legal_provisions:
+            article_key = extract_article_key_from_text(provision)
+            if article_key:
+                break
+        if not article_key:
+            article_key = extract_article_key_from_text(chunk.subject) or extract_article_key_from_text(chunk.chunk_text)
+        if not article_key:
+            continue
+
+        for paragraph, block_text in extract_rule_unit_blocks(chunk.chunk_text):
+            point, letter = extract_point_and_letter(block_text)
+            key = (chunk_canonical_source_id(chunk), article_key, paragraph, point, letter)
+            if key in seen:
+                continue
+            seen.add(key)
+            directive = normalize_whitespace(block_text)
+            if not directive:
+                continue
+            rules.append(
+                LegalRule(
+                    source_id=chunk_canonical_source_id(chunk),
+                    act_title=extract_act_title_from_chunk(chunk),
+                    publication=chunk.publication,
+                    legal_state_date=chunk.legal_state_date,
+                    citation=build_rule_citation(article_key, paragraph, point, letter),
+                    article_key=article_key,
+                    paragraph=paragraph,
+                    point=point,
+                    letter=letter,
+                    rule_type=derive_rule_type(directive),
+                    condition=extract_condition_from_rule_text(directive),
+                    directive=directive[:1200],
+                    source_url=chunk.source_url,
+                )
+            )
+            if len(rules) >= limit:
+                return rules
+            break
+    return rules
+
+
+def legal_rule_to_dict(rule: LegalRule) -> dict[str, Any]:
+    return {
+        "source_id": rule.source_id,
+        "act_title": rule.act_title,
+        "publication": rule.publication,
+        "legal_state_date": rule.legal_state_date,
+        "citation": rule.citation,
+        "article_key": rule.article_key,
+        "paragraph": rule.paragraph,
+        "point": rule.point,
+        "letter": rule.letter,
+        "rule_type": rule.rule_type,
+        "condition": rule.condition,
+        "directive": rule.directive,
+        "source_url": rule.source_url,
+    }
+
+
+def build_legal_rules_context(rules: list[LegalRule]) -> str:
+    if not rules:
+        return (
+            "Ustrukturyzowane normy z primary law: brak. Writer nie może formułować materialnego"
+            " rozstrzygnięcia bez przepisu ustawowego albo innego aktu prawa powszechnie obowiązującego."
+        )
+    lines = [
+        "Ustrukturyzowane normy z primary law:",
+        "Każdą normę traktuj jako punkt wyjścia analizy; interpretacje i wyroki wolno użyć dopiero jako wsparcie wykładni.",
+    ]
+    for index, rule in enumerate(rules, start=1):
+        condition = f" | warunek: {rule.condition}" if rule.condition else ""
+        legal_state = rule.legal_state_date or rule.publication or "brak daty w metadanych"
+        lines.append(
+            f"{index}. {rule.act_title} | {rule.citation} | typ={rule.rule_type} | stan={legal_state}{condition}\n"
+            f"   reguła: {rule.directive}"
+        )
+    return "\n".join(lines)
+
+
 def order_chunks_by_statute_targets(chunks: list[RagChunk], targets: list[tuple[str, str]]) -> list[RagChunk]:
     if not chunks or not targets:
         return chunks
@@ -6859,6 +7272,124 @@ def dedupe_chunks_by_chunk_id(chunks: list[RagChunk]) -> list[RagChunk]:
     return deduped
 
 
+def row_to_rag_chunk(row: sqlite3.Row | dict[str, Any], *, score: float = 100.0, evidence_role: str = "") -> RagChunk:
+    return RagChunk(
+        chunk_id=str(row["chunk_id"]),
+        document_id=str(row["document_id"]),
+        chunk_index=int(row["chunk_index"]),
+        score=score,
+        chunk_text=str(row["chunk_text"] or ""),
+        subject=str(row["subject"] or "Bez tytułu"),
+        signature=str(row["signature"] or "") or None,
+        published_date=str(row["published_date"] or "") or None,
+        source_url=str(row["source_url"] or "") or None,
+        category=str(row["category"] or "") or None,
+        source=str(row["source"] or ""),
+        source_type=str(row["source_type"] or "interpretation"),
+        source_subtype=str(row["source_subtype"] or "") or None,
+        authority=str(row["authority"] or "") or None,
+        publication=str(row["publication"] or "") or None,
+        legal_state_date=str(row["legal_state_date"] or "") or None,
+        source_pages=[int(value) for value in json.loads(row["source_pages_json"] or "[]")],
+        legal_provisions=[str(value) for value in json.loads(row["legal_provisions_json"] or "[]")],
+        evidence_role=evidence_role,
+    )
+
+
+def required_primary_document_ids_for_query(query: str) -> list[str]:
+    document_ids: list[str] = []
+    if query_targets_ksef_current_law(query):
+        document_ids.extend(KSEF_CURRENT_BUNDLE_DOCUMENT_IDS)
+    if query_targets_family_foundation_mechanism(query):
+        document_ids.extend(FAMILY_FOUNDATION_PRIMARY_BUNDLE_DOCUMENT_IDS)
+    return list(dict.fromkeys(document_ids))
+
+
+def retrieve_deterministic_statute_chunks(
+    query: str,
+    *,
+    plan: Optional[LegalSourcePlan] = None,
+    limit: Optional[int] = None,
+    config: Optional[RagConfig] = None,
+) -> list[RagChunk]:
+    if os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}:
+        from app.mysql_rag import retrieve_deterministic_statute_chunks_mysql
+
+        return retrieve_deterministic_statute_chunks_mysql(query, plan=plan, limit=limit)
+
+    effective_config = config or get_rag_config()
+    source_plan = plan or build_legal_source_plan(query)
+    target_limit = max(limit or effective_config.retrieval_limit, len(source_plan.statute_targets) or 1)
+
+    rows: list[sqlite3.Row] = []
+    if source_plan.statute_targets:
+        rows.extend(
+            fetch_statute_rows_by_targets(
+                list(source_plan.statute_targets),
+                config=effective_config,
+                limit=None,
+            )
+        )
+    for axis in source_plan.axes:
+        if not axis.direct_subject_prefix:
+            continue
+        rows.extend(
+            fetch_rows_by_subject_prefix(
+                axis.direct_subject_prefix,
+                config=effective_config,
+                source_type="statute",
+            )
+        )
+    required_document_ids = required_primary_document_ids_for_query(query)
+    if required_document_ids:
+        rows.extend(
+            fetch_rows_by_document_ids(
+                required_document_ids,
+                config=effective_config,
+                source_type="statute",
+                chunk_limit_per_document=1,
+            )
+        )
+
+    ranked_chunks = [
+        row_to_rag_chunk(row, score=200.0, evidence_role="deterministic_primary_law")
+        for row in rows
+    ]
+    fallback_chunks: list[RagChunk] = []
+    if source_plan.statute_targets:
+        fallback_chunks.extend(
+            load_processed_statute_chunks_by_targets(
+                list(source_plan.statute_targets),
+                chunk_limit_per_target=1,
+            )
+        )
+    for axis in source_plan.axes:
+        if axis.direct_subject_prefix:
+            fallback_chunks.extend(
+                load_processed_statute_chunks_by_subject_prefix(
+                    axis.direct_subject_prefix,
+                    targets=axis.preferred_targets,
+                    chunk_limit=max(4, len(axis.preferred_targets) or 4),
+                )
+            )
+    if required_document_ids:
+        fallback_chunks.extend(
+            load_processed_document_chunks_by_ids(
+                required_document_ids,
+                chunk_limit_per_document=1,
+            )
+        )
+
+    ordered_chunks = order_chunks_by_statute_targets(
+        [*ranked_chunks, *fallback_chunks],
+        list(source_plan.statute_targets),
+    )
+    return [
+        annotate_chunk_evidence_role(chunk, "deterministic_primary_law")
+        for chunk in dedupe_chunks_by_canonical_source(ordered_chunks)
+    ][:target_limit]
+
+
 def add_primary_source_fallback_chunks(query: str, chunks: list[RagChunk]) -> list[RagChunk]:
     explicit_fallback_chunks: list[RagChunk] = []
     explicit_targets = build_explicit_statute_article_targets(query)
@@ -7527,6 +8058,17 @@ def search_chat_chunks(
     expanded_query = expand_search_query(query)
     judgment_requested_by_query = bool(JUDGMENT_INTENT_RE.search(query) or extract_judgment_signatures(query))
     include_judgments = judgment_requested_by_query if include_judgments is None else include_judgments
+    source_plan = build_legal_source_plan(
+        query,
+        include_interpretations=include_interpretations,
+        include_judgments=include_judgments,
+    )
+    deterministic_statutes = retrieve_deterministic_statute_chunks(
+        query,
+        plan=source_plan,
+        limit=max(effective_limit, len(source_plan.statute_targets) or 1),
+        config=config,
+    )
     judgment_only_context = bool(JUDGMENT_ONLY_CONTEXT_RE.search(query))
     statute_domains = resolve_statute_tax_domains(query)
     explicit_query_domains = bool(statute_domains)
@@ -7723,6 +8265,10 @@ def search_chat_chunks(
         ) if statute_limit else []
     )
     statutes = filter_treaty_country_chunks(statutes, query)
+    statutes = order_chunks_by_statute_targets(
+        dedupe_chunks_by_canonical_source([*deterministic_statutes, *statutes]),
+        list(source_plan.statute_targets),
+    )
     preferred_targets: list[tuple[str, str]] = []
     if query_targets_ksef_foreign_sale(query):
         preferred_targets.extend(KSEF_FOREIGN_SALE_STATUTE_TARGETS)
@@ -7914,24 +8460,14 @@ def search_chat_chunks(
             if len(bundle_statutes) >= bundle_limit:
                 break
 
-    mixed: list[RagChunk] = []
-    if include_judgments:
-        for position in range(max(len(judgments), len(merged_statutes), len(interpretations))):
-            if position < len(judgments):
-                mixed.append(judgments[position])
-            if position < len(merged_statutes):
-                mixed.append(merged_statutes[position])
-            if position < len(interpretations):
-                mixed.append(interpretations[position])
-        mixed.extend(bundle_statutes)
-        return mixed[: effective_limit + len(bundle_statutes)]
+    primary_chunks = [*merged_statutes, *bundle_statutes]
+    if source_plan.primary_required and not legal_source_plan_primary_satisfied(source_plan, primary_chunks):
+        return primary_chunks[:effective_limit] if primary_chunks else []
 
-    for position in range(max(len(interpretations), len(merged_statutes))):
-        if position < len(merged_statutes):
-            mixed.append(merged_statutes[position])
-        if position < len(interpretations):
-            mixed.append(interpretations[position])
-    mixed.extend(bundle_statutes)
+    mixed: list[RagChunk] = [*primary_chunks]
+    if include_judgments:
+        mixed.extend(judgments)
+    mixed.extend(interpretations)
     return mixed[: effective_limit + len(bundle_statutes)]
 
 

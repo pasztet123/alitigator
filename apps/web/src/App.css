@@ -1203,6 +1203,13 @@ textarea {
   height: 52px;
   padding: 0;
   border-radius: 999px;
+  background: var(--accent);
+  color: #f6fbf6;
+  box-shadow: 0 12px 26px -18px rgba(24, 56, 40, 0.72);
+}
+
+.submit-button-icon:hover {
+  background: var(--accent-strong);
 }
 
 .submit-button-icon svg {

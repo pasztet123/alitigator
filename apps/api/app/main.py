@@ -85,7 +85,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "0.9.6"
+API_VERSION = "0.9.7"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 AVAILABLE_MODELS = [
@@ -1169,8 +1169,12 @@ def validate_final_output(
         }
     )
     rendered_domains = [
-        domain for domain in expected_domains
-        if re.search(rf"(^|\n)(?:###\s*)?{re.escape(domain)}\b", stripped_reply, re.IGNORECASE)
+        domain
+        for domain in expected_domains
+        if re.search(
+            rf"(?im)^\s*(?:#{{1,6}}\s*)?(?:\*\*)?{re.escape(domain)}(?:\*\*)?(?:\s*[:–—-]|\s*$)",
+            stripped_reply,
+        )
     ]
 
     last_meaningful_line = next(
@@ -2780,6 +2784,17 @@ async def chat(
         missing_facts_context=build_missing_facts_context(missing_required_facts),
         timeline_issue_context=build_timeline_issue_context(timeline_issues),
     )
+    required_axis_labels = sorted(
+        {
+            token
+            for token in ("VAT", "CIT", "PIT", "PCC", "SD", "AKCYZA", "ORDYNACJA")
+            if any(
+                token in str(item.get("label") or "").upper()
+                or token in str(item.get("axis_id") or "").upper()
+                for item in axis_coverage
+            )
+        }
+    )
     compact_system_prompt = (
         SYSTEM_PROMPT
         + "\n\nTRYB COMPACT RETRY."
@@ -2787,6 +2802,13 @@ async def chat(
         + "\nWyrenderuj kolejno wyłącznie sekcje: Teza, Analiza, Źródła, Ryzyka i luki."
         + "\nNie przepisuj pełnych dokumentów ani pełnego brzmienia artykułów."
         + "\nZachowaj wszystkie osie podatkowe, ale każdą opisz maksymalnie w 3 krótkich akapitach."
+        + (
+            "\nW sekcji Analiza użyj dokładnie osobnych nagłówków: "
+            + ", ".join(f"### {axis}" for axis in required_axis_labels)
+            + "."
+            if required_axis_labels
+            else ""
+        )
         + f"\nOstatnią linią musi być dokładnie {RENDER_COMPLETION_MARKER}."
         + ("\n\nZwalidowane reguły:\n" + build_legal_rules_context(legal_rules) if legal_rules else "")
         + ("\n\nTrace podstaw prawnych:\n" + build_legal_rule_trace_context(legal_rules) if legal_rules else "")

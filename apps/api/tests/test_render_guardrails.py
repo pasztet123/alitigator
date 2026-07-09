@@ -11,6 +11,31 @@ from app.main import (
 
 
 class ConditionalAnswerGuardrailTests(unittest.TestCase):
+    def test_axis_validator_accepts_common_markdown_heading_levels(self) -> None:
+        for heading in ("CIT", "## CIT", "#### CIT", "**CIT**", "### CIT – rozliczenie"):
+            with self.subTest(heading=heading):
+                reply = (
+                    "Teza\nWniosek.\n\n"
+                    f"Analiza\n{heading}\nAnaliza osi.\n\n"
+                    "Źródła\nŹródło.\n\n"
+                    "Ryzyka i luki\nBrak.\n\n"
+                    f"{RENDER_COMPLETION_MARKER}"
+                )
+                validation = validate_final_output(
+                    reply,
+                    axis_coverage=[
+                        {"axis_id": "cit_bad_debt_creditor", "label": "CIT"}
+                    ],
+                    expected_sections=[
+                        "Teza",
+                        "Analiza",
+                        "Źródła",
+                        "Ryzyka i luki",
+                    ],
+                )
+
+                self.assertEqual(validation["rendered_axes"], 1)
+
     def test_empty_retrieval_prompt_still_requires_complete_contract(self) -> None:
         prompt = build_chat_system_prompt(
             "Pytanie bez trafnych źródeł",

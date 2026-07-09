@@ -102,6 +102,27 @@ class BadDebtTemporalRegressionTests(unittest.TestCase):
             any("historical" in item.rule_id for item in vat_rules)
         )
 
+    def test_vat_and_cit_cutoff_rules_are_not_merged(self) -> None:
+        rules = build_bad_debt_rule_bindings("2026-03-31")
+        by_id = {item.rule_id: item for item in rules}
+
+        self.assertEqual(
+            by_id["vat_bad_debt_current_creditor_status_date"].provision_ids,
+            ("vat_art_89a_ust_2_pkt_3_lit_a",),
+        )
+        self.assertEqual(
+            by_id["vat_bad_debt_current_payment_cutoff"].provision_ids,
+            ("vat_art_89a_ust_3",),
+        )
+        self.assertEqual(
+            by_id["cit_bad_debt_payment_cutoff"].provision_ids,
+            ("cit_art_18f_ust_5",),
+        )
+        self.assertEqual(
+            by_id["cit_bad_debt_debtor_status"].provision_ids,
+            ("cit_art_18f_ust_10",),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

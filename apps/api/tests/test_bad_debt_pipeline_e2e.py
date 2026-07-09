@@ -80,8 +80,36 @@ class BadDebtPipelineEndToEndTests(unittest.TestCase):
                 "conditional_missing_fact",
             )
             self.assertEqual(
+                result.claims["claim_vat_debtor_registration_path"].status,
+                "conditional_missing_fact",
+            )
+            self.assertEqual(
+                result.claims["claim_vat_debtor_registration_path"].result[
+                    "debtor_vat_status"
+                ],
+                "missing",
+            )
+            self.assertEqual(
+                result.claims["claim_vat_debtor_registration_path"].result[
+                    "vat_path_selection_status"
+                ],
+                "conditional_missing_fact",
+            )
+            self.assertEqual(
                 result.claims["claim_cit_relief"].missing_fact_dependencies,
                 ("debtor_status_on_2026_02_28",),
+            )
+            self.assertEqual(
+                result.claims["claim_cit_payment_cutoff"].result[
+                    "receivable_payment_cutoff"
+                ],
+                "return_filing_date",
+            )
+            self.assertEqual(
+                result.claims["claim_cit_relief"].result[
+                    "debtor_insolvency_reference_date"
+                ],
+                "last_day_of_previous_month",
             )
             self.assertEqual(
                 result.claims["claim_vat_reversal"].result["period"], "2026-05"
@@ -117,6 +145,10 @@ class BadDebtPipelineEndToEndTests(unittest.TestCase):
             self.assertNotIn("ten przepis", result.answer.lower())
             self.assertIn("vat_art_89a_ust_3", result.answer)
             self.assertIn("vat_art_89a_ust_2_pkt_3_lit_a", result.answer)
+            self.assertIn("vat_art_89a_ust_2a", result.answer)
+            self.assertIn("cit_art_18f_ust_5", result.answer)
+            self.assertNotIn("rozłożenia na raty", result.answer)
+            self.assertNotIn("odroczenia", result.answer)
             self.assertIn("Brak uregulowania dla korekty VAT ocenia się do dnia złożenia deklaracji", result.answer)
 
     def test_all_material_claims_have_real_provenance(self) -> None:
@@ -154,6 +186,9 @@ class BadDebtPipelineEndToEndTests(unittest.TestCase):
         self.assertIsNotNone(
             registry.get("vat_art_89a_ust_2_pkt_3_lit_a", "2026-03-31")
         )
+        self.assertIsNotNone(registry.get("vat_art_89a_ust_2", "2026-03-31"))
+        self.assertIsNotNone(registry.get("vat_art_89a_ust_2a", "2026-03-31"))
+        self.assertIsNotNone(registry.get("cit_art_18f_ust_5", "2026-03-31"))
 
     def test_registry_works_without_runtime_data_directory(self) -> None:
         source = _load_statute_article(
@@ -176,6 +211,38 @@ class BadDebtPipelineEndToEndTests(unittest.TestCase):
         self.assertIn(
             "debtor_status_on_2026_02_28",
             result.claims["claim_cit_relief"].fact_dependencies,
+        )
+        self.assertEqual(
+            result.facts["debtor_vat_registration_status"].status,
+            "missing",
+        )
+        self.assertIn(
+            "debtor_vat_registration_status",
+            result.claims["claim_vat_debtor_registration_path"].fact_dependencies,
+        )
+        self.assertNotIn(
+            "debtor_status_on_2026_02_28",
+            result.claims["claim_vat_debtor_registration_path"].fact_dependencies,
+        )
+
+    def test_cit_payment_and_insolvency_dates_are_separate(self) -> None:
+        result = run_bad_debt_pipeline(BENCHMARK_QUERY)
+
+        self.assertEqual(
+            result.claims["claim_cit_payment_cutoff"].controlling_provisions,
+            ("cit_art_18f_ust_5",),
+        )
+        self.assertEqual(
+            result.claims["claim_cit_payment_cutoff"].fact_dependencies,
+            ("cit8_filing_date_2026_03_31", "partial_payment_gross_amount"),
+        )
+        self.assertEqual(
+            result.claims["claim_cit_relief"].controlling_provisions,
+            ("cit_art_18f_ust_10",),
+        )
+        self.assertEqual(
+            result.claims["claim_cit_relief"].fact_dependencies,
+            ("debtor_status_on_2026_02_28",),
         )
 
     def test_placeholder_contradiction_and_truncation_are_rejected(self) -> None:

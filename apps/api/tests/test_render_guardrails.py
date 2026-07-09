@@ -117,6 +117,23 @@ class ConditionalAnswerGuardrailTests(unittest.TestCase):
                 expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
             )
 
+    def test_final_validator_rejects_empty_legal_reference_slots(self) -> None:
+        reply = (
+            "Teza\nWniosek.\n\n"
+            "Analiza\nPrawo do korekty powstaje w rozliczeniu za grudzień 2025 r. "
+            "( i ust. 2 pkt 5 ustawy o VAT). Ulga regulowana jest ustawy o CIT.\n\n"
+            "Źródła\nart. 89a ustawy VAT.\n\n"
+            "Ryzyka i luki\nBrak.\n\n"
+            f"{RENDER_COMPLETION_MARKER}"
+        )
+
+        with self.assertRaisesRegex(Exception, "puste miejsce po referencji"):
+            validate_final_output(
+                reply,
+                axis_coverage=[],
+                expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -34,6 +34,7 @@ b) (uchylona)
 4) (uchylony)
 5) od daty wystawienia faktury dokumentującej wierzytelność nie upłynęły 3 lata, licząc od końca roku, w którym została wystawiona.
 6) (uchylony)
+2a. W przypadku dostawy towaru lub świadczenia usług dokonanych na rzecz podmiotu innego niż podatnik, o którym mowa w art. 15 ust. 1, zarejestrowany jako podatnik VAT czynny, korekta, o której mowa w ust. 1, może zostać dokonana, jeżeli wierzytelność została potwierdzona prawomocnym orzeczeniem sądu i skierowana na drogę postępowania egzekucyjnego, wierzytelność została wpisana do rejestru długów prowadzonego na poziomie krajowym albo wobec dłużnika ogłoszono upadłość konsumencką.
 3. Korekta, o której mowa w ust. 1, może nastąpić w rozliczeniu za okres, w którym nieściągalność wierzytelności uznaje się za uprawdopodobnioną, pod warunkiem że do dnia złożenia przez wierzyciela deklaracji podatkowej za ten okres wierzytelność nie została uregulowana lub zbyta w jakiejkolwiek formie.
 4. W przypadku gdy po złożeniu deklaracji podatkowej, w której dokonano korekty, o której mowa w ust. 1, należność została uregulowana lub zbyta w jakiejkolwiek formie, wierzyciel obowiązany jest do zwiększenia podstawy opodatkowania oraz kwoty podatku należnego w rozliczeniu za okres, w którym należność została uregulowana lub zbyta."""
 
@@ -172,12 +173,32 @@ def build_bad_debt_registry() -> ProvisionRegistry:
             **vat_trace,
         ),
         _record(
+            "vat_art_89a_ust_2",
+            "vat_act",
+            "art. 89a ust. 2 ustawy VAT",
+            "Art. 89a ust. 2 określa warunki stosowania korekty z ust. 1 w ścieżce podstawowej.",
+            domain="VAT",
+            result_codes=("vat_path_selection",),
+            effective_from="2021-10-01",
+            **vat_trace,
+        ),
+        _record(
             "vat_art_89a_ust_2_pkt_3_lit_a",
             "vat_act",
             "art. 89a ust. 2 pkt 3 lit. a ustawy VAT",
             "Na dzień poprzedzający złożenie deklaracji wierzyciel musi być zarejestrowany jako podatnik VAT czynny.",
             domain="VAT",
             result_codes=("vat_creditor_registration_status",),
+            effective_from="2021-10-01",
+            **vat_trace,
+        ),
+        _record(
+            "vat_art_89a_ust_2a",
+            "vat_act",
+            "art. 89a ust. 2a ustawy VAT",
+            "Art. 89a ust. 2a przewiduje odrębną ścieżkę korekty dla dostawy lub usługi na rzecz podmiotu innego niż podatnik VAT czynny.",
+            domain="VAT",
+            result_codes=("vat_path_selection",),
             effective_from="2021-10-01",
             **vat_trace,
         ),
@@ -245,6 +266,16 @@ def build_bad_debt_registry() -> ProvisionRegistry:
             **cit_trace,
         ),
         _record(
+            "cit_art_18f_ust_5",
+            "cit_act",
+            "art. 18f ust. 5 ustawy CIT",
+            "Zmniejszenia dokonuje się, jeżeli do dnia złożenia zeznania podatkowego wierzytelność nie została uregulowana lub zbyta.",
+            domain="CIT",
+            result_codes=("cit_payment_cutoff",),
+            effective_from="2020-01-01",
+            **cit_trace,
+        ),
+        _record(
             "cit_art_18f_ust_7",
             "cit_act",
             "art. 18f ust. 7 ustawy CIT",
@@ -260,7 +291,7 @@ def build_bad_debt_registry() -> ProvisionRegistry:
             "art. 18f ust. 10 ustawy CIT",
             "Zastosowanie ulgi zależy między innymi od statusu restrukturyzacyjnego, upadłościowego lub likwidacyjnego dłużnika na właściwy dzień.",
             domain="CIT",
-            result_codes=("cit_relief_available", "cit_relief_amount"),
+            result_codes=("cit_relief_available", "cit_relief_amount", "cit_debtor_insolvency_condition"),
             effective_from="2020-01-01",
             **cit_trace,
         ),
@@ -329,6 +360,7 @@ def parse_bad_debt_facts(query: str) -> BadDebtFacts:
         "partial_payment_gross_amount": FactRecord("partial_payment_gross_amount", "money", partial_gross, date=payment_date),
         "due_date": FactRecord("due_date", "date", due_date, date=due_date),
         "jpk_filing_date_2026_01_25": FactRecord("jpk_filing_date_2026_01_25", "date", "2026-01-25", date="2026-01-25"),
+        "cit8_filing_date_2026_03_31": FactRecord("cit8_filing_date_2026_03_31", "date", "2026-03-31", date="2026-03-31"),
         "creditor_vat_registration_status_on_2026_01_24": FactRecord(
             "creditor_vat_registration_status_on_2026_01_24",
             "creditor_vat_registration_status",
@@ -438,13 +470,15 @@ def build_bad_debt_claims(
         _claim("claim_vat_timing", "vat_bad_debt_creditor", f"90. dzień upłynął {ninety_day}; korekta przypada na grudzień 2025 r.", "vat_ninety_day_date", {"date": ninety_day, "period": "2025-12"}, ("vat_art_89a_ust_1a",), ("due_date",), "calc_ninety_day_date", ("calc_ninety_day_date", "calc_vat_relief_period")),
         _claim("claim_vat_payment_cutoff", "vat_bad_debt_creditor", "Brak uregulowania dla korekty VAT ocenia się do dnia złożenia deklaracji, a nie na dzień poprzedzający jej złożenie.", "vat_payment_cutoff", {"payment_cutoff": "through_filing_date"}, ("vat_art_89a_ust_3",), ("jpk_filing_date_2026_01_25", "partial_payment_gross_amount")),
         _claim("claim_vat_creditor_registration_date", "vat_bad_debt_creditor", "Status czynnego podatnika VAT po stronie wierzyciela jest odrębnym warunkiem badanym na dzień poprzedzający złożenie deklaracji; materiał nie potwierdza tego faktu.", "vat_creditor_registration_status", {"creditor_vat_status_date": "day_before_filing"}, ("vat_art_89a_ust_2_pkt_3_lit_a",), ("creditor_vat_registration_status_on_2026_01_24",), missing_fact_ids=("creditor_vat_registration_status_on_2026_01_24",), status="conditional_missing_fact"),
+        _claim("claim_vat_debtor_registration_path", "vat_bad_debt_creditor", "Wybór między ścieżką podstawową a ścieżką dla podmiotu innego niż podatnik VAT czynny zależy od statusu rejestracji VAT dłużnika; materiał nie potwierdza tego faktu i nie wolno go domniemywać.", "vat_path_selection", {"vat_path_selection_status": "conditional_missing_fact", "debtor_vat_status": "missing"}, ("vat_art_89a_ust_2", "vat_art_89a_ust_2a"), ("debtor_vat_registration_status",), missing_fact_ids=("debtor_vat_registration_status",), status="conditional_missing_fact"),
         _claim("claim_vat_relief", "vat_bad_debt_creditor", "Status restrukturyzacyjny, upadłościowy ani likwidacyjny dłużnika nie blokuje ulgi VAT wierzyciela.", "vat_relief_available", {"available": True, "status": "approved", "debtor_insolvency_status_required": False}, ("vat_art_89a_ust_1",), ("invoice_net_amount", "jpk_filing_date_2026_01_25")),
         _claim("claim_vat_base", "vat_bad_debt_creditor", f"Podstawa VAT zmniejsza się o {unpaid_net:,} zł.".replace(",", " "), "vat_relief_amount", {"base_reduction": unpaid_net}, ("vat_art_89a_ust_1",), ("invoice_net_amount", "partial_payment_gross_amount"), "calc_unpaid_net_amount"),
         _claim("claim_vat_tax", "vat_bad_debt_creditor", f"VAT należny zmniejsza się o {unpaid_vat:,} zł.".replace(",", " "), "vat_relief_amount", {"output_tax_reduction": unpaid_vat}, ("vat_art_89a_ust_1",), ("invoice_vat_amount", "partial_payment_gross_amount"), "calc_unpaid_vat_amount"),
         _claim("claim_vat_reversal", "vat_bad_debt_creditor", f"Zapłata odwraca korektę w maju 2026 r. o {unpaid_net:,} zł podstawy i {unpaid_vat:,} zł VAT.".replace(",", " "), "vat_relief_reversal", {"period": "2026-05", "base": unpaid_net, "vat": unpaid_vat}, ("vat_art_89a_ust_4",), ("final_payment_date",), "calc_vat_reversal_period", ("calc_vat_reversal_period", "calc_unpaid_net_amount", "calc_unpaid_vat_amount")),
-        _claim("claim_cit_relief", "cit_bad_debt_creditor", "Zmniejszenie podstawy w CIT-8 za 2025 r. jest warunkowe z uwagi na brak statusu dłużnika na 28 lutego 2026 r.", "cit_relief_available", {"available": None, "status": "conditional_missing_fact"}, ("cit_art_18f_ust_1", "cit_art_18f_ust_10"), ("debtor_status_on_2026_02_28",), "calc_cit_relief_year", status="conditional_missing_fact"),
-        _claim("claim_cit_base", "cit_bad_debt_creditor", f"Warunkowe zmniejszenie podstawy CIT wynosi {unpaid_net:,} zł netto.".replace(",", " "), "cit_relief_amount", {"base_reduction": unpaid_net}, ("cit_art_18f_ust_1", "cit_art_18f_ust_10"), ("debtor_status_on_2026_02_28",), "calc_unpaid_net_amount", status="conditional_missing_fact"),
-        _claim("claim_cit_tax", "cit_bad_debt_creditor", f"Warunkowy efekt przy stawce 19% wynosi {tax_effect:,} zł.".replace(",", " "), "cit_relief_amount", {"tax_effect": tax_effect, "rate": 0.19}, ("cit_art_18f_ust_1", "cit_art_18f_ust_10"), ("debtor_status_on_2026_02_28",), "calc_cit_tax_effect", status="conditional_missing_fact"),
+        _claim("claim_cit_payment_cutoff", "cit_bad_debt_creditor", "Brak uregulowania wierzytelności dla ulgi CIT ocenia się do dnia złożenia zeznania rocznego, a nie na ostatni dzień poprzedniego miesiąca.", "cit_payment_cutoff", {"receivable_payment_cutoff": "return_filing_date"}, ("cit_art_18f_ust_5",), ("cit8_filing_date_2026_03_31", "partial_payment_gross_amount")),
+        _claim("claim_cit_relief", "cit_bad_debt_creditor", "Warunek statusu restrukturyzacyjnego, upadłościowego lub likwidacyjnego dłużnika w CIT bada się na ostatni dzień miesiąca poprzedzającego złożenie zeznania; materiał nie potwierdza statusu na 28 lutego 2026 r.", "cit_debtor_insolvency_condition", {"available": None, "status": "conditional_missing_fact", "debtor_insolvency_reference_date": "last_day_of_previous_month"}, ("cit_art_18f_ust_10",), ("debtor_status_on_2026_02_28",), "calc_cit_relief_year", status="conditional_missing_fact"),
+        _claim("claim_cit_base", "cit_bad_debt_creditor", f"Warunkowe zmniejszenie podstawy CIT wynosi {unpaid_net:,} zł netto.".replace(",", " "), "cit_relief_amount", {"base_reduction": unpaid_net}, ("cit_art_18f_ust_1",), ("cit8_filing_date_2026_03_31", "partial_payment_gross_amount"), "calc_unpaid_net_amount", status="approved"),
+        _claim("claim_cit_tax", "cit_bad_debt_creditor", f"Warunkowy efekt przy stawce 19% wynosi {tax_effect:,} zł.".replace(",", " "), "cit_relief_amount", {"tax_effect": tax_effect, "rate": 0.19}, ("cit_art_18f_ust_1",), ("cit8_filing_date_2026_03_31", "partial_payment_gross_amount"), "calc_cit_tax_effect", status="approved"),
         _claim("claim_cit_reversal", "cit_bad_debt_creditor", "Zapłata 10 maja 2026 r. powoduje zwiększenie podstawy w rozliczeniu CIT za 2026 r.", "cit_relief_reversal", {"year": 2026}, ("cit_art_18f_ust_7",), ("final_payment_date",), "calc_cit_reversal_year", status="conditional_missing_fact"),
         _claim("claim_cit_no_retro", "cit_bad_debt_creditor", "Późniejsza zapłata nie wymaga korekty wstecznej CIT-8 za 2025 r.", "cit_no_retroactive_correction", {"retroactive_correction": False}, ("cit_art_18f_ust_7",), ("final_payment_date",), "calc_no_retroactive_correction", ("calc_no_retroactive_correction", "calc_cit_relief_year"), status="conditional_missing_fact"),
     ]

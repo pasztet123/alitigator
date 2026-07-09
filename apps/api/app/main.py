@@ -85,7 +85,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "0.9.8"
+API_VERSION = "0.9.9"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 AVAILABLE_MODELS = [
@@ -1088,6 +1088,10 @@ GENERIC_PRIMARY_LAW_PLACEHOLDER_RE = re.compile(
     r"zweryfikowany przepis wskazany w źródłach(?: primary law)?|\bten przepis\b",
     re.IGNORECASE,
 )
+EMPTY_LEGAL_REFERENCE_SLOT_RE = re.compile(
+    r"\(\s*i\s+ust\.|\b(?:jest|regulowan\w*|wymaga|nakłada|wynika\s+z|podstawa\s+prawna:?)\s+ustawy\s+o\s+(?:VAT|CIT)\b",
+    re.IGNORECASE,
+)
 UNCERTAIN_PROVISION_PHRASES_RE = re.compile(
     r"\b(lub|albo)\s+(?:inny|odpowiedni|właściwy|wlasciwy)\s+przepis\b|"
     r"\bodpowiedni przepis\b|"
@@ -1210,6 +1214,7 @@ def validate_final_output(
         "empty_required_sections": empty_required_sections,
         "sources_without_sources": sources_without_sources,
         "no_placeholder_tokens": not bool(GENERIC_PRIMARY_LAW_PLACEHOLDER_RE.search(stripped_reply)),
+        "no_empty_legal_reference_slots": not bool(EMPTY_LEGAL_REFERENCE_SLOT_RE.search(stripped_reply)),
         "no_uncertain_provision_phrases": not bool(
             UNCERTAIN_PROVISION_PHRASES_RE.search(stripped_reply)
             or UNCERTAIN_NUMBERING_FRAGMENT_RE.search(stripped_reply)
@@ -1229,6 +1234,7 @@ def validate_final_output(
         or unfinished_sentence
         or (expected_domains and len(rendered_domains) < len(expected_domains))
         or not validation["no_placeholder_tokens"]
+        or not validation["no_empty_legal_reference_slots"]
         or not validation["no_uncertain_provision_phrases"]
         or not validation["tables_closed"]
     ):
@@ -1248,6 +1254,8 @@ def validate_final_output(
             failed_checks.append(f"brak osi: {', '.join(missing_domains)}")
         if not validation["no_placeholder_tokens"]:
             failed_checks.append("placeholder źródłowy")
+        if not validation["no_empty_legal_reference_slots"]:
+            failed_checks.append("puste miejsce po referencji prawnej")
         if not validation["no_uncertain_provision_phrases"]:
             failed_checks.append("niepewna podstawa prawna")
         if not validation["tables_closed"]:
@@ -2593,6 +2601,11 @@ async def chat(
                         "result_code": claim.result_code,
                         "result": claim.result,
                         "provision_ids": list(claim.controlling_provisions),
+                        "display_references": [
+                            str(source.get("display_reference") or "")
+                            for source in controlled_result.renderer_payload.get("provisions", [])
+                            if str(source.get("provision_id") or "") in claim.controlling_provisions
+                        ],
                         "fact_ids": list(claim.fact_dependencies),
                         "calculation_id": claim.calculation_id,
                         "calculation_ids": list(claim.calculation_ids),
@@ -2600,6 +2613,27 @@ async def chat(
                     for claim in controlled_result.claims.values()
                 ],
                 "renderer_payload": controlled_result.renderer_payload,
+                "reference_trace": {
+                    "claim_stage": [
+                        {
+                            "claim_id": claim.claim_id,
+                            "display_references": [
+                                str(source.get("display_reference") or "")
+                                for source in controlled_result.renderer_payload.get("provisions", [])
+                                if str(source.get("provision_id") or "") in claim.controlling_provisions
+                            ],
+                        }
+                        for claim in controlled_result.claims.values()
+                    ],
+                    "payload_stage": controlled_result.renderer_payload.get("provisions", []),
+                    "response_stage": sorted(
+                        {
+                            str(source.get("display_reference") or "")
+                            for source in controlled_result.renderer_payload.get("provisions", [])
+                            if str(source.get("display_reference") or "") in controlled_reply
+                        }
+                    ),
+                },
                 "render_validation": {
                     "passed": controlled_result.render_validation.passed,
                     "missing_claim_ids": list(controlled_result.render_validation.missing_claim_ids),

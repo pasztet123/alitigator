@@ -85,7 +85,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "0.9.10"
+API_VERSION = "0.9.11"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 AVAILABLE_MODELS = [
@@ -2583,6 +2583,7 @@ async def chat(
                         "fact_type": fact.fact_type,
                         "value": fact.value,
                         "status": fact.status,
+                        "subject_role": fact.subject_role,
                     }
                     for fact_id, fact in controlled_result.facts.items()
                 },

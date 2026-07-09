@@ -21,6 +21,7 @@ from app.controlled_legal_pipeline import (
     validate_rendered_answer,
 )
 from app.legal_pipeline import (
+    FactRecord,
     LegalClaim,
     ProvisionRecord,
     ProvisionRegistry,
@@ -95,6 +96,16 @@ class BadDebtPipelineEndToEndTests(unittest.TestCase):
                 ],
                 "conditional_missing_fact",
             )
+            self.assertTrue(
+                result.claims["claim_vat_debtor_registration_path"].result[
+                    "missing_debtor_vat_status_detected"
+                ]
+            )
+            self.assertFalse(
+                result.claims["claim_vat_debtor_registration_path"].result[
+                    "standard_vat_path_approved_without_fact"
+                ]
+            )
             self.assertEqual(
                 result.claims["claim_cit_relief"].missing_fact_dependencies,
                 ("debtor_status_on_2026_02_28",),
@@ -127,13 +138,19 @@ class BadDebtPipelineEndToEndTests(unittest.TestCase):
                 result.claims["claim_vat_payment_cutoff"].result[
                     "receivable_payment_cutoff"
                 ],
-                "through_filing_date",
+                "through_return_filing_date",
             )
             self.assertEqual(
                 result.claims["claim_vat_creditor_registration_date"].result[
                     "creditor_vat_status_reference_date"
                 ],
-                "day_before_filing",
+                "day_before_return_filing",
+            )
+            self.assertEqual(
+                result.claims["claim_vat_creditor_registration_date"].result[
+                    "creditor_registration_reference_date"
+                ],
+                "day_before_return_filing",
             )
             self.assertEqual(
                 result.claims["claim_vat_reversal"].result["period"], "2026-05"
@@ -244,10 +261,57 @@ class BadDebtPipelineEndToEndTests(unittest.TestCase):
             "debtor_vat_registration_status",
             result.claims["claim_vat_debtor_registration_path"].fact_dependencies,
         )
+        self.assertEqual(
+            result.facts["debtor_vat_registration_status"].subject_role,
+            "debtor",
+        )
+        self.assertEqual(
+            result.facts[
+                "creditor_vat_registration_status_on_2026_01_24"
+            ].subject_role,
+            "creditor",
+        )
         self.assertNotIn(
             "debtor_status_on_2026_02_28",
             result.claims["claim_vat_debtor_registration_path"].fact_dependencies,
         )
+
+    def test_subject_role_mismatch_blocks_fact_substitution(self) -> None:
+        facts = parse_bad_debt_facts(BENCHMARK_QUERY)
+        calculations = calculate_bad_debt(facts)
+        claim = LegalClaim(
+            claim_id="bad_subject_substitution",
+            axis_id="vat_bad_debt_creditor",
+            claim_type="legal_conclusion",
+            text="Nie wolno użyć statusu wierzyciela jako statusu dłużnika.",
+            source_provisions=("vat_art_89a_ust_2",),
+            controlling_provisions=("vat_art_89a_ust_2",),
+            fact_dependencies=("debtor_vat_registration_status",),
+            fact_subject_roles={"debtor_vat_registration_status": "debtor"},
+            status="approved",
+            result_code="vat_path_selection",
+            taxpayer_role="creditor",
+            legal_mechanism="bad_debt_relief",
+        )
+        substituted_facts = {
+            **facts.records,
+            "debtor_vat_registration_status": FactRecord(
+                "debtor_vat_registration_status",
+                "vat_registration_status",
+                True,
+                subject_role="creditor",
+            ),
+        }
+
+        validation = validate_claim(
+            claim,
+            build_bad_debt_registry(),
+            target_date="2026-03-31",
+            facts=substituted_facts,
+            calculations=calculations,
+        )
+
+        self.assertIn("subject_role_mismatch", validation.errors)
 
     def test_cit_payment_and_insolvency_dates_are_separate(self) -> None:
         result = run_bad_debt_pipeline(BENCHMARK_QUERY)

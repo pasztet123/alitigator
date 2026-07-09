@@ -181,6 +181,7 @@ class FactRecord:
     source: str = "user_question"
     confidence: float = 1.0
     date: Optional[str] = None
+    subject_role: str = "case"
 
 
 def build_bad_debt_status_facts() -> dict[str, FactRecord]:
@@ -191,12 +192,14 @@ def build_bad_debt_status_facts() -> dict[str, FactRecord]:
             fact_type="vat_registration_status",
             value=None,
             status="missing",
+            subject_role="debtor",
         ),
         "debtor_insolvency_status": FactRecord(
             fact_id="debtor_insolvency_status",
             fact_type="insolvency_or_restructuring_status",
             value=None,
             status="missing",
+            subject_role="debtor",
         ),
     }
 
@@ -304,6 +307,7 @@ class LegalClaim:
     taxpayer_role: str = ""
     legal_mechanism: str = ""
     provenance: tuple[dict[str, object], ...] = ()
+    fact_subject_roles: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -384,6 +388,18 @@ def validate_claim(
     ]
     if missing_facts:
         errors.append("missing_fact_dependency")
+    subject_role_mismatches = [
+        fact_id
+        for fact_id, expected_role in claim.fact_subject_roles.items()
+        if (
+            fact_id in facts
+            and expected_role
+            and facts[fact_id].subject_role
+            and facts[fact_id].subject_role != expected_role
+        )
+    ]
+    if subject_role_mismatches:
+        errors.append("subject_role_mismatch")
 
     numeric = bool(re.search(r"\b\d+(?:[.,]\d+)?(?:\s*%|\s*zł)?\b", claim.text))
     calculation_bound = (

@@ -355,27 +355,29 @@ def parse_bad_debt_facts(query: str) -> BadDebtFacts:
     payment_date = next((item for item in dates if item == "2026-01-15"), dates[2])
     final_payment_date = next((item for item in dates if item == "2026-05-10"), dates[-1])
     records = {
-        "invoice_net_amount": FactRecord("invoice_net_amount", "money", invoice_net),
-        "invoice_vat_amount": FactRecord("invoice_vat_amount", "money", invoice_vat),
-        "partial_payment_gross_amount": FactRecord("partial_payment_gross_amount", "money", partial_gross, date=payment_date),
-        "due_date": FactRecord("due_date", "date", due_date, date=due_date),
-        "jpk_filing_date_2026_01_25": FactRecord("jpk_filing_date_2026_01_25", "date", "2026-01-25", date="2026-01-25"),
-        "cit8_filing_date_2026_03_31": FactRecord("cit8_filing_date_2026_03_31", "date", "2026-03-31", date="2026-03-31"),
+        "invoice_net_amount": FactRecord("invoice_net_amount", "money", invoice_net, subject_role="transaction"),
+        "invoice_vat_amount": FactRecord("invoice_vat_amount", "money", invoice_vat, subject_role="transaction"),
+        "partial_payment_gross_amount": FactRecord("partial_payment_gross_amount", "money", partial_gross, date=payment_date, subject_role="transaction"),
+        "due_date": FactRecord("due_date", "date", due_date, date=due_date, subject_role="transaction"),
+        "jpk_filing_date_2026_01_25": FactRecord("jpk_filing_date_2026_01_25", "date", "2026-01-25", date="2026-01-25", subject_role="creditor"),
+        "cit8_filing_date_2026_03_31": FactRecord("cit8_filing_date_2026_03_31", "date", "2026-03-31", date="2026-03-31", subject_role="creditor"),
         "creditor_vat_registration_status_on_2026_01_24": FactRecord(
             "creditor_vat_registration_status_on_2026_01_24",
             "creditor_vat_registration_status",
             None,
             status="missing",
             date="2026-01-24",
+            subject_role="creditor",
         ),
-        "final_payment_date": FactRecord("final_payment_date", "date", final_payment_date, date=final_payment_date),
-        "debtor_vat_registration_status": FactRecord("debtor_vat_registration_status", "vat_registration_status", None, status="missing"),
+        "final_payment_date": FactRecord("final_payment_date", "date", final_payment_date, date=final_payment_date, subject_role="transaction"),
+        "debtor_vat_registration_status": FactRecord("debtor_vat_registration_status", "vat_registration_status", None, status="missing", subject_role="debtor"),
         "debtor_status_on_2026_02_28": FactRecord(
             "debtor_status_on_2026_02_28",
             "debtor_restructuring_bankruptcy_liquidation_status",
             None,
             status="missing",
             date="2026-02-28",
+            subject_role="debtor",
         ),
     }
     return BadDebtFacts(records, invoice_net, invoice_vat, partial_gross, due_date, payment_date, final_payment_date)
@@ -433,8 +435,19 @@ def _claim(
     calculation_id: Optional[str] = None,
     calculation_ids: tuple[str, ...] = (),
     missing_fact_ids: tuple[str, ...] = (),
+    fact_subject_roles: Optional[dict[str, str]] = None,
     status: str = "approved",
 ) -> LegalClaim:
+    inferred_fact_subject_roles = {
+        fact_id: (
+            "debtor"
+            if fact_id.startswith("debtor_")
+            else "creditor"
+            if fact_id.startswith("creditor_") or "filing_date" in fact_id
+            else "transaction"
+        )
+        for fact_id in fact_ids
+    }
     return LegalClaim(
         claim_id=claim_id,
         axis_id=axis,
@@ -455,6 +468,7 @@ def _claim(
         result_code=result_code,
         taxpayer_role="creditor",
         legal_mechanism="bad_debt_relief",
+        fact_subject_roles=fact_subject_roles or inferred_fact_subject_roles,
     )
 
 
@@ -468,9 +482,9 @@ def build_bad_debt_claims(
     ninety_day = str(calculations["calc_ninety_day_date"].result)
     claims = [
         _claim("claim_vat_timing", "vat_bad_debt_creditor", f"90. dzień upłynął {ninety_day}; korekta przypada na grudzień 2025 r.", "vat_ninety_day_date", {"date": ninety_day, "period": "2025-12"}, ("vat_art_89a_ust_1a",), ("due_date",), "calc_ninety_day_date", ("calc_ninety_day_date", "calc_vat_relief_period")),
-        _claim("claim_vat_payment_cutoff", "vat_bad_debt_creditor", "Brak uregulowania dla korekty VAT ocenia się do dnia złożenia deklaracji, a nie na dzień poprzedzający jej złożenie.", "vat_payment_cutoff", {"payment_cutoff": "through_filing_date", "receivable_payment_cutoff": "through_filing_date"}, ("vat_art_89a_ust_3",), ("jpk_filing_date_2026_01_25", "partial_payment_gross_amount")),
-        _claim("claim_vat_creditor_registration_date", "vat_bad_debt_creditor", "Status czynnego podatnika VAT po stronie wierzyciela jest odrębnym warunkiem badanym na dzień poprzedzający złożenie deklaracji; materiał nie potwierdza tego faktu.", "vat_creditor_registration_status", {"creditor_vat_status_date": "day_before_filing", "creditor_vat_status_reference_date": "day_before_filing"}, ("vat_art_89a_ust_2_pkt_3_lit_a",), ("creditor_vat_registration_status_on_2026_01_24",), missing_fact_ids=("creditor_vat_registration_status_on_2026_01_24",), status="conditional_missing_fact"),
-        _claim("claim_vat_debtor_registration_path", "vat_bad_debt_creditor", "Wybór między ścieżką podstawową a ścieżką dla podmiotu innego niż podatnik VAT czynny zależy od statusu rejestracji VAT dłużnika; materiał nie potwierdza tego faktu i nie wolno go domniemywać.", "vat_path_selection", {"vat_path_selection_status": "conditional_missing_fact", "debtor_vat_status": "missing"}, ("vat_art_89a_ust_2", "vat_art_89a_ust_2a"), ("debtor_vat_registration_status",), missing_fact_ids=("debtor_vat_registration_status",), status="conditional_missing_fact"),
+        _claim("claim_vat_payment_cutoff", "vat_bad_debt_creditor", "Brak uregulowania dla korekty VAT ocenia się do dnia złożenia deklaracji, a nie na dzień poprzedzający jej złożenie.", "vat_payment_cutoff", {"payment_cutoff": "through_return_filing_date", "receivable_payment_cutoff": "through_return_filing_date"}, ("vat_art_89a_ust_3",), ("jpk_filing_date_2026_01_25", "partial_payment_gross_amount")),
+        _claim("claim_vat_creditor_registration_date", "vat_bad_debt_creditor", "Status czynnego podatnika VAT po stronie wierzyciela jest odrębnym warunkiem badanym na dzień poprzedzający złożenie deklaracji; materiał nie potwierdza tego faktu.", "vat_creditor_registration_status", {"creditor_vat_status_date": "day_before_return_filing", "creditor_vat_status_reference_date": "day_before_return_filing", "creditor_registration_reference_date": "day_before_return_filing"}, ("vat_art_89a_ust_2_pkt_3_lit_a",), ("creditor_vat_registration_status_on_2026_01_24",), missing_fact_ids=("creditor_vat_registration_status_on_2026_01_24",), status="conditional_missing_fact"),
+        _claim("claim_vat_debtor_registration_path", "vat_bad_debt_creditor", "Wybór między ścieżką podstawową a ścieżką dla podmiotu innego niż podatnik VAT czynny zależy od statusu rejestracji VAT dłużnika; materiał nie potwierdza tego faktu i nie wolno go domniemywać.", "vat_path_selection", {"vat_path_selection_status": "conditional_missing_fact", "debtor_vat_status": "missing", "missing_debtor_vat_status_detected": True, "standard_vat_path_approved_without_fact": False}, ("vat_art_89a_ust_2", "vat_art_89a_ust_2a"), ("debtor_vat_registration_status",), missing_fact_ids=("debtor_vat_registration_status",), status="conditional_missing_fact"),
         _claim("claim_vat_relief", "vat_bad_debt_creditor", "Status restrukturyzacyjny, upadłościowy ani likwidacyjny dłużnika nie blokuje ulgi VAT wierzyciela.", "vat_relief_available", {"available": True, "status": "approved", "debtor_insolvency_status_required": False}, ("vat_art_89a_ust_1",), ("invoice_net_amount", "jpk_filing_date_2026_01_25")),
         _claim("claim_vat_base", "vat_bad_debt_creditor", f"Podstawa VAT zmniejsza się o {unpaid_net:,} zł.".replace(",", " "), "vat_relief_amount", {"base_reduction": unpaid_net}, ("vat_art_89a_ust_1",), ("invoice_net_amount", "partial_payment_gross_amount"), "calc_unpaid_net_amount"),
         _claim("claim_vat_tax", "vat_bad_debt_creditor", f"VAT należny zmniejsza się o {unpaid_vat:,} zł.".replace(",", " "), "vat_relief_amount", {"output_tax_reduction": unpaid_vat}, ("vat_art_89a_ust_1",), ("invoice_vat_amount", "partial_payment_gross_amount"), "calc_unpaid_vat_amount"),

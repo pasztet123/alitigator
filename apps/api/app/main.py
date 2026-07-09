@@ -85,7 +85,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "0.9.5"
+API_VERSION = "0.9.6"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 AVAILABLE_MODELS = [
@@ -1700,20 +1700,19 @@ def build_chat_system_prompt(
     missing_facts_context: str = "",
     timeline_issue_context: str = "",
 ) -> str:
+    render_completion_instruction = (
+        "\n\nZamknięty kontrakt odpowiedzi:\n"
+        "Zacznij odpowiedź dokładnie od osobnej linii: Teza."
+        " Nie umieszczaj przed nią cytatu, komentarza ani innego tekstu."
+        " Następnie wyrenderuj kolejno sekcje: Analiza, Źródła, Ryzyka i luki."
+        f" Po zakończeniu pełnej odpowiedzi dodaj w osobnej ostatniej linii dokładnie znacznik {RENDER_COMPLETION_MARKER}."
+        " Nie dodawaj nic po tym znaczniku."
+    )
     if not retrieved_context:
-        return SYSTEM_PROMPT + "\n\nNie znaleziono trafnych fragmentów w indeksie źródeł. Nie twórz pozornych źródeł."
-
-    opening_quote = extract_opening_statute_quote(retrieved_chunks, query=user_prompt)
-    opening_instruction = ""
-    if opening_quote:
-        opening_instruction = (
-            " Zacznij odpowiedź od pełnego brzmienia jednego najbardziej trafnego przepisu ustawy,"
-            " bez żadnego wstępu, bez nagłówka i bez parafrazy przed cytatem."
-            " Nie skracaj przepisu, nie urywaj go wielokropkiem i nie podawaj tylko fragmentu jednostki redakcyjnej."
-            " Pierwszy akapit ma być pełnym przepisem albo pełną jednostką redakcyjną zaczynającą się od 'Art.'."
-            " Użyj tego przepisu jako punktu wyjścia: \""
-            + opening_quote
-            + "\". Dopiero po cytacie przejdź do tezy i analizy."
+        return (
+            SYSTEM_PROMPT
+            + "\n\nNie znaleziono trafnych fragmentów w indeksie źródeł. Nie twórz pozornych źródeł."
+            + render_completion_instruction
         )
 
     hint_instruction = (
@@ -1772,12 +1771,6 @@ def build_chat_system_prompt(
         + timeline_issue_context
         + "\nNajpierw nazwij niespójność czasu i rozpisz warianty zgodne z możliwą chronologią."
     ) if timeline_issue_context else ""
-
-    render_completion_instruction = (
-        "\n\nWalidacja kompletności renderu:\n"
-        f"Po zakończeniu pełnej odpowiedzi dodaj w osobnej ostatniej linii dokładnie znacznik {RENDER_COMPLETION_MARKER}."
-        " Nie dodawaj nic po tym znaczniku."
-    )
 
     return (
         SYSTEM_PROMPT
@@ -1923,7 +1916,6 @@ def build_chat_system_prompt(
         + " Przy fakturze od małżonka nieprowadzącego działalności najpierw ustal, czy osoba działa jako podatnik VAT w tej konkretnej sprzedaży, a dopiero potem pisz o obowiązku fakturowania."
         + " W podatku od spadków i darowizn przy darowiźnie między małżonkami sprawdź zwolnienie z art. 4a, termin zgłoszenia, wyjątki od zgłoszenia oraz relację do kwoty z art. 9."
         + " Zasygnalizuj też cywilnoprawną kwestię majątku wspólnego małżonków, jeżeli pytanie mówi tylko o 'majątku prywatnym'."
-        + opening_instruction
         + hint_instruction
         + retrieval_preferences_instruction
         + source_plan_instruction
@@ -2788,6 +2780,20 @@ async def chat(
         missing_facts_context=build_missing_facts_context(missing_required_facts),
         timeline_issue_context=build_timeline_issue_context(timeline_issues),
     )
+    compact_system_prompt = (
+        SYSTEM_PROMPT
+        + "\n\nTRYB COMPACT RETRY."
+        + "\nZacznij dokładnie od: Teza"
+        + "\nWyrenderuj kolejno wyłącznie sekcje: Teza, Analiza, Źródła, Ryzyka i luki."
+        + "\nNie przepisuj pełnych dokumentów ani pełnego brzmienia artykułów."
+        + "\nZachowaj wszystkie osie podatkowe, ale każdą opisz maksymalnie w 3 krótkich akapitach."
+        + f"\nOstatnią linią musi być dokładnie {RENDER_COMPLETION_MARKER}."
+        + ("\n\nZwalidowane reguły:\n" + build_legal_rules_context(legal_rules) if legal_rules else "")
+        + ("\n\nTrace podstaw prawnych:\n" + build_legal_rule_trace_context(legal_rules) if legal_rules else "")
+        + ("\n\nBrakujące fakty:\n" + build_missing_facts_context(missing_required_facts) if missing_required_facts else "")
+        + "\n\nOgraniczony kontekst źródłowy:\n"
+        + retrieved_context[:30000]
+    )
 
     payload = {
         "model": model,
@@ -2817,12 +2823,14 @@ async def chat(
             for attempt in range(2):
                 attempt_payload = dict(payload)
                 if attempt:
-                    attempt_payload["system"] = (
-                        system_prompt
-                        + "\n\nTRYB COMPACT RETRY: zachowaj wszystkie wymagane sekcje i zatwierdzone tezy,"
-                        + " usuń dygresje i skróć objaśnienia. Nie pomijaj żadnej osi ani podstawy prawnej."
-                    )
+                    attempt_payload["system"] = compact_system_prompt
                     attempt_payload["temperature"] = 0
+                    attempt_payload["messages"] = [
+                        {
+                            "role": "user",
+                            "content": [{"type": "text", "text": latest_user_message}],
+                        }
+                    ]
                 response = await client.post(
                     ANTHROPIC_API_URL, headers=headers, json=attempt_payload
                 )

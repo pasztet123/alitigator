@@ -4,12 +4,37 @@ import unittest
 
 from app.main import (
     RENDER_COMPLETION_MARKER,
+    build_chat_system_prompt,
     enforce_reply_guardrails,
     validate_final_output,
 )
 
 
 class ConditionalAnswerGuardrailTests(unittest.TestCase):
+    def test_empty_retrieval_prompt_still_requires_complete_contract(self) -> None:
+        prompt = build_chat_system_prompt(
+            "Pytanie bez trafnych źródeł",
+            "",
+            [],
+        )
+
+        self.assertIn(RENDER_COMPLETION_MARKER, prompt)
+        self.assertIn("Zacznij odpowiedź dokładnie", prompt)
+        self.assertIn("Teza", prompt)
+
+    def test_writer_is_not_told_to_quote_full_statute_before_thesis(self) -> None:
+        prompt = build_chat_system_prompt(
+            "Pytanie",
+            "Zweryfikowany kontekst źródłowy.",
+            [],
+        )
+
+        self.assertNotIn(
+            "Zacznij odpowiedź od pełnego brzmienia",
+            prompt,
+        )
+        self.assertIn("Nie umieszczaj przed nią cytatu", prompt)
+
     def test_missing_fact_keeps_required_thesis_heading(self) -> None:
         reply = (
             "Teza\nWynik zależy od brakującego faktu.\n\n"

@@ -161,6 +161,7 @@ def build_records(
     legal_state_date: str,
     published_date: str,
     tax_tag: str,
+    source_subtype: str = "consolidated_text",
 ) -> list[dict]:
     records = []
     for chunk in chunks_from_pages(extract_act_pages(pdf_path, short_title=short_title), target_chars):
@@ -172,7 +173,7 @@ def build_records(
                 "document_id": f"pl-{law_id}-{chunk['provision'].replace(' ', '-')}{suffix}",
                 "source": "eli",
                 "source_type": "statute",
-                "source_subtype": "consolidated_text",
+                "source_subtype": source_subtype,
                 "authority": "Kancelaria Sejmu / Marszałek Sejmu RP",
                 "jurisdiction": "PL",
                 "act_title": act_title,
@@ -215,6 +216,11 @@ def main() -> None:
     parser.add_argument("--legal-state-date", default="2026-03-10")
     parser.add_argument("--published-date", default="2026-03-30")
     parser.add_argument("--tax-tag", default="AKCYZA")
+    parser.add_argument(
+        "--source-subtype",
+        default="consolidated_text",
+        choices=("consolidated_text", "codified_text"),
+    )
     args = parser.parse_args()
     records = build_records(
         args.pdf,
@@ -227,6 +233,7 @@ def main() -> None:
         legal_state_date=args.legal_state_date,
         published_date=args.published_date,
         tax_tag=args.tax_tag,
+        source_subtype=args.source_subtype,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as handle:

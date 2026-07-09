@@ -67,6 +67,56 @@ alter table if exists public.eureka_chunks add column if not exists embedding_mo
 create index if not exists eureka_chunks_document_id_idx on public.eureka_chunks(document_id);
 create index if not exists eureka_chunks_search_vector_idx on public.eureka_chunks using gin(search_vector);
 
+create table if not exists public.legal_document_versions (
+    document_id text not null,
+    version_id text not null,
+    document_type text not null,
+    title text not null,
+    citation text not null,
+    jurisdiction text not null default 'PL',
+    effective_from date not null,
+    effective_to date,
+    publication_date date,
+    is_consolidated_text boolean not null default false,
+    primary key (document_id, version_id)
+);
+
+create table if not exists public.legal_provisions (
+    provision_id text primary key,
+    document_id text not null,
+    version_id text not null,
+    citation text not null,
+    article text not null,
+    paragraph text,
+    point text,
+    letter text,
+    provision_text text not null,
+    effective_from date not null,
+    effective_to date,
+    status text not null check (status in ('active', 'repealed', 'unknown')),
+    source_document_id text not null,
+    source_chunk_ids jsonb not null default '[]'::jsonb,
+    source_span_start integer not null default 0,
+    source_span_end integer not null default 0,
+    references jsonb not null default '[]'::jsonb,
+    amends text,
+    repealed_by text,
+    tax_domain text not null default '',
+    taxpayer_role text not null default '',
+    legal_mechanism text not null default '',
+    entailed_result_codes jsonb not null default '[]'::jsonb,
+    foreign key (document_id, version_id)
+        references public.legal_document_versions(document_id, version_id)
+);
+
+create index if not exists legal_provisions_exact_idx
+    on public.legal_provisions(document_id, citation, effective_from, effective_to, status);
+
+alter table if exists public.legal_provisions add column if not exists tax_domain text not null default '';
+alter table if exists public.legal_provisions add column if not exists taxpayer_role text not null default '';
+alter table if exists public.legal_provisions add column if not exists legal_mechanism text not null default '';
+alter table if exists public.legal_provisions add column if not exists entailed_result_codes jsonb not null default '[]'::jsonb;
+
 create or replace function public.array_dot_product(a double precision[], b double precision[])
 returns double precision
 language sql

@@ -35,6 +35,14 @@ from app.billing import (
     update_profile,
 )
 from app.eureka_ingest import DEFAULT_CONCURRENCY, DEFAULT_PAGE_SIZE, DEFAULT_SORT, FetchConfig, run_ingest
+from app.bad_debt_pipeline import is_bad_debt_relief_query, run_bad_debt_pipeline
+from app.controlled_legal_pipeline import is_mixed_invoice_query, run_legal_pipeline
+from app.legal_pipeline import (
+    build_claims_from_rules,
+    build_registry_from_rules,
+    claim_to_dict,
+    validate_claim,
+)
 from app.rag import (
     RagChunk,
     add_primary_source_fallback_chunks,
@@ -50,6 +58,7 @@ from app.rag import (
     detect_missing_required_facts,
     detect_mechanisms,
     extract_legal_rules_from_statute_chunks,
+    filter_legal_rules_for_target_date,
     get_rag_config,
     inspect_search,
     index_exists,
@@ -935,12 +944,67 @@ def build_analysis_trace(
     missing_required_facts: list[str],
     timeline_issues: list[dict[str, str]],
     allowed_provision_references: set[str],
+    axis_coverage: Optional[list[dict[str, object]]] = None,
 ) -> dict[str, object]:
+    target_date_match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", user_prompt)
+    target_date = (
+        target_date_match.group(1)
+        if target_date_match
+        else datetime.now(timezone.utc).date().isoformat()
+    )
+    registry = build_registry_from_rules(legal_rules)
+    claims = build_claims_from_rules(
+        legal_rules,
+        axis_ids=[
+            str(item.get("axis_id") or "general")
+            for item in (axis_coverage or [])
+        ],
+        missing_facts=missing_required_facts,
+    )
+    claim_validations = [
+        validate_claim(
+            claim,
+            registry,
+            target_date=target_date,
+            facts={},
+            calculations={},
+        )
+        for claim in claims
+    ]
     return {
         "query": user_prompt,
+        "target_date": target_date,
         "required_missing_facts": list(missing_required_facts),
         "timeline_issues": timeline_issues,
         "allowed_provision_references": sorted(allowed_provision_references),
+        "axis_coverage": axis_coverage or [],
+        "provision_registry": {
+            "validation": registry.validate(),
+            "provisions": [
+                {
+                    "provision_id": provision.provision_id,
+                    "document_id": provision.document_id,
+                    "version_id": provision.version_id,
+                    "citation": provision.citation,
+                    "effective_from": provision.effective_from,
+                    "effective_to": provision.effective_to,
+                    "status": provision.status,
+                }
+                for provision in registry.provisions
+            ],
+        },
+        "claims": [claim_to_dict(claim) for claim in claims],
+        "claim_validation": [
+            {
+                "claim_id": validation.claim_id,
+                "claim_supported": validation.claim_supported,
+                "temporal_match": validation.temporal_match,
+                "facts_satisfy_conditions": validation.facts_satisfy_conditions,
+                "calculation_bound": validation.calculation_bound,
+                "errors": list(validation.errors),
+            }
+            for validation in claim_validations
+        ],
         "claim_source_traces": [
             {
                 "claim_id": str(rule.get("provision_id") or ""),
@@ -992,14 +1056,138 @@ PROVISION_REFERENCE_RENDER_RE = re.compile(
     r"\bart\.?\s*\d+[a-z]?(?:\s+ust\.?\s*\d+[a-z]?)?(?:\s+pkt\s*\d+[a-z]?)?(?:\s+lit\.?\s*[a-z])?",
     re.IGNORECASE,
 )
+DUPLICATED_PROVISION_REFERENCE_RE = re.compile(
+    r"\b(art\.?\s*\d+[a-z]?(?:\s+ust\.?\s*\d+[a-z]?)?(?:\s+pkt\s*\d+[a-z]?)?(?:\s+lit\.?\s*[a-z])?)\s+\1\b",
+    re.IGNORECASE,
+)
+GENERIC_PRIMARY_LAW_PLACEHOLDER_RE = re.compile(
+    r"zweryfikowany przepis wskazany w źródłach(?: primary law)?",
+    re.IGNORECASE,
+)
 UNCERTAIN_PROVISION_PHRASES_RE = re.compile(
-    r"\b(lub|albo)\s+(?:inny|odpowiedni|właściwy|wlasciwy)\s+przepis\b|\bodpowiedni przepis\b",
+    r"\b(lub|albo)\s+(?:inny|odpowiedni|właściwy|wlasciwy)\s+przepis\b|"
+    r"\bodpowiedni przepis\b|"
+    r"\bzależnie od numeracji\b|\bzaleznie od numeracji\b",
+    re.IGNORECASE,
+)
+UNCERTAIN_NUMBERING_FRAGMENT_RE = re.compile(
+    r"(?:lub|albo)\s+(?:ust\.?\s*\d+[a-z]?|pkt\s*\d+[a-z]?|lit\.?\s*[a-z])(?:\s+[a-z]\.)?\s*(?:-|–)?\s*(?:zależnie|zaleznie)\s+od\s+numeracji",
+    re.IGNORECASE,
+)
+UNCERTAIN_NUMBERING_RESIDUE_RE = re.compile(
+    r"\s+(?:lub|albo)\s+ust\.?\s*\d+[a-z]?\s*(?:-|–)\s*(?=art\.)",
     re.IGNORECASE,
 )
 DEFINITIVE_PERCENT_RE = re.compile(
     r"\b(?:wynosi|obowiązuje|obowiazuje|należy zastosować|nalezy zastosowac|stosuje się|stosuje sie)\s+(\d+(?:[.,]\d+)?)\s*%",
     re.IGNORECASE,
 )
+RENDER_COMPLETION_MARKER = "<<ALITIGATOR_COMPLETE>>"
+
+
+def select_best_claim_trace_for_text(text: str, claim_source_traces: list[dict[str, object]]) -> Optional[dict[str, object]]:
+    normalized_text = " ".join(text.lower().split())
+    if not claim_source_traces:
+        return None
+
+    def trace_score(trace: dict[str, object]) -> tuple[int, int]:
+        haystack = " ".join(
+            str(trace.get(key) or "")
+            for key in ("claim", "provision_reference", "source_document_id", "source_span")
+        ).lower()
+        tokens = [token for token in re.findall(r"[0-9a-ząćęłńóśźż]{4,}", normalized_text, re.IGNORECASE)]
+        overlap = sum(1 for token in tokens if token in haystack)
+        exact_ref_bonus = 4 if normalize_provision_reference(str(trace.get("provision_reference") or "")) in normalized_text else 0
+        return (overlap + exact_ref_bonus, len(str(trace.get("source_span") or "")))
+
+    return max(claim_source_traces, key=trace_score)
+
+
+def render_exact_primary_law_reference(trace: dict[str, object]) -> str:
+    return str(trace.get("provision_reference") or "").strip()
+
+
+def render_exact_primary_law_trace_block(claim_source_traces: list[dict[str, object]]) -> str:
+    if not claim_source_traces:
+        return ""
+    lines = ["Dokładne oparcie w primary law"]
+    for trace in claim_source_traces:
+        provision_reference = str(trace.get("provision_reference") or "").strip()
+        source_document_id = str(trace.get("source_document_id") or "").strip()
+        source_span = str(trace.get("source_span") or "").strip()
+        if not provision_reference or not source_document_id or not source_span:
+            continue
+        lines.append(f"- {source_document_id} | {provision_reference} | {source_span}.")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def strip_render_completion_marker(reply: str) -> str:
+    return reply.replace(RENDER_COMPLETION_MARKER, "").strip()
+
+
+def validate_final_output(
+    reply: str,
+    *,
+    axis_coverage: list[dict[str, object]],
+    expected_sections: list[str],
+) -> dict[str, object]:
+    has_completion_marker = RENDER_COMPLETION_MARKER in reply
+    stripped_reply = strip_render_completion_marker(reply)
+    structured = parse_structured_reply(stripped_reply)
+    rendered_section_titles = [section.title for section in (structured.sections if structured else [])]
+    missing_sections = [section for section in expected_sections if section not in rendered_section_titles]
+
+    expected_domains = sorted(
+        {
+            token
+            for token in ("VAT", "CIT", "PIT", "PCC", "SD", "AKCYZA", "ORDYNACJA")
+            if any(token in str(item.get("label") or "").upper() or token in str(item.get("axis_id") or "").upper() for item in axis_coverage)
+        }
+    )
+    rendered_domains = [
+        domain for domain in expected_domains
+        if re.search(rf"(^|\n)(?:###\s*)?{re.escape(domain)}\b", stripped_reply, re.IGNORECASE)
+    ]
+
+    last_meaningful_line = next(
+        (line.strip() for line in reversed(stripped_reply.splitlines()) if line.strip()),
+        "",
+    )
+    unfinished_sentence = bool(last_meaningful_line) and not re.search(r"[.!?)]$", last_meaningful_line)
+    validation = {
+        "expected_axes": len(axis_coverage),
+        "rendered_axes": len(rendered_domains) if expected_domains else len(axis_coverage),
+        "missing_planned_sections": len(missing_sections),
+        "unfinished_sentence": unfinished_sentence,
+        "has_completion_marker": has_completion_marker,
+        "expected_sections": expected_sections,
+        "rendered_sections": rendered_section_titles,
+        "no_placeholder_tokens": not bool(GENERIC_PRIMARY_LAW_PLACEHOLDER_RE.search(stripped_reply)),
+        "no_uncertain_provision_phrases": not bool(
+            UNCERTAIN_PROVISION_PHRASES_RE.search(stripped_reply)
+            or UNCERTAIN_NUMBERING_FRAGMENT_RE.search(stripped_reply)
+        ),
+        "tables_closed": stripped_reply.count("|") == 0
+        or all(
+            line.count("|") >= 2
+            for line in stripped_reply.splitlines()
+            if line.strip().startswith("|")
+        ),
+    }
+    if (
+        not has_completion_marker
+        or missing_sections
+        or unfinished_sentence
+        or (expected_domains and len(rendered_domains) < len(expected_domains))
+        or not validation["no_placeholder_tokens"]
+        or not validation["no_uncertain_provision_phrases"]
+        or not validation["tables_closed"]
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="Model zwrócił niekompletną odpowiedź. Spróbuj ponowić zapytanie.",
+        )
+    return validation
 
 
 def enforce_reply_guardrails(
@@ -1008,17 +1196,33 @@ def enforce_reply_guardrails(
     allowed_provision_references: set[str],
     missing_required_facts: list[str],
     timeline_issues: list[dict[str, str]],
+    claim_source_traces: Optional[list[dict[str, object]]] = None,
 ) -> str:
-    sanitized = UNCERTAIN_PROVISION_PHRASES_RE.sub("zweryfikowany przepis wskazany w źródłach", reply)
+    traces = claim_source_traces or []
+
+    def replace_uncertain_fragment(match: re.Match[str]) -> str:
+        trace = select_best_claim_trace_for_text(reply, traces)
+        return render_exact_primary_law_reference(trace) if trace else "ten przepis"
+
+    sanitized = UNCERTAIN_PROVISION_PHRASES_RE.sub(replace_uncertain_fragment, reply)
+    sanitized = UNCERTAIN_NUMBERING_FRAGMENT_RE.sub(replace_uncertain_fragment, sanitized)
+    sanitized = UNCERTAIN_NUMBERING_RESIDUE_RE.sub(" ", sanitized)
 
     def replace_unverified_reference(match: re.Match[str]) -> str:
         reference = match.group(0)
         normalized = normalize_provision_reference(reference)
         if normalized in allowed_provision_references:
             return reference
-        return "zweryfikowany przepis wskazany w źródłach primary law"
+        trace = select_best_claim_trace_for_text(match.string, traces)
+        return render_exact_primary_law_reference(trace) if trace else "ten przepis"
 
     sanitized = PROVISION_REFERENCE_RENDER_RE.sub(replace_unverified_reference, sanitized)
+    sanitized = GENERIC_PRIMARY_LAW_PLACEHOLDER_RE.sub(
+        lambda match: render_exact_primary_law_reference(select_best_claim_trace_for_text(match.string, traces) or {}),
+        sanitized,
+    )
+    sanitized = DUPLICATED_PROVISION_REFERENCE_RE.sub(r"\1", sanitized)
+    sanitized = re.sub(r"\bze\s+(art\.)", r"z \1", sanitized, flags=re.IGNORECASE)
 
     if missing_required_facts:
         sanitized = DEFINITIVE_PERCENT_RE.sub(r"możliwy jest wariant \1%", sanitized)
@@ -1065,7 +1269,8 @@ def build_demo_reply(user_prompt: str, retrieved_chunks: list, *, retrieval_prom
         "Źródła\n"
         f"{citations or 'Nie znaleziono trafnych fragmentów w lokalnym indeksie.'}\n\n"
         "Ryzyka i luki\n"
-        "Do odpowiedzi merytorycznej potrzebny jest skonfigurowany model językowy; powyższe źródła są jednak dostępne w RAG."
+        "Do odpowiedzi merytorycznej potrzebny jest skonfigurowany model językowy; powyższe źródła są jednak dostępne w RAG.\n\n"
+        f"{RENDER_COMPLETION_MARKER}"
     )
 
 
@@ -1519,6 +1724,12 @@ def build_chat_system_prompt(
         + "\nNajpierw nazwij niespójność czasu i rozpisz warianty zgodne z możliwą chronologią."
     ) if timeline_issue_context else ""
 
+    render_completion_instruction = (
+        "\n\nWalidacja kompletności renderu:\n"
+        f"Po zakończeniu pełnej odpowiedzi dodaj w osobnej ostatniej linii dokładnie znacznik {RENDER_COMPLETION_MARKER}."
+        " Nie dodawaj nic po tym znaczniku."
+    )
+
     return (
         SYSTEM_PROMPT
         + "\n\nPoniżej znajdują się zweryfikowane dokumenty z indeksu źródeł prawnych."
@@ -1671,6 +1882,7 @@ def build_chat_system_prompt(
         + legal_rule_trace_instruction
         + missing_facts_instruction
         + timeline_issue_instruction
+        + render_completion_instruction
         + retrieval_coverage_instruction
         + "\n\nKontekst źródłowy:\n"
         + retrieved_context
@@ -2254,6 +2466,130 @@ async def chat(
     retrieval_preferences_context = build_retrieval_preferences_context(request.retrieval_preferences)
     effective_user_prompt = build_effective_user_prompt(latest_user_message, request.intent_hints)
 
+    if is_bad_debt_relief_query(effective_user_prompt):
+        controlled_result = run_bad_debt_pipeline(effective_user_prompt)
+        controlled_reply = controlled_result.answer
+        persisted_assistant_message = None
+        if api_key:
+            consume_credit_for_chat(
+                user_id=current_user.id,
+                model=model,
+                chat_id=chat_id,
+                request_id=str(uuid4()),
+            )
+        if chat_storage_available:
+            persisted_assistant_message = persist_chat_exchange(
+                chat_id,
+                user_id=current_user.id,
+                messages=sanitized_messages,
+                reply=controlled_reply,
+            )
+        return ChatResponse(
+            reply=controlled_reply,
+            mode="live" if api_key else "demo",
+            model=model,
+            redactions=sorted(set(redactions)),
+            analysis_trace={
+                "pipeline": "bad_debt_claim_renderer",
+                "facts": {
+                    fact_id: {
+                        "fact_id": fact.fact_id,
+                        "fact_type": fact.fact_type,
+                        "value": fact.value,
+                        "status": fact.status,
+                    }
+                    for fact_id, fact in controlled_result.facts.items()
+                },
+                "calculations": {
+                    calculation_id: {
+                        "calculation_id": calculation.calculation_id,
+                        "operation": calculation.operation,
+                        "result": calculation.result,
+                    }
+                    for calculation_id, calculation in controlled_result.calculations.items()
+                },
+                "claims": [
+                    {
+                        "claim_id": claim.claim_id,
+                        "status": claim.status,
+                        "result_code": claim.result_code,
+                        "result": claim.result,
+                        "provision_ids": list(claim.controlling_provisions),
+                        "fact_ids": list(claim.fact_dependencies),
+                        "calculation_id": claim.calculation_id,
+                        "calculation_ids": list(claim.calculation_ids),
+                    }
+                    for claim in controlled_result.claims.values()
+                ],
+                "renderer_payload": controlled_result.renderer_payload,
+                "render_validation": {
+                    "passed": controlled_result.render_validation.passed,
+                    "missing_claim_ids": list(controlled_result.render_validation.missing_claim_ids),
+                    "placeholder_count": controlled_result.render_validation.placeholder_count,
+                    "thesis_contradictions": list(controlled_result.render_validation.thesis_contradictions),
+                    "truncated": controlled_result.render_validation.truncated,
+                },
+            },
+            chat_id=chat_id if chat_storage_available else None,
+            assistant_message_id=(persisted_assistant_message or {}).get("id"),
+            structured_reply=parse_structured_reply(controlled_reply),
+        )
+
+    # Controlled cases bypass the legacy free-form writer entirely. The renderer
+    # receives only validated claims and exact registry references.
+    if is_mixed_invoice_query(effective_user_prompt):
+        controlled_result = run_legal_pipeline(effective_user_prompt)
+        controlled_reply = controlled_result.answer
+        persisted_assistant_message = None
+        if api_key:
+            consume_credit_for_chat(
+                user_id=current_user.id,
+                model=model,
+                chat_id=chat_id,
+                request_id=str(uuid4()),
+            )
+        if chat_storage_available:
+            persisted_assistant_message = persist_chat_exchange(
+                chat_id,
+                user_id=current_user.id,
+                messages=sanitized_messages,
+                reply=controlled_reply,
+            )
+        return ChatResponse(
+            reply=controlled_reply,
+            mode="live" if api_key else "demo",
+            model=model,
+            redactions=sorted(set(redactions)),
+            analysis_trace={
+                "pipeline": "controlled_claim_renderer",
+                "claims": [
+                    {
+                        "claim_id": claim.claim_id,
+                        "status": claim.status,
+                        "result": claim.result,
+                        "controlling_provisions": list(claim.controlling_provisions),
+                        "dependency_provisions": list(claim.dependency_provisions),
+                    }
+                    for claim in controlled_result.claims.values()
+                ],
+                "renderer_payload": controlled_result.renderer_payload,
+                "render_validation": {
+                    "passed": controlled_result.render_validation.passed,
+                    "missing_claim_ids": list(controlled_result.render_validation.missing_claim_ids),
+                    "placeholder_count": controlled_result.render_validation.placeholder_count,
+                    "unknown_provision_ids": list(controlled_result.render_validation.unknown_provision_ids),
+                    "thesis_contradictions": list(controlled_result.render_validation.thesis_contradictions),
+                    "truncated": controlled_result.render_validation.truncated,
+                    "missing_required_sections": list(
+                        controlled_result.render_validation.missing_required_sections
+                    ),
+                },
+            },
+            chat_id=chat_id if chat_storage_available else None,
+            assistant_message_id=(persisted_assistant_message or {}).get("id"),
+            structured_reply=parse_structured_reply(controlled_reply),
+        )
+
     retrieved_chunks = search_chat_chunks(
         effective_user_prompt,
         include_interpretations=(request.retrieval_preferences.include_interpretations if request.retrieval_preferences else True),
@@ -2290,9 +2626,31 @@ async def chat(
         include_interpretations=(request.retrieval_preferences.include_interpretations if request.retrieval_preferences else True),
         include_judgments=(request.retrieval_preferences.include_judgments if request.retrieval_preferences else None),
     )
+    axis_coverage = [
+        {
+            "axis_id": item.axis_id,
+            "label": item.label,
+            "controlling_rule_present": item.controlling_rule_present,
+            "current_law_source_present": item.current_law_source_present,
+            "relevant_resolution_present": item.relevant_resolution_present,
+            "primary_source_present": item.primary_source_present,
+            "required_treaty_present": item.required_treaty_present,
+            "missing_source_types": item.missing_source_types,
+            "misleading_neighbor_present": item.misleading_neighbor_present,
+            "coverage_score": item.coverage_score,
+            "status": item.status,
+            "supporting_source_ids": item.supporting_source_ids,
+        }
+        for item in build_axis_coverage(effective_user_prompt, retrieved_chunks)
+    ]
     legal_rules = prioritize_legal_rules_for_query(
         extract_legal_rules_from_statute_chunks(retrieved_chunks),
         effective_user_prompt,
+    )
+    target_date_match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", effective_user_prompt)
+    legal_rules = filter_legal_rules_for_target_date(
+        legal_rules,
+        target_date_match.group(1) if target_date_match else datetime.now(timezone.utc).date().isoformat(),
     )
     missing_required_facts = detect_missing_required_facts(effective_user_prompt, legal_rules)
     timeline_issues = detect_fact_timeline_issues(effective_user_prompt)
@@ -2304,6 +2662,7 @@ async def chat(
         missing_required_facts=missing_required_facts,
         timeline_issues=timeline_issues,
         allowed_provision_references=allowed_provision_references,
+        axis_coverage=axis_coverage,
     )
     if not api_key:
         demo_reply = build_demo_reply(latest_user_message, retrieved_chunks, retrieval_prompt=effective_user_prompt)
@@ -2312,7 +2671,18 @@ async def chat(
             allowed_provision_references=allowed_provision_references,
             missing_required_facts=missing_required_facts,
             timeline_issues=timeline_issues,
+            claim_source_traces=list(analysis_trace.get("claim_source_traces") or []),
         )
+        validation = validate_final_output(
+            demo_reply,
+            axis_coverage=[],
+            expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
+        )
+        analysis_trace["render_validation"] = validation
+        demo_reply = strip_render_completion_marker(demo_reply)
+        exact_trace_block = render_exact_primary_law_trace_block(list(analysis_trace.get("claim_source_traces") or []))
+        if exact_trace_block:
+            demo_reply = f"{demo_reply}\n\n{exact_trace_block}"
         structured_reply = parse_structured_reply(demo_reply)
         persisted_assistant_message = None
         if chat_storage_available:
@@ -2375,9 +2745,49 @@ async def chat(
         "content-type": "application/json",
     }
 
+    reply = ""
+    validation: dict[str, object] = {}
+    last_render_error: Optional[HTTPException] = None
     try:
         async with httpx.AsyncClient(timeout=ANTHROPIC_CHAT_TIMEOUT_SECONDS) as client:
-            response = await client.post(ANTHROPIC_API_URL, headers=headers, json=payload)
+            for attempt in range(2):
+                attempt_payload = dict(payload)
+                if attempt:
+                    attempt_payload["system"] = (
+                        system_prompt
+                        + "\n\nTRYB COMPACT RETRY: zachowaj wszystkie wymagane sekcje i zatwierdzone tezy,"
+                        + " usuń dygresje i skróć objaśnienia. Nie pomijaj żadnej osi ani podstawy prawnej."
+                    )
+                    attempt_payload["temperature"] = 0
+                response = await client.post(
+                    ANTHROPIC_API_URL, headers=headers, json=attempt_payload
+                )
+                if response.status_code >= 400:
+                    raise HTTPException(status_code=response.status_code, detail=response.text)
+                candidate = extract_text_from_anthropic(response.json())
+                if not candidate:
+                    last_render_error = HTTPException(
+                        status_code=502, detail="Anthropic returned an empty response"
+                    )
+                    continue
+                candidate = enforce_reply_guardrails(
+                    candidate,
+                    allowed_provision_references=allowed_provision_references,
+                    missing_required_facts=missing_required_facts,
+                    timeline_issues=timeline_issues,
+                    claim_source_traces=list(analysis_trace.get("claim_source_traces") or []),
+                )
+                try:
+                    validation = validate_final_output(
+                        candidate,
+                        axis_coverage=axis_coverage,
+                        expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
+                    )
+                except HTTPException as exc:
+                    last_render_error = exc
+                    continue
+                reply = candidate
+                break
     except httpx.ReadTimeout as exc:
         raise HTTPException(
             status_code=504,
@@ -2389,18 +2799,16 @@ async def chat(
             detail="Nie udało się połączyć z modelem odpowiedzi."
         ) from exc
 
-    if response.status_code >= 400:
-        raise HTTPException(status_code=response.status_code, detail=response.text)
-
-    reply = extract_text_from_anthropic(response.json())
     if not reply:
-        raise HTTPException(status_code=502, detail="Anthropic returned an empty response")
-    reply = enforce_reply_guardrails(
-        reply,
-        allowed_provision_references=allowed_provision_references,
-        missing_required_facts=missing_required_facts,
-        timeline_issues=timeline_issues,
-    )
+        raise last_render_error or HTTPException(
+            status_code=502,
+            detail="Model dwukrotnie zwrócił niekompletną odpowiedź.",
+        )
+    analysis_trace["render_validation"] = validation
+    reply = strip_render_completion_marker(reply)
+    exact_trace_block = render_exact_primary_law_trace_block(list(analysis_trace.get("claim_source_traces") or []))
+    if exact_trace_block:
+        reply = f"{reply}\n\n{exact_trace_block}"
 
     if retrieved_chunks:
         reply = (
@@ -2470,6 +2878,11 @@ def rag_search(request: RagSearchRequest) -> RagSearchResponse:
         extract_legal_rules_from_statute_chunks(chunks),
         request.query,
     )
+    target_date_match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", request.query)
+    legal_rules = filter_legal_rules_for_target_date(
+        legal_rules,
+        target_date_match.group(1) if target_date_match else datetime.now(timezone.utc).date().isoformat(),
+    )
     missing_required_facts = detect_missing_required_facts(request.query, legal_rules)
     timeline_issues = detect_fact_timeline_issues(request.query)
     allowed_provision_references = build_provision_reference_registry(chunks, legal_rules)
@@ -2492,6 +2905,7 @@ def rag_search(request: RagSearchRequest) -> RagSearchResponse:
             missing_required_facts=missing_required_facts,
             timeline_issues=timeline_issues,
             allowed_provision_references=allowed_provision_references,
+            axis_coverage=axis_coverage,
         ),
         hits=[RagSearchHit(**hit) for hit in inspection.hits],
     )

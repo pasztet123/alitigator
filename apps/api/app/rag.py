@@ -8,7 +8,7 @@ import re
 import sqlite3
 import threading
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -20,6 +20,7 @@ API_DIR = APP_DIR.parent
 DEFAULT_PROCESSED_PATH = API_DIR / "data" / "processed" / "eureka_interpretations.jsonl"
 DEFAULT_LAW_SOURCE_PATHS = (
     API_DIR / "data" / "laws" / "processed" / "excise_act_DU_2026_412.jsonl",
+    API_DIR / "data" / "laws" / "processed" / "vat_act_DU_2025_775_codified_2026-05-05.jsonl",
     API_DIR / "data" / "laws" / "processed" / "vat_act_DU_2025_775.jsonl",
     API_DIR / "data" / "laws" / "processed" / "cit_act_DU_2026_554.jsonl",
     API_DIR / "data" / "laws" / "processed" / "pit_act_DU_2026_592.jsonl",
@@ -2015,6 +2016,55 @@ class LegalRule:
     retrieval_stage: str = "primary_source_exact_lookup"
     supporting_chunk_ids: list[str] = field(default_factory=list)
     source_url: Optional[str] = None
+
+
+HISTORICAL_PROVISION_END_DATES: dict[
+    tuple[str, str, Optional[str], Optional[str], Optional[str]], str
+] = {
+    # Historical VAT bad-debt-relief conditions. They must remain available
+    # for historical analysis, but never control a claim after their repeal.
+    ("VAT", "89a", "2", "1", None): "2021-09-30",
+    ("VAT", "89a", "2", "2", None): "2021-09-30",
+    ("VAT", "89a", "2", "3", "b"): "2021-09-30",
+}
+
+
+def legal_rule_effective_to(rule: LegalRule) -> Optional[str]:
+    domain = "VAT" if "towarów i usług" in rule.act_title.lower() or "vat" in rule.source_id.lower() else ""
+    exact = HISTORICAL_PROVISION_END_DATES.get(
+        (domain, rule.article_key.lower(), rule.paragraph, rule.point, rule.letter)
+    )
+    return exact or HISTORICAL_PROVISION_END_DATES.get(
+        (domain, rule.article_key.lower(), rule.paragraph, rule.point, None)
+    )
+
+
+def legal_rule_is_effective_on(rule: LegalRule, target_date: str) -> bool:
+    try:
+        parsed_target = date.fromisoformat(target_date[:10])
+    except ValueError:
+        return False
+    effective_to = legal_rule_effective_to(rule)
+    if effective_to and parsed_target > date.fromisoformat(effective_to):
+        return False
+    if rule.rule_type == "repealed":
+        return False
+    effective_from = legal_rule_effective_from(rule)
+    if effective_from and date.fromisoformat(effective_from) > parsed_target:
+        return False
+    return True
+
+
+def filter_legal_rules_for_target_date(
+    rules: list[LegalRule], target_date: str
+) -> list[LegalRule]:
+    return [rule for rule in rules if legal_rule_is_effective_on(rule, target_date)]
+
+
+def legal_rule_effective_from(rule: LegalRule) -> str:
+    value = normalize_whitespace(rule.legal_state_date or rule.publication or "")
+    match = re.search(r"\d{4}-\d{2}-\d{2}", value)
+    return match.group(0) if match else ""
 
 
 def get_rag_config() -> RagConfig:
@@ -4110,6 +4160,51 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id);
 
+        CREATE TABLE IF NOT EXISTS legal_document_versions (
+            document_id TEXT NOT NULL,
+            version_id TEXT NOT NULL,
+            document_type TEXT NOT NULL,
+            title TEXT NOT NULL,
+            citation TEXT NOT NULL,
+            jurisdiction TEXT NOT NULL,
+            effective_from TEXT NOT NULL,
+            effective_to TEXT,
+            publication_date TEXT,
+            is_consolidated_text INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (document_id, version_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS legal_provisions (
+            provision_id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            version_id TEXT NOT NULL,
+            citation TEXT NOT NULL,
+            article TEXT NOT NULL,
+            paragraph TEXT,
+            point TEXT,
+            letter TEXT,
+            provision_text TEXT NOT NULL,
+            effective_from TEXT NOT NULL,
+            effective_to TEXT,
+            status TEXT NOT NULL CHECK (status IN ('active', 'repealed', 'unknown')),
+            source_document_id TEXT NOT NULL,
+            source_chunk_ids_json TEXT NOT NULL DEFAULT '[]',
+            source_span_start INTEGER NOT NULL DEFAULT 0,
+            source_span_end INTEGER NOT NULL DEFAULT 0,
+            references_json TEXT NOT NULL DEFAULT '[]',
+            amends TEXT,
+            repealed_by TEXT,
+            tax_domain TEXT NOT NULL DEFAULT '',
+            taxpayer_role TEXT NOT NULL DEFAULT '',
+            legal_mechanism TEXT NOT NULL DEFAULT '',
+            entailed_result_codes_json TEXT NOT NULL DEFAULT '[]',
+            FOREIGN KEY (document_id, version_id)
+                REFERENCES legal_document_versions(document_id, version_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_legal_provisions_exact
+            ON legal_provisions(document_id, citation, effective_from, effective_to, status);
+
         """
     )
     for column in (
@@ -4125,6 +4220,17 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
                 connection.execute(f"ALTER TABLE documents ADD COLUMN {column}")
             else:
                 connection.execute(f"ALTER TABLE documents ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+
+    for column in (
+        "tax_domain TEXT NOT NULL DEFAULT ''",
+        "taxpayer_role TEXT NOT NULL DEFAULT ''",
+        "legal_mechanism TEXT NOT NULL DEFAULT ''",
+        "entailed_result_codes_json TEXT NOT NULL DEFAULT '[]'",
+    ):
+        try:
+            connection.execute(f"ALTER TABLE legal_provisions ADD COLUMN {column}")
         except sqlite3.OperationalError:
             pass
 
@@ -6312,6 +6418,8 @@ def extract_act_title_from_chunk(chunk: RagChunk) -> str:
 
 def derive_rule_type(text: str) -> str:
     normalized = normalize_whitespace(text).lower()
+    if re.search(r"\buchylon\w*\b", normalized):
+        return "repealed"
     if re.search(r"\b(nie stosuje się|wyłącza się|nie podlega|z wyjątkiem|chyba że)\b", normalized):
         return "exclusion"
     if re.search(r"\b(zwalnia się|jest zwolnion\w*|zwolnienie)\b", normalized):
@@ -6384,6 +6492,51 @@ def extract_point_and_letter(text: str) -> tuple[Optional[str], Optional[str]]:
     return point, letter
 
 
+def extract_nested_rule_units(block_text: str) -> list[tuple[Optional[str], Optional[str], str]]:
+    normalized = normalize_whitespace(block_text)
+    if not normalized:
+        return []
+
+    point_pattern = re.compile(
+        r"(?:^|\s)(\d+[a-z]?)\)\s+(.+?)(?=(?:\s+\d+[a-z]?\)\s+)|\Z)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    point_matches = [
+        (match.group(1), normalize_whitespace(match.group(2)))
+        for match in point_pattern.finditer(normalized)
+        if normalize_whitespace(match.group(2))
+    ]
+    if not point_matches:
+        return [(None, None, normalized)]
+
+    units: list[tuple[Optional[str], Optional[str], str]] = []
+    letter_pattern = re.compile(
+        r"(?:^|\s)([a-z])\)\s+(.+?)(?=(?:\s+[a-z]\)\s+)|\Z)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    for point, point_text in point_matches:
+        letter_matches = [
+            (match.group(1), normalize_whitespace(match.group(2)))
+            for match in letter_pattern.finditer(point_text)
+            if normalize_whitespace(match.group(2))
+        ]
+        if letter_matches:
+            units.extend((point, letter, letter_text) for letter, letter_text in letter_matches)
+            continue
+        units.append((point, None, point_text))
+    return units
+
+
+def infer_chunk_source_priority(chunk: RagChunk) -> tuple[int, str, str]:
+    subtype_priority = {
+        "codified_text": 2,
+        "consolidated_text": 1,
+    }.get(str(chunk.source_subtype or "").lower(), 0)
+    legal_state = normalize_whitespace(chunk.legal_state_date or "")
+    publication = normalize_whitespace(chunk.publication or "")
+    return (subtype_priority, legal_state, publication)
+
+
 def build_rule_citation(article_key: str, paragraph: Optional[str], point: Optional[str], letter: Optional[str]) -> str:
     parts = [f"art. {article_key}" if article_key else "przepis"]
     if paragraph:
@@ -6439,6 +6592,14 @@ def infer_required_facts_for_rule(
         facts.append("czy fundacja rodzinna posiada udziały albo akcje w spółce")
     if "po zatwierdzeniu" in haystack or "zatwierdzonego sprawozdania" in haystack:
         facts.append("charakter wypłaty i moment zatwierdzenia sprawozdania finansowego")
+    if "art. 89a" in haystack and "90 dni" in haystack:
+        facts.append("okres rozliczeniowy, w którym upłynęło 90 dni od terminu płatności")
+    if "art. 89a" in haystack and re.search(r"zarejestrowan\w*.*podatnik\w* vat|podatnik\w* vat.*czynn", haystack):
+        facts.append("debtor_vat_registration_status")
+    if "art. 89a" in haystack and re.search(r"restrukturyzac|upadło|upadlo|likwidac", haystack):
+        facts.append("debtor_insolvency_status")
+    if "art. 18f" in haystack and re.search(r"restrukturyzac|upadło|upadlo|likwidac", haystack):
+        facts.append("debtor_insolvency_status")
 
     normalized_condition = normalize_whitespace(condition)
     if normalized_condition:
@@ -6533,6 +6694,8 @@ def compute_rule_specificity_rank(
         score += 2
     if re.search(r"\blit\.\s*[a-z]\b", citation, re.IGNORECASE):
         score += 1
+    if re.search(r"\bust\.\s*\d+[a-z]?\s+pkt\s*\d+[a-z]?\s+lit\.\s*[a-z]\b", citation, re.IGNORECASE):
+        score += 2
 
     lowered = normalize_whitespace(" ".join([chunk.subject or "", directive])).lower()
     if any(term in lowered for term in ("spółka komandytowa", "spolka komandytowa", "fundacja rodzinna", "mały podatnik", "maly podatnik")):
@@ -6545,13 +6708,21 @@ def compute_rule_specificity_rank(
 def prioritize_legal_rules_for_query(rules: list[LegalRule], query: str) -> list[LegalRule]:
     query_tokens = {token.lower() for token in QUERY_TOKEN_RE.findall(query or "")}
 
-    def rule_score(rule: LegalRule) -> tuple[int, int, int]:
+    def rule_score(rule: LegalRule) -> tuple[int, int, int, int, str, str]:
         haystack = normalize_whitespace(
             " ".join([rule.act_title, rule.citation, rule.directive, " ".join(rule.scope_subject_terms), " ".join(rule.scope_object_terms)])
         ).lower()
         overlap = sum(1 for token in query_tokens if token in haystack)
         direct_entity_bonus = 2 if any(term in haystack for term in ("spółka komandytowa", "spolka komandytowa", "mały podatnik", "maly podatnik", "fundacja rodzinna")) else 0
-        return (rule.specificity_rank + direct_entity_bonus, overlap, len(rule.definition_dependencies))
+        repealed_penalty = -10 if rule.rule_type == "repealed" else 0
+        return (
+            rule.specificity_rank + direct_entity_bonus + repealed_penalty,
+            overlap,
+            len(rule.definition_dependencies),
+            1 if rule.rule_type != "repealed" else 0,
+            normalize_whitespace(rule.legal_state_date or ""),
+            normalize_whitespace(rule.publication or ""),
+        )
 
     return sorted(rules, key=rule_score, reverse=True)
 
@@ -6629,7 +6800,7 @@ def build_provision_reference_registry(chunks: list[RagChunk], rules: list[Legal
 def extract_legal_rules_from_statute_chunks(chunks: list[RagChunk], *, limit: int = 12) -> list[LegalRule]:
     rules: list[LegalRule] = []
     seen: set[tuple[str, str, Optional[str], Optional[str], Optional[str]]] = set()
-    for chunk in chunks:
+    for chunk in sorted(chunks, key=infer_chunk_source_priority, reverse=True):
         if not is_primary_source_chunk(chunk):
             continue
         article_key = ""
@@ -6643,54 +6814,58 @@ def extract_legal_rules_from_statute_chunks(chunks: list[RagChunk], *, limit: in
             continue
 
         for paragraph, block_text in extract_rule_unit_blocks(chunk.chunk_text):
-            point, letter = extract_point_and_letter(block_text)
-            key = (chunk_canonical_source_id(chunk), article_key, paragraph, point, letter)
-            if key in seen:
-                continue
-            seen.add(key)
-            directive = normalize_whitespace(block_text)
-            if not directive:
-                continue
-            rules.append(
-                LegalRule(
-                    source_id=chunk_canonical_source_id(chunk),
-                    act_title=extract_act_title_from_chunk(chunk),
-                    publication=chunk.publication,
-                    legal_state_date=chunk.legal_state_date,
-                    provision_id=build_provision_id(chunk_canonical_source_id(chunk), build_rule_citation(article_key, paragraph, point, letter)),
-                    citation=build_rule_citation(article_key, paragraph, point, letter),
-                    article_key=article_key,
-                    paragraph=paragraph,
-                    point=point,
-                    letter=letter,
-                    rule_type=derive_rule_type(directive),
-                    condition=extract_condition_from_rule_text(directive),
-                    directive=directive[:1200],
-                    exact_source_span=directive[:1200],
-                    required_facts=infer_required_facts_for_rule(
+            nested_units = extract_nested_rule_units(block_text)
+            for point, letter, unit_text in nested_units:
+                key = (chunk_canonical_source_id(chunk), article_key, paragraph, point, letter)
+                if key in seen:
+                    continue
+                seen.add(key)
+                directive = normalize_whitespace(unit_text)
+                if not directive:
+                    continue
+                citation = build_rule_citation(article_key, paragraph, point, letter)
+                condition = extract_condition_from_rule_text(directive)
+                scope_subject_terms, scope_object_terms = infer_scope_terms_for_rule(directive)
+                rules.append(
+                    LegalRule(
+                        source_id=chunk_canonical_source_id(chunk),
                         act_title=extract_act_title_from_chunk(chunk),
-                        citation=build_rule_citation(article_key, paragraph, point, letter),
-                        condition=extract_condition_from_rule_text(directive),
-                        directive=directive,
-                    ),
-                    definition_dependencies=infer_definition_dependencies_for_rule(
-                        act_title=extract_act_title_from_chunk(chunk),
-                        citation=build_rule_citation(article_key, paragraph, point, letter),
-                        directive=directive,
-                    ),
-                    scope_subject_terms=infer_scope_terms_for_rule(directive)[0],
-                    scope_object_terms=infer_scope_terms_for_rule(directive)[1],
-                    specificity_rank=compute_rule_specificity_rank(
-                        citation=build_rule_citation(article_key, paragraph, point, letter),
-                        directive=directive,
-                        chunk=chunk,
-                    ),
-                    supporting_chunk_ids=[chunk.chunk_id],
-                    source_url=chunk.source_url,
+                        publication=chunk.publication,
+                        legal_state_date=chunk.legal_state_date,
+                        provision_id=build_provision_id(chunk_canonical_source_id(chunk), citation),
+                        citation=citation,
+                        article_key=article_key,
+                        paragraph=paragraph,
+                        point=point,
+                        letter=letter,
+                        rule_type=derive_rule_type(directive),
+                        condition=condition,
+                        directive=directive[:1200],
+                        exact_source_span=directive[:1200],
+                        required_facts=infer_required_facts_for_rule(
+                            act_title=extract_act_title_from_chunk(chunk),
+                            citation=citation,
+                            condition=condition,
+                            directive=directive,
+                        ),
+                        definition_dependencies=infer_definition_dependencies_for_rule(
+                            act_title=extract_act_title_from_chunk(chunk),
+                            citation=citation,
+                            directive=directive,
+                        ),
+                        scope_subject_terms=scope_subject_terms,
+                        scope_object_terms=scope_object_terms,
+                        specificity_rank=compute_rule_specificity_rank(
+                            citation=citation,
+                            directive=directive,
+                            chunk=chunk,
+                        ),
+                        supporting_chunk_ids=[chunk.chunk_id],
+                        source_url=chunk.source_url,
+                    )
                 )
-            )
-            if len(rules) >= limit:
-                return rules
+                if len(rules) >= limit:
+                    return rules
     return rules
 
 
@@ -6700,6 +6875,8 @@ def legal_rule_to_dict(rule: LegalRule) -> dict[str, Any]:
         "act_title": rule.act_title,
         "publication": rule.publication,
         "legal_state_date": rule.legal_state_date,
+        "effective_from": legal_rule_effective_from(rule),
+        "effective_to": legal_rule_effective_to(rule),
         "provision_id": rule.provision_id,
         "citation": rule.citation,
         "article_key": rule.article_key,
@@ -6733,6 +6910,7 @@ def build_legal_rules_context(rules: list[LegalRule]) -> str:
     ]
     for index, rule in enumerate(rules, start=1):
         condition = f" | warunek: {rule.condition}" if rule.condition else ""
+        lifecycle_note = " | status=uchylony" if rule.rule_type == "repealed" else ""
         required_facts = (
             f" | required_facts: {'; '.join(rule.required_facts)}"
             if rule.required_facts
@@ -6745,7 +6923,7 @@ def build_legal_rules_context(rules: list[LegalRule]) -> str:
         )
         legal_state = rule.legal_state_date or rule.publication or "brak daty w metadanych"
         lines.append(
-            f"{index}. {rule.act_title} | {rule.citation} | typ={rule.rule_type} | stan={legal_state}{condition}{required_facts}{definition_dependencies}\n"
+            f"{index}. {rule.act_title} | {rule.citation} | typ={rule.rule_type} | stan={legal_state}{lifecycle_note}{condition}{required_facts}{definition_dependencies}\n"
             f"   reguła: {rule.directive}"
         )
     return "\n".join(lines)
@@ -6760,7 +6938,7 @@ def order_chunks_by_statute_targets(chunks: list[RagChunk], targets: list[tuple[
     for position, (_domain, article_key) in enumerate(targets):
         article_only_order.setdefault(article_key, position)
 
-    def sort_key(chunk: RagChunk) -> tuple[int, float, str]:
+    def sort_key(chunk: RagChunk) -> tuple[int, int, str, str, float, str]:
         domain = infer_chunk_tax_domain(chunk)
         best_position = len(order)
         for provision in chunk.legal_provisions:
@@ -6770,7 +6948,8 @@ def order_chunks_by_statute_targets(chunks: list[RagChunk], targets: list[tuple[
             best_position = min(best_position, order.get((domain, article_key), len(order)))
             if chunk.subject.lower().startswith("upo polska"):
                 best_position = min(best_position, article_only_order.get(article_key, len(order)))
-        return best_position, -chunk.score, chunk.subject
+        subtype_priority, legal_state, publication = infer_chunk_source_priority(chunk)
+        return best_position, -subtype_priority, f"{legal_state}|{publication}", publication, -chunk.score, chunk.subject
 
     return sorted(chunks, key=sort_key)
 
@@ -7427,14 +7606,22 @@ def load_processed_statute_chunks_by_targets(
     target_order = {(domain.upper(), article_key.lower()): index for index, (domain, article_key) in enumerate(targets)}
 
     def sort_by_target_order(items: list[RagChunk]) -> list[RagChunk]:
-        def sort_key(chunk: RagChunk) -> tuple[int, int, str]:
+        def sort_key(chunk: RagChunk) -> tuple[int, int, str, str, int, str]:
             domain = infer_chunk_tax_domain(chunk)
             positions: list[int] = []
             for provision in chunk.legal_provisions:
                 article_key = extract_article_key_from_text(provision)
                 if article_key:
                     positions.append(target_order.get((domain, article_key), len(target_order)))
-            return min(positions or [len(target_order)]), chunk.chunk_index, chunk.document_id
+            subtype_priority, legal_state, publication = infer_chunk_source_priority(chunk)
+            return (
+                min(positions or [len(target_order)]),
+                -subtype_priority,
+                f"{legal_state}|{publication}",
+                publication,
+                chunk.chunk_index,
+                chunk.document_id,
+            )
 
         return sorted(items, key=sort_key)
 
@@ -7812,7 +7999,15 @@ def _merge_axis_search_chunks(axis_chunks: list[list[RagChunk]], *, effective_li
     merged: list[RagChunk] = []
     seen_canonical_sources: set[str] = set()
     flattened = [chunk for group in axis_chunks for chunk in group]
-    flattened.sort(key=lambda chunk: (chunk.score, chunk.chunk_index, chunk.document_id), reverse=True)
+    flattened.sort(
+        key=lambda chunk: (
+            chunk.score,
+            *infer_chunk_source_priority(chunk),
+            -chunk.chunk_index,
+            chunk.document_id,
+        ),
+        reverse=True,
+    )
     for chunk in flattened:
         canonical_source_id = chunk_canonical_source_id(chunk)
         if canonical_source_id in seen_canonical_sources:

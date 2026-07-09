@@ -48,3 +48,51 @@ create table if not exists rag_chunks (
         foreign key (document_id) references rag_documents(document_id)
         on delete cascade
 ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;
+
+create table if not exists legal_document_versions (
+    document_id varchar(191) not null,
+    version_id varchar(191) not null,
+    document_type varchar(32) not null,
+    title varchar(512) not null,
+    citation varchar(255) not null,
+    jurisdiction varchar(16) not null default 'PL',
+    effective_from date not null,
+    effective_to date null,
+    publication_date date null,
+    is_consolidated_text boolean not null default false,
+    primary key (document_id, version_id)
+) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;
+
+create table if not exists legal_provisions (
+    provision_id varchar(255) primary key,
+    document_id varchar(191) not null,
+    version_id varchar(191) not null,
+    citation varchar(191) not null,
+    article varchar(32) not null,
+    paragraph varchar(32) null,
+    point varchar(32) null,
+    letter varchar(16) null,
+    provision_text mediumtext not null,
+    effective_from date not null,
+    effective_to date null,
+    status enum('active', 'repealed', 'unknown') not null,
+    source_document_id varchar(191) not null,
+    source_chunk_ids_json longtext not null,
+    source_span_start int not null default 0,
+    source_span_end int not null default 0,
+    references_json longtext not null,
+    amends varchar(255) null,
+    repealed_by varchar(255) null,
+    tax_domain varchar(64) not null default '',
+    taxpayer_role varchar(64) not null default '',
+    legal_mechanism varchar(128) not null default '',
+    entailed_result_codes_json longtext not null default ('[]'),
+    key idx_legal_provisions_exact (document_id, citation, effective_from, effective_to, status),
+    constraint fk_legal_provisions_version foreign key (document_id, version_id)
+        references legal_document_versions(document_id, version_id)
+) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;
+
+alter table legal_provisions add column if not exists tax_domain varchar(64) not null default '';
+alter table legal_provisions add column if not exists taxpayer_role varchar(64) not null default '';
+alter table legal_provisions add column if not exists legal_mechanism varchar(128) not null default '';
+alter table legal_provisions add column if not exists entailed_result_codes_json longtext not null default ('[]');

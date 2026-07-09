@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from postgrest.exceptions import APIError
 from pydantic import BaseModel, Field
 
@@ -82,6 +84,8 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 
 load_dotenv()
 
+logger = logging.getLogger("alitigator.api")
+API_VERSION = "0.9.2"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 AVAILABLE_MODELS = [
@@ -223,6 +227,7 @@ class ModelsResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
+    version: str
     anthropic_configured: bool
     supabase_configured: bool
     rag_index_configured: bool
@@ -458,7 +463,7 @@ class RagSearchResponse(BaseModel):
     hits: list[RagSearchHit]
 
 
-app = FastAPI(title="aLitigator API", version="0.9.0")
+app = FastAPI(title="aLitigator API", version=API_VERSION)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -466,6 +471,25 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_response(request: Request, exc: Exception) -> JSONResponse:
+    error_id = str(uuid4())
+    logger.exception(
+        "Unhandled API error id=%s method=%s path=%s",
+        error_id,
+        request.method,
+        request.url.path,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Wewnętrzny błąd backendu.",
+            "error_id": error_id,
+        },
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
 
 
 def redact_text(text: str) -> tuple[str, list[str]]:
@@ -2076,6 +2100,7 @@ def persist_chat_exchange(chat_id: str, *, user_id: str, messages: list[dict[str
 def health() -> HealthResponse:
     return HealthResponse(
         status="ok",
+        version=API_VERSION,
         anthropic_configured=bool(os.getenv("ANTHROPIC_API_KEY")),
         supabase_configured=is_supabase_configured(),
         rag_index_configured=index_exists(),
@@ -2467,7 +2492,14 @@ async def chat(
     effective_user_prompt = build_effective_user_prompt(latest_user_message, request.intent_hints)
 
     if is_bad_debt_relief_query(effective_user_prompt):
-        controlled_result = run_bad_debt_pipeline(effective_user_prompt)
+        try:
+            controlled_result = run_bad_debt_pipeline(effective_user_prompt)
+        except Exception as exc:
+            logger.exception("Bad-debt controlled pipeline failed")
+            raise HTTPException(
+                status_code=502,
+                detail="Kontrolowany pipeline VAT/CIT nie ukończył analizy.",
+            ) from exc
         controlled_reply = controlled_result.answer
         persisted_assistant_message = None
         if api_key:
@@ -2538,7 +2570,14 @@ async def chat(
     # Controlled cases bypass the legacy free-form writer entirely. The renderer
     # receives only validated claims and exact registry references.
     if is_mixed_invoice_query(effective_user_prompt):
-        controlled_result = run_legal_pipeline(effective_user_prompt)
+        try:
+            controlled_result = run_legal_pipeline(effective_user_prompt)
+        except Exception as exc:
+            logger.exception("Mixed-invoice controlled pipeline failed")
+            raise HTTPException(
+                status_code=502,
+                detail="Kontrolowany pipeline faktury mieszanej nie ukończył analizy.",
+            ) from exc
         controlled_reply = controlled_result.answer
         persisted_assistant_message = None
         if api_key:

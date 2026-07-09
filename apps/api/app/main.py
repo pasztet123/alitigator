@@ -85,7 +85,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "0.9.4"
+API_VERSION = "0.9.5"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 AVAILABLE_MODELS = [
@@ -1207,9 +1207,29 @@ def validate_final_output(
         or not validation["no_uncertain_provision_phrases"]
         or not validation["tables_closed"]
     ):
+        failed_checks: list[str] = []
+        if not has_completion_marker:
+            failed_checks.append("brak znacznika końca")
+        if missing_sections:
+            failed_checks.append(f"brak sekcji: {', '.join(missing_sections)}")
+        if unfinished_sentence:
+            failed_checks.append("urwane ostatnie zdanie")
+        if expected_domains and len(rendered_domains) < len(expected_domains):
+            missing_domains = sorted(set(expected_domains) - set(rendered_domains))
+            failed_checks.append(f"brak osi: {', '.join(missing_domains)}")
+        if not validation["no_placeholder_tokens"]:
+            failed_checks.append("placeholder źródłowy")
+        if not validation["no_uncertain_provision_phrases"]:
+            failed_checks.append("niepewna podstawa prawna")
+        if not validation["tables_closed"]:
+            failed_checks.append("niezamknięta tabela")
         raise HTTPException(
             status_code=502,
-            detail="Model zwrócił niekompletną odpowiedź. Spróbuj ponowić zapytanie.",
+            detail=(
+                "Model zwrócił odpowiedź odrzuconą przez walidator: "
+                + "; ".join(failed_checks)
+                + "."
+            ),
         )
     return validation
 
@@ -1250,16 +1270,21 @@ def enforce_reply_guardrails(
 
     if missing_required_facts:
         sanitized = DEFINITIVE_PERCENT_RE.sub(r"możliwy jest wariant \1%", sanitized)
-        prefix = (
-            "Teza warunkowa\n"
+        conditional_note = (
             "Na obecnym materiale nie można ustalić finalnej kwoty ani jednej ostatecznej stawki, "
             "bo brakuje faktów koniecznych do wyboru właściwego wariantu.\n\n"
             "Potrzebne doprecyzowanie\n"
             + "\n".join(f"- {fact}" for fact in missing_required_facts)
-            + "\n\n"
         )
-        if not sanitized.startswith("Teza warunkowa"):
-            sanitized = prefix + sanitized
+        if re.search(r"(^|\n\n)Teza\n", sanitized):
+            sanitized = re.sub(
+                r"(^|\n\n)Teza\n",
+                lambda match: f"{match.group(1)}Teza\n{conditional_note}\n\n",
+                sanitized,
+                count=1,
+            )
+        else:
+            sanitized = f"Teza\n{conditional_note}\n\n{sanitized}"
 
     if timeline_issues:
         timeline_block = (

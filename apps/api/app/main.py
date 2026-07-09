@@ -85,7 +85,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "0.9.7"
+API_VERSION = "0.9.8"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 AVAILABLE_MODELS = [
@@ -1085,7 +1085,7 @@ DUPLICATED_PROVISION_REFERENCE_RE = re.compile(
     re.IGNORECASE,
 )
 GENERIC_PRIMARY_LAW_PLACEHOLDER_RE = re.compile(
-    r"zweryfikowany przepis wskazany w źródłach(?: primary law)?",
+    r"zweryfikowany przepis wskazany w źródłach(?: primary law)?|\bten przepis\b",
     re.IGNORECASE,
 )
 UNCERTAIN_PROVISION_PHRASES_RE = re.compile(
@@ -1160,6 +1160,23 @@ def validate_final_output(
     structured = parse_structured_reply(stripped_reply)
     rendered_section_titles = [section.title for section in (structured.sections if structured else [])]
     missing_sections = [section for section in expected_sections if section not in rendered_section_titles]
+    section_content_by_title = {
+        section.title: section.content.strip()
+        for section in (structured.sections if structured else [])
+    }
+    empty_required_sections = [
+        section
+        for section in expected_sections
+        if section in rendered_section_titles and not section_content_by_title.get(section)
+    ]
+    sources_without_sources = (
+        "Źródła" in rendered_section_titles
+        and not re.search(
+            r"(?:art\.|Dz\.|DU/|\[provision_id:|source_document_id|https?://)",
+            section_content_by_title.get("Źródła", ""),
+            re.IGNORECASE,
+        )
+    )
 
     expected_domains = sorted(
         {
@@ -1190,6 +1207,8 @@ def validate_final_output(
         "has_completion_marker": has_completion_marker,
         "expected_sections": expected_sections,
         "rendered_sections": rendered_section_titles,
+        "empty_required_sections": empty_required_sections,
+        "sources_without_sources": sources_without_sources,
         "no_placeholder_tokens": not bool(GENERIC_PRIMARY_LAW_PLACEHOLDER_RE.search(stripped_reply)),
         "no_uncertain_provision_phrases": not bool(
             UNCERTAIN_PROVISION_PHRASES_RE.search(stripped_reply)
@@ -1205,6 +1224,8 @@ def validate_final_output(
     if (
         not has_completion_marker
         or missing_sections
+        or empty_required_sections
+        or sources_without_sources
         or unfinished_sentence
         or (expected_domains and len(rendered_domains) < len(expected_domains))
         or not validation["no_placeholder_tokens"]
@@ -1216,6 +1237,10 @@ def validate_final_output(
             failed_checks.append("brak znacznika końca")
         if missing_sections:
             failed_checks.append(f"brak sekcji: {', '.join(missing_sections)}")
+        if empty_required_sections:
+            failed_checks.append(f"pusta sekcja: {', '.join(empty_required_sections)}")
+        if sources_without_sources:
+            failed_checks.append("sekcja Źródła bez źródeł")
         if unfinished_sentence:
             failed_checks.append("urwane ostatnie zdanie")
         if expected_domains and len(rendered_domains) < len(expected_domains):

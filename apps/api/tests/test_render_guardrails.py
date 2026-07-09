@@ -17,7 +17,7 @@ class ConditionalAnswerGuardrailTests(unittest.TestCase):
                 reply = (
                     "Teza\nWniosek.\n\n"
                     f"Analiza\n{heading}\nAnaliza osi.\n\n"
-                    "Źródła\nŹródło.\n\n"
+                    "Źródła\nart. 18f ustawy CIT.\n\n"
                     "Ryzyka i luki\nBrak.\n\n"
                     f"{RENDER_COMPLETION_MARKER}"
                 )
@@ -64,7 +64,7 @@ class ConditionalAnswerGuardrailTests(unittest.TestCase):
         reply = (
             "Teza\nWynik zależy od brakującego faktu.\n\n"
             "Analiza\nNależy rozważyć dwa warianty.\n\n"
-            "Źródła\nZweryfikowane źródła opisano w analizie.\n\n"
+            "Źródła\n[provision_id:cit_art_18f_ust_1].\n\n"
             "Ryzyka i luki\nBrakujący fakt wymaga potwierdzenia.\n\n"
             f"{RENDER_COMPLETION_MARKER}"
         )
@@ -85,6 +85,37 @@ class ConditionalAnswerGuardrailTests(unittest.TestCase):
         self.assertEqual(validation["missing_planned_sections"], 0)
         self.assertNotIn("Teza warunkowa\n", guarded)
         self.assertIn("Teza\nNa obecnym materiale", guarded)
+
+    def test_final_validator_rejects_ten_przepis_and_empty_sections(self) -> None:
+        placeholder_reply = (
+            "Teza\nWniosek.\n\n"
+            "Analiza\nWynika to z ten przepis.\n\n"
+            "Źródła\nart. 89a ustawy VAT.\n\n"
+            "Ryzyka i luki\nBrak.\n\n"
+            f"{RENDER_COMPLETION_MARKER}"
+        )
+
+        with self.assertRaisesRegex(Exception, "placeholder"):
+            validate_final_output(
+                placeholder_reply,
+                axis_coverage=[],
+                expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
+            )
+
+        empty_sources_reply = (
+            "Teza\nWniosek.\n\n"
+            "Analiza\nAnaliza.\n\n"
+            "Źródła\n\n\n"
+            "Ryzyka i luki\nBrak.\n\n"
+            f"{RENDER_COMPLETION_MARKER}"
+        )
+
+        with self.assertRaisesRegex(Exception, "pusta sekcja"):
+            validate_final_output(
+                empty_sources_reply,
+                axis_coverage=[],
+                expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
+            )
 
 
 if __name__ == "__main__":

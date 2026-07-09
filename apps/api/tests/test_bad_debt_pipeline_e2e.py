@@ -104,7 +104,7 @@ class BadDebtPipelineEndToEndTests(unittest.TestCase):
             self.assertEqual(result.render_validation.thesis_contradictions, ())
             self.assertEqual(
                 set(result.renderer_payload),
-                {"approved_claims", "conditional_claims", "answer_plan"},
+                {"approved_claims", "conditional_claims", "answer_plan", "provisions"},
             )
             self.assertNotIn("raw_documents", result.renderer_payload)
             self.assertNotIn("retrieved_chunks", result.renderer_payload)
@@ -114,6 +114,10 @@ class BadDebtPipelineEndToEndTests(unittest.TestCase):
                     for claim in result.renderer_payload["approved_claims"]
                 )
             )
+            self.assertNotIn("ten przepis", result.answer.lower())
+            self.assertIn("vat_art_89a_ust_3", result.answer)
+            self.assertIn("vat_art_89a_ust_2_pkt_3_lit_a", result.answer)
+            self.assertIn("Brak uregulowania dla korekty VAT ocenia się do dnia złożenia deklaracji", result.answer)
 
     def test_all_material_claims_have_real_provenance(self) -> None:
         result = run_bad_debt_pipeline(BENCHMARK_QUERY)
@@ -145,6 +149,10 @@ class BadDebtPipelineEndToEndTests(unittest.TestCase):
         )
         self.assertTrue(
             all(registry.get(item, "2026-03-31") is None for item in historical)
+        )
+        self.assertIsNotNone(registry.get("vat_art_89a_ust_3", "2026-03-31"))
+        self.assertIsNotNone(
+            registry.get("vat_art_89a_ust_2_pkt_3_lit_a", "2026-03-31")
         )
 
     def test_registry_works_without_runtime_data_directory(self) -> None:
@@ -186,9 +194,26 @@ class BadDebtPipelineEndToEndTests(unittest.TestCase):
         )
         self.assertFalse(validate_rendered_answer(placeholder, payload).passed)
 
+        ten_przepis = valid.replace(
+            "art. 89a ust. 1 ustawy VAT",
+            "ten przepis",
+            1,
+        )
+        self.assertFalse(validate_rendered_answer(ten_przepis, payload).passed)
+
+        empty_sources = re.sub(
+            rf"\n\nŹródła\n.*?\n\nRyzyka i luki\n",
+            "\n\nŹródła\n\n\nRyzyka i luki\n",
+            valid,
+            flags=re.S,
+        )
+        empty_sources_validation = validate_rendered_answer(empty_sources, payload)
+        self.assertFalse(empty_sources_validation.passed)
+        self.assertIn("required_sections_empty", empty_sources_validation.errors)
+
         contradictory = valid.replace(
-            "Ulga VAT wierzyciela jest dostępna",
-            "Ulga VAT wierzyciela nie jest dostępna",
+            "Status restrukturyzacyjny, upadłościowy ani likwidacyjny dłużnika nie blokuje ulgi VAT wierzyciela",
+            "Status restrukturyzacyjny, upadłościowy ani likwidacyjny dłużnika blokuje ulgę VAT wierzyciela",
             1,
         )
         contradiction_validation = validate_rendered_answer(

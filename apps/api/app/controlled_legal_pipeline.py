@@ -18,7 +18,7 @@ from app.legal_pipeline import (
 
 END_MARKER = "<END_OF_ANALYSIS>"
 PLACEHOLDER_RE = re.compile(
-    r"zweryfikowany przepis wskazany w źródłach|primary law|TODO|TBD",
+    r"zweryfikowany przepis wskazany w źródłach|primary law|\bten przepis\b|TODO|TBD",
     re.IGNORECASE,
 )
 CLAIM_MARKER_RE = re.compile(r"\[claim_id:([a-z0-9_:.-]+)]", re.IGNORECASE)
@@ -36,6 +36,7 @@ class RendererPayload:
             "approved_claims": [asdict(item) for item in self.approved_claims],
             "conditional_claims": [asdict(item) for item in self.conditional_claims],
             "answer_plan": asdict(self.answer_plan),
+            "provisions": [dict(item) for item in self.provisions],
         }
 
 
@@ -368,6 +369,45 @@ def validate_rendered_answer(
         if not re.search(pattern, answer):
             missing_sections_list.append(section.title)
     missing_sections = tuple(missing_sections_list)
+    empty_required_sections_list: list[str] = []
+    section_titles = [section.title for section in payload.answer_plan.sections]
+    for index, title in enumerate(section_titles):
+        if title in missing_sections:
+            continue
+        start_pattern = (
+            rf"(?m)^\s*###\s+{re.escape(title)}\s*$"
+            if title in {"VAT", "CIT"}
+            else rf"(?m)^\s*{re.escape(title)}\s*$"
+        )
+        start_match = re.search(start_pattern, answer)
+        if not start_match:
+            continue
+        next_titles = section_titles[index + 1 :]
+        if title == "Analiza":
+            next_titles = [
+                next_title
+                for next_title in next_titles
+                if next_title not in {"VAT", "CIT"}
+            ]
+        next_patterns = []
+        for next_title in next_titles:
+            next_patterns.append(
+                rf"^\s*###\s+{re.escape(next_title)}\s*$"
+                if next_title in {"VAT", "CIT"}
+                else rf"^\s*{re.escape(next_title)}\s*$"
+            )
+        if next_patterns:
+            next_match = re.search(
+                "(?m)" + "|".join(f"(?:{pattern})" for pattern in next_patterns),
+                answer[start_match.end() :],
+            )
+            section_body = answer[start_match.end() : start_match.end() + next_match.start()] if next_match else answer[start_match.end() :]
+        else:
+            section_body = answer[start_match.end() :]
+        cleaned_body = section_body.replace(END_MARKER, "").strip()
+        if not cleaned_body:
+            empty_required_sections_list.append(title)
+    empty_required_sections = tuple(empty_required_sections_list)
     table_lines = [
         line.strip() for line in answer.splitlines() if line.strip().startswith("|")
     ]
@@ -395,6 +435,8 @@ def validate_rendered_answer(
         errors.append("truncated_output")
     if missing_sections:
         errors.append("required_sections_missing")
+    if empty_required_sections:
+        errors.append("required_sections_empty")
     if not tables_closed:
         errors.append("tables_not_closed")
     if unknown_provision_markers:

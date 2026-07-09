@@ -23,6 +23,27 @@ from app.legal_pipeline import (
     validate_claim,
 )
 
+VAT_ART_89A_VERIFIED_SPAN = """Art. 89a. 1. Podatnik może skorygować podstawę opodatkowania oraz podatek należny z tytułu dostawy towarów lub świadczenia usług na terytorium kraju w przypadku wierzytelności, których nieściągalność została uprawdopodobniona. Korekta dotyczy również podstawy opodatkowania i kwoty podatku przypadającej na część kwoty wierzytelności, której nieściągalność została uprawdopodobniona.
+1a. Nieściągalność wierzytelności uważa się za uprawdopodobnioną, w przypadku gdy wierzytelność nie została uregulowana lub zbyta w jakiejkolwiek formie w ciągu 90 dni od dnia upływu terminu jej płatności określonego w umowie lub na fakturze.
+2. Przepis ust. 1 stosuje się w przypadku gdy spełnione są następujące warunki:
+1) (uchylony)
+2) (uchylony)
+3) na dzień poprzedzający dzień złożenia deklaracji podatkowej, w której dokonuje się korekty, o której mowa w ust. 1:
+a) wierzyciel jest podatnikiem zarejestrowanym jako podatnik VAT czynny;
+b) (uchylona)
+4) (uchylony)
+5) od daty wystawienia faktury dokumentującej wierzytelność nie upłynęły 3 lata, licząc od końca roku, w którym została wystawiona.
+6) (uchylony)
+3. Korekta, o której mowa w ust. 1, może nastąpić w rozliczeniu za okres, w którym nieściągalność wierzytelności uznaje się za uprawdopodobnioną, pod warunkiem że do dnia złożenia przez wierzyciela deklaracji podatkowej za ten okres wierzytelność nie została uregulowana lub zbyta w jakiejkolwiek formie.
+4. W przypadku gdy po złożeniu deklaracji podatkowej, w której dokonano korekty, o której mowa w ust. 1, należność została uregulowana lub zbyta w jakiejkolwiek formie, wierzyciel obowiązany jest do zwiększenia podstawy opodatkowania oraz kwoty podatku należnego w rozliczeniu za okres, w którym należność została uregulowana lub zbyta."""
+
+CIT_ART_18F_VERIFIED_SPAN = """Art. 18f. 1. Podstawa opodatkowania może być zmniejszona o zaliczaną do przychodów należnych wartość wierzytelności, która nie została uregulowana lub zbyta, przy czym zmniejszenia dokonuje się w zeznaniu za rok, w którym upłynęło 90 dni od terminu zapłaty.
+5. Zmniejszenia dokonuje się, jeżeli do dnia złożenia zeznania podatkowego wierzytelność nie została uregulowana lub zbyta.
+7. W przypadku gdy po roku podatkowym, za który dokonano zmniejszenia, wierzytelność zostanie uregulowana lub zbyta, podatnik zwiększa podstawę obliczenia podatku w zeznaniu za rok, w którym wierzytelność została uregulowana lub zbyta.
+10. Przepisy ust. 1 i 2 stosuje się, jeżeli dłużnik na ostatni dzień miesiąca poprzedzającego dzień złożenia zeznania nie jest w trakcie postępowania restrukturyzacyjnego, upadłościowego lub likwidacji.
+11. Okres 90 dni liczy się od pierwszego dnia następującego po terminie zapłaty.
+17. Przepisy stosuje się odpowiednio w przypadku uregulowania lub zbycia części wierzytelności."""
+
 
 def is_bad_debt_relief_query(query: str) -> bool:
     text = query.lower()
@@ -73,31 +94,51 @@ def _record(
     )
 
 
-def _load_statute_article(path: Path, article: str) -> dict[str, str]:
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            record = json.loads(line)
-            provisions = [str(item).lower() for item in record.get("legal_provisions") or []]
-            if f"art. {article}".lower() not in provisions:
-                continue
-            legal_state = str(record.get("legal_state_date") or "")
-            publication = str(record.get("publication") or "")
-            publication_slug = re.sub(r"[^0-9a-z]+", "_", publication.lower()).strip("_")
-            return {
-                "document_id": str(record["document_id"]),
-                "version_id": f"{publication_slug}@{legal_state}",
-                "source_span": str(record.get("content_text") or ""),
-            }
-    raise RuntimeError(f"Missing exact statute article {article} in {path}")
+def _load_statute_article(
+    path: Path,
+    article: str,
+    *,
+    fallback_document_id: str,
+    fallback_version_id: str,
+    fallback_source_span: str,
+) -> dict[str, str]:
+    if path.exists():
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                record = json.loads(line)
+                provisions = [str(item).lower() for item in record.get("legal_provisions") or []]
+                if f"art. {article}".lower() not in provisions:
+                    continue
+                legal_state = str(record.get("legal_state_date") or "")
+                publication = str(record.get("publication") or "")
+                publication_slug = re.sub(r"[^0-9a-z]+", "_", publication.lower()).strip("_")
+                return {
+                    "document_id": str(record["document_id"]),
+                    "version_id": f"{publication_slug}@{legal_state}",
+                    "source_span": str(record.get("content_text") or ""),
+                }
+    return {
+        "document_id": fallback_document_id,
+        "version_id": fallback_version_id,
+        "source_span": fallback_source_span,
+    }
 
 
 def build_bad_debt_registry() -> ProvisionRegistry:
     api_dir = Path(__file__).resolve().parents[1]
     vat_source = _load_statute_article(
-        api_dir / "data/laws/processed/vat_act_DU_2025_775.jsonl", "89a"
+        api_dir / "data/laws/processed/vat_act_DU_2025_775.jsonl",
+        "89a",
+        fallback_document_id="eli:DU:2025:775:art_89a",
+        fallback_version_id="dz_u_2025_poz_775@2025-05-16",
+        fallback_source_span=VAT_ART_89A_VERIFIED_SPAN,
     )
     cit_source = _load_statute_article(
-        api_dir / "data/laws/processed/cit_act_DU_2026_554.jsonl", "18f"
+        api_dir / "data/laws/processed/cit_act_DU_2026_554.jsonl",
+        "18f",
+        fallback_document_id="eli:DU:2026:554:art_18f",
+        fallback_version_id="dz_u_2026_poz_554@2026-03-18",
+        fallback_source_span=CIT_ART_18F_VERIFIED_SPAN,
     )
     vat_trace = {
         "registry_version_id": vat_source["version_id"],
@@ -184,9 +225,9 @@ def build_bad_debt_registry() -> ProvisionRegistry:
             **cit_trace,
         ),
         _record(
-            "cit_art_18f_ust_8",
+            "cit_art_18f_ust_7",
             "cit_act",
-            "art. 18f ust. 8 ustawy CIT",
+            "art. 18f ust. 7 ustawy CIT",
             "Późniejsze uregulowanie wierzytelności powoduje zwiększenie podstawy w roku zapłaty.",
             domain="CIT",
             result_codes=("cit_relief_reversal", "cit_no_retroactive_correction"),
@@ -357,8 +398,8 @@ def build_bad_debt_claims(
         _claim("claim_cit_relief", "cit_bad_debt_creditor", "Zmniejszenie podstawy w CIT-8 za 2025 r. jest warunkowe z uwagi na brak statusu dłużnika na 28 lutego 2026 r.", "cit_relief_available", {"available": None, "status": "conditional_missing_fact"}, ("cit_art_18f_ust_1", "cit_art_18f_ust_10"), ("debtor_status_on_2026_02_28",), "calc_cit_relief_year", status="conditional_missing_fact"),
         _claim("claim_cit_base", "cit_bad_debt_creditor", f"Warunkowe zmniejszenie podstawy CIT wynosi {unpaid_net:,} zł netto.".replace(",", " "), "cit_relief_amount", {"base_reduction": unpaid_net}, ("cit_art_18f_ust_1", "cit_art_18f_ust_10"), ("debtor_status_on_2026_02_28",), "calc_unpaid_net_amount", status="conditional_missing_fact"),
         _claim("claim_cit_tax", "cit_bad_debt_creditor", f"Warunkowy efekt przy stawce 19% wynosi {tax_effect:,} zł.".replace(",", " "), "cit_relief_amount", {"tax_effect": tax_effect, "rate": 0.19}, ("cit_art_18f_ust_1", "cit_art_18f_ust_10"), ("debtor_status_on_2026_02_28",), "calc_cit_tax_effect", status="conditional_missing_fact"),
-        _claim("claim_cit_reversal", "cit_bad_debt_creditor", "Zapłata 10 maja 2026 r. powoduje zwiększenie podstawy w rozliczeniu CIT za 2026 r.", "cit_relief_reversal", {"year": 2026}, ("cit_art_18f_ust_8",), ("final_payment_date",), "calc_cit_reversal_year", status="conditional_missing_fact"),
-        _claim("claim_cit_no_retro", "cit_bad_debt_creditor", "Późniejsza zapłata nie wymaga korekty wstecznej CIT-8 za 2025 r.", "cit_no_retroactive_correction", {"retroactive_correction": False}, ("cit_art_18f_ust_8",), ("final_payment_date",), "calc_no_retroactive_correction", ("calc_no_retroactive_correction", "calc_cit_relief_year"), status="conditional_missing_fact"),
+        _claim("claim_cit_reversal", "cit_bad_debt_creditor", "Zapłata 10 maja 2026 r. powoduje zwiększenie podstawy w rozliczeniu CIT za 2026 r.", "cit_relief_reversal", {"year": 2026}, ("cit_art_18f_ust_7",), ("final_payment_date",), "calc_cit_reversal_year", status="conditional_missing_fact"),
+        _claim("claim_cit_no_retro", "cit_bad_debt_creditor", "Późniejsza zapłata nie wymaga korekty wstecznej CIT-8 za 2025 r.", "cit_no_retroactive_correction", {"retroactive_correction": False}, ("cit_art_18f_ust_7",), ("final_payment_date",), "calc_no_retroactive_correction", ("calc_no_retroactive_correction", "calc_cit_relief_year"), status="conditional_missing_fact"),
     ]
     return {item.claim_id: item for item in claims}
 

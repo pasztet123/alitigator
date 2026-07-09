@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import re
 import unittest
+from pathlib import Path
 
 from app.bad_debt_pipeline import (
+    VAT_ART_89A_VERIFIED_SPAN,
+    _load_statute_article,
     build_bad_debt_claims,
     build_bad_debt_registry,
     calculate_bad_debt,
@@ -77,6 +80,10 @@ class BadDebtPipelineEndToEndTests(unittest.TestCase):
             self.assertEqual(
                 result.claims["claim_cit_reversal"].result["year"], 2026
             )
+            self.assertEqual(
+                result.claims["claim_cit_reversal"].controlling_provisions,
+                ("cit_art_18f_ust_7",),
+            )
             self.assertFalse(
                 result.claims["claim_cit_no_retro"].result[
                     "retroactive_correction"
@@ -130,6 +137,18 @@ class BadDebtPipelineEndToEndTests(unittest.TestCase):
         self.assertTrue(
             all(registry.get(item, "2026-03-31") is None for item in historical)
         )
+
+    def test_registry_works_without_runtime_data_directory(self) -> None:
+        source = _load_statute_article(
+            Path("/missing-in-cloud-run/vat.jsonl"),
+            "89a",
+            fallback_document_id="eli:DU:2025:775:art_89a",
+            fallback_version_id="dz_u_2025_poz_775@2025-05-16",
+            fallback_source_span=VAT_ART_89A_VERIFIED_SPAN,
+        )
+
+        self.assertEqual(source["document_id"], "eli:DU:2025:775:art_89a")
+        self.assertIn("Art. 89a.", source["source_span"])
 
     def test_same_missing_fact_is_irrelevant_to_vat_and_conditional_for_cit(self) -> None:
         result = run_bad_debt_pipeline(BENCHMARK_QUERY)

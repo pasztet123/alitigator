@@ -321,6 +321,22 @@ def parse_bad_debt_facts(query: str) -> BadDebtFacts:
     return BadDebtFacts(records, invoice_net, invoice_vat, partial_gross, due_date, payment_date, final_payment_date)
 
 
+def can_run_bad_debt_pipeline(query: str) -> bool:
+    if not is_bad_debt_relief_query(query):
+        return False
+    try:
+        facts = parse_bad_debt_facts(query)
+    except (ValueError, ArithmeticError):
+        return False
+    return (
+        facts.invoice_net > 0
+        and facts.invoice_vat > 0
+        and facts.partial_gross > 0
+        and facts.partial_gross < facts.invoice_net + facts.invoice_vat
+        and facts.due_date < facts.final_payment_date
+    )
+
+
 def calculate_bad_debt(facts: BadDebtFacts) -> dict[str, CalculationRecord]:
     gross = facts.invoice_net + facts.invoice_vat
     paid_net = int(

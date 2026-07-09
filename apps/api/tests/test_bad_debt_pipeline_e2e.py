@@ -10,6 +10,7 @@ from app.bad_debt_pipeline import (
     build_bad_debt_claims,
     build_bad_debt_registry,
     calculate_bad_debt,
+    can_run_bad_debt_pipeline,
     parse_bad_debt_facts,
     run_bad_debt_pipeline,
 )
@@ -41,6 +42,14 @@ Oceń ulgę po upływie 90 dni i późniejszą zapłatę.
 
 
 class BadDebtPipelineEndToEndTests(unittest.TestCase):
+    def test_router_requires_complete_structured_case(self) -> None:
+        self.assertTrue(can_run_bad_debt_pipeline(BENCHMARK_QUERY))
+        self.assertFalse(
+            can_run_bad_debt_pipeline(
+                "Jak działa ulga na złe długi w VAT i CIT?"
+            )
+        )
+
     def test_benchmark_passes_three_times_with_expected_results(self) -> None:
         for _ in range(3):
             result = run_bad_debt_pipeline(BENCHMARK_QUERY)

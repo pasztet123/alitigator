@@ -37,7 +37,7 @@ from app.billing import (
     update_profile,
 )
 from app.eureka_ingest import DEFAULT_CONCURRENCY, DEFAULT_PAGE_SIZE, DEFAULT_SORT, FetchConfig, run_ingest
-from app.bad_debt_pipeline import is_bad_debt_relief_query, run_bad_debt_pipeline
+from app.bad_debt_pipeline import can_run_bad_debt_pipeline, run_bad_debt_pipeline
 from app.controlled_legal_pipeline import is_mixed_invoice_query, run_legal_pipeline
 from app.legal_pipeline import (
     build_claims_from_rules,
@@ -85,7 +85,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "0.9.2"
+API_VERSION = "0.9.4"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 AVAILABLE_MODELS = [
@@ -2491,7 +2491,7 @@ async def chat(
     retrieval_preferences_context = build_retrieval_preferences_context(request.retrieval_preferences)
     effective_user_prompt = build_effective_user_prompt(latest_user_message, request.intent_hints)
 
-    if is_bad_debt_relief_query(effective_user_prompt):
+    if can_run_bad_debt_pipeline(effective_user_prompt):
         try:
             controlled_result = run_bad_debt_pipeline(effective_user_prompt)
         except Exception as exc:

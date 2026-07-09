@@ -106,10 +106,34 @@ class BadDebtPipelineEndToEndTests(unittest.TestCase):
                 "return_filing_date",
             )
             self.assertEqual(
+                result.claims["claim_cit_payment_cutoff"].result[
+                    "payment_cutoff"
+                ],
+                "return_filing_date",
+            )
+            self.assertEqual(
                 result.claims["claim_cit_relief"].result[
                     "debtor_insolvency_reference_date"
                 ],
                 "last_day_of_previous_month",
+            )
+            self.assertEqual(
+                result.claims["claim_cit_relief"].result[
+                    "insolvency_reference_date"
+                ],
+                "last_day_of_previous_month",
+            )
+            self.assertEqual(
+                result.claims["claim_vat_payment_cutoff"].result[
+                    "receivable_payment_cutoff"
+                ],
+                "through_filing_date",
+            )
+            self.assertEqual(
+                result.claims["claim_vat_creditor_registration_date"].result[
+                    "creditor_vat_status_reference_date"
+                ],
+                "day_before_filing",
             )
             self.assertEqual(
                 result.claims["claim_vat_reversal"].result["period"], "2026-05"
@@ -301,6 +325,60 @@ class BadDebtPipelineEndToEndTests(unittest.TestCase):
         self.assertFalse(truncated_validation.end_marker_present)
         self.assertFalse(truncated_validation.tables_closed)
         self.assertIn("CIT", truncated_validation.missing_required_sections)
+
+    def test_renderer_rejects_material_claims_without_provenance_or_calculation(self) -> None:
+        facts = parse_bad_debt_facts(BENCHMARK_QUERY)
+        calculations = calculate_bad_debt(facts)
+        claims = build_bad_debt_claims(facts, calculations)
+        payload = build_renderer_payload(
+            claims, build_bad_debt_registry(), target_date="2026-03-31"
+        )
+
+        numeric_claim = payload.approved_claims[0]
+        broken_numeric_claim = LegalClaim(
+            **{
+                **numeric_claim.__dict__,
+                "calculation_id": None,
+                "calculation_ids": (),
+            }
+        )
+        broken_numeric_payload = type(payload)(
+            approved_claims=(broken_numeric_claim, *payload.approved_claims[1:]),
+            conditional_claims=payload.conditional_claims,
+            answer_plan=payload.answer_plan,
+            provisions=payload.provisions,
+        )
+        broken_numeric_answer = render_answer(broken_numeric_payload)
+        broken_numeric_validation = validate_rendered_answer(
+            broken_numeric_answer, broken_numeric_payload
+        )
+        self.assertFalse(broken_numeric_validation.passed)
+        self.assertIn(
+            "numeric_claim_without_calculation_id",
+            broken_numeric_validation.errors,
+        )
+
+        missing_provenance_claim = LegalClaim(
+            **{
+                **numeric_claim.__dict__,
+                "provenance": (),
+            }
+        )
+        missing_provenance_payload = type(payload)(
+            approved_claims=(missing_provenance_claim, *payload.approved_claims[1:]),
+            conditional_claims=payload.conditional_claims,
+            answer_plan=payload.answer_plan,
+            provisions=payload.provisions,
+        )
+        missing_provenance_answer = render_answer(missing_provenance_payload)
+        missing_provenance_validation = validate_rendered_answer(
+            missing_provenance_answer, missing_provenance_payload
+        )
+        self.assertFalse(missing_provenance_validation.passed)
+        self.assertIn(
+            "material_claim_without_complete_provenance",
+            missing_provenance_validation.errors,
+        )
 
 
 class RegistryAndEntailmentTests(unittest.TestCase):

@@ -358,6 +358,32 @@ def validate_rendered_answer(
             or f"[claim_id:{claim.claim_id}]" not in analysis_text
         )
     )
+    material_claims_without_provenance = tuple(
+        claim.claim_id
+        for claim in [*payload.approved_claims, *payload.conditional_claims]
+        if claim.is_material
+        and (
+            not claim.claim_id
+            or not claim.controlling_provisions
+            or not claim.provenance
+            or any(
+                not source.get("provision_id")
+                or not source.get("display_reference")
+                or not source.get("version_id")
+                or not source.get("source_span")
+                for source in claim.provenance
+            )
+        )
+    )
+    numeric_claims_without_calculation = tuple(
+        claim.claim_id
+        for claim in [*payload.approved_claims, *payload.conditional_claims]
+        if claim.is_material
+        and claim.claim_type == "calculated_result"
+        and re.search(r"\b\d+(?:[.,]\d+)?(?:\s*%|\s*zł)?\b", claim.text)
+        and not claim.calculation_ids
+        and not claim.calculation_id
+    )
     marker = answer.rstrip().endswith(END_MARKER)
     missing_sections_list: list[str] = []
     for section in payload.answer_plan.sections:
@@ -431,6 +457,10 @@ def validate_rendered_answer(
         errors.append("unknown_provision_reference")
     if contradictions:
         errors.append("thesis_claim_contradiction")
+    if material_claims_without_provenance:
+        errors.append("material_claim_without_complete_provenance")
+    if numeric_claims_without_calculation:
+        errors.append("numeric_claim_without_calculation_id")
     if truncated:
         errors.append("truncated_output")
     if missing_sections:

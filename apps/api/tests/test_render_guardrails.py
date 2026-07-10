@@ -13,8 +13,9 @@ from app.main import (
 
 
 class ConditionalAnswerGuardrailTests(unittest.TestCase):
-    def test_model_timeout_is_shorter_than_cloud_run_timeout(self) -> None:
-        self.assertLessEqual(ANTHROPIC_CHAT_TIMEOUT_SECONDS, 24.0)
+    def test_model_timeout_allows_complex_answers_but_is_bounded(self) -> None:
+        self.assertGreaterEqual(ANTHROPIC_CHAT_TIMEOUT_SECONDS, 90.0)
+        self.assertLessEqual(ANTHROPIC_CHAT_TIMEOUT_SECONDS, 180.0)
 
     def test_axis_validator_accepts_common_markdown_heading_levels(self) -> None:
         for heading in ("CIT", "## CIT", "#### CIT", "**CIT**", "### CIT – rozliczenie"):

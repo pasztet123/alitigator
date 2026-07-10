@@ -85,7 +85,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "0.9.11"
+API_VERSION = "0.9.12"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 AVAILABLE_MODELS = [
@@ -1092,6 +1092,14 @@ EMPTY_LEGAL_REFERENCE_SLOT_RE = re.compile(
     r"\(\s*i\s+ust\.|\b(?:jest|regulowan\w*|wymaga|nakłada|wynika\s+z|podstawa\s+prawna:?)\s+ustawy\s+o\s+(?:VAT|CIT)\b",
     re.IGNORECASE,
 )
+EMPTY_LEGAL_REFERENCE_PAREN_RE = re.compile(
+    r"\(\s*i\s+[^)]*?ustawy\s+o\s+(VAT|CIT)\s*\)",
+    re.IGNORECASE,
+)
+EMPTY_LEGAL_REFERENCE_STATUTE_RE = re.compile(
+    r"\b(?P<prefix>jest|regulowan\w*|wymaga|nakłada|wynika\s+z|podstawa\s+prawna:?)\s+ustawy\s+o\s+(?P<domain>VAT|CIT)\b",
+    re.IGNORECASE,
+)
 UNCERTAIN_PROVISION_PHRASES_RE = re.compile(
     r"\b(lub|albo)\s+(?:inny|odpowiedni|właściwy|wlasciwy)\s+przepis\b|"
     r"\bodpowiedni przepis\b|"
@@ -1133,6 +1141,47 @@ def select_best_claim_trace_for_text(text: str, claim_source_traces: list[dict[s
 
 def render_exact_primary_law_reference(trace: dict[str, object]) -> str:
     return str(trace.get("provision_reference") or "").strip()
+
+
+def select_best_claim_trace_for_domain(
+    claim_source_traces: list[dict[str, object]],
+    domain: str,
+) -> Optional[dict[str, object]]:
+    wanted = domain.upper()
+    for trace in claim_source_traces:
+        haystack = " ".join(
+            str(trace.get(key) or "")
+            for key in ("provision_reference", "source_document_id", "claim", "source_span")
+        ).upper()
+        if wanted in haystack:
+            return trace
+        if wanted == "VAT" and ("PODATKU OD TOWARÓW" in haystack or "VAT_ACT" in haystack):
+            return trace
+        if wanted == "CIT" and ("DOCHODOWYM OD OSÓB PRAWNYCH" in haystack or "CIT_ACT" in haystack):
+            return trace
+    return claim_source_traces[0] if claim_source_traces else None
+
+
+def repair_empty_legal_reference_slots(
+    reply: str,
+    claim_source_traces: list[dict[str, object]],
+) -> str:
+    def replacement_for_domain(domain: str) -> str:
+        trace = select_best_claim_trace_for_domain(claim_source_traces, domain)
+        reference = render_exact_primary_law_reference(trace or {})
+        return reference or "przepisy wskazane w sekcji Źródła"
+
+    repaired = EMPTY_LEGAL_REFERENCE_PAREN_RE.sub(
+        lambda match: f"({replacement_for_domain(match.group(1))})",
+        reply,
+    )
+
+    def replace_statute_slot(match: re.Match[str]) -> str:
+        prefix = match.group("prefix")
+        domain = match.group("domain")
+        return f"{prefix} {replacement_for_domain(domain)}"
+
+    return EMPTY_LEGAL_REFERENCE_STATUTE_RE.sub(replace_statute_slot, repaired)
 
 
 def render_exact_primary_law_trace_block(claim_source_traces: list[dict[str, object]]) -> str:
@@ -1302,6 +1351,7 @@ def enforce_reply_guardrails(
         lambda match: render_exact_primary_law_reference(select_best_claim_trace_for_text(match.string, traces) or {}),
         sanitized,
     )
+    sanitized = repair_empty_legal_reference_slots(sanitized, traces)
     sanitized = DUPLICATED_PROVISION_REFERENCE_RE.sub(r"\1", sanitized)
     sanitized = re.sub(r"\bze\s+(art\.)", r"z \1", sanitized, flags=re.IGNORECASE)
 
@@ -2905,7 +2955,16 @@ async def chat(
             for attempt in range(2):
                 attempt_payload = dict(payload)
                 if attempt:
-                    attempt_payload["system"] = compact_system_prompt
+                    retry_feedback = ""
+                    if last_render_error is not None:
+                        retry_feedback = (
+                            "\n\nPoprzedni render został odrzucony przez walidator: "
+                            f"{last_render_error.detail}"
+                            "\nNapraw dokładnie wskazane błędy. Nie zostawiaj pustych slotów typu "
+                            "'ustawy o VAT', 'ustawy o CIT' ani '( i ust. ... )'. "
+                            "Każde odwołanie do przepisu musi mieć konkretny numer artykułu/ustępu albo zostać pominięte."
+                        )
+                    attempt_payload["system"] = compact_system_prompt + retry_feedback
                     attempt_payload["temperature"] = 0
                     attempt_payload["messages"] = [
                         {

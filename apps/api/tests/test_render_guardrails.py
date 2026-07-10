@@ -6,6 +6,7 @@ from app.main import (
     RENDER_COMPLETION_MARKER,
     build_chat_system_prompt,
     enforce_reply_guardrails,
+    repair_empty_legal_reference_slots,
     validate_final_output,
 )
 
@@ -133,6 +134,31 @@ class ConditionalAnswerGuardrailTests(unittest.TestCase):
                 axis_coverage=[],
                 expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
             )
+
+    def test_guardrails_repair_empty_legal_reference_slots_from_trace(self) -> None:
+        reply = (
+            "Teza\nWniosek.\n\n"
+            "Analiza\nPrawo do korekty powstaje w grudniu ( i ust. 2 pkt 5 ustawy o VAT). "
+            "Ulga regulowana jest ustawy o CIT.\n\n"
+            "Źródła\nart. 89a ustawy VAT; art. 18f ustawy CIT.\n\n"
+            "Ryzyka i luki\nBrak.\n\n"
+            f"{RENDER_COMPLETION_MARKER}"
+        )
+        traces = [
+            {"provision_reference": "art. 89a ust. 3 ustawy VAT"},
+            {"provision_reference": "art. 18f ust. 5 ustawy CIT"},
+        ]
+
+        repaired = repair_empty_legal_reference_slots(reply, traces)
+
+        self.assertIn("art. 89a ust. 3 ustawy VAT", repaired)
+        self.assertIn("regulowana jest art. 18f ust. 5 ustawy CIT", repaired)
+        validation = validate_final_output(
+            repaired,
+            axis_coverage=[],
+            expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
+        )
+        self.assertTrue(validation["no_empty_legal_reference_slots"])
 
 
 if __name__ == "__main__":

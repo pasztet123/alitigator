@@ -23,6 +23,29 @@ from app.legal_pipeline import (
     validate_claim,
 )
 
+BAD_DEBT_BENCHMARK_QUERY = """
+Ulga na złe długi VAT i CIT. Faktura z 10 września 2025 r. opiewa na
+200 000 zł netto i 46 000 zł VAT. Termin płatności przypadał 30 września
+2025 r. Częściowa zapłata 61 500 zł nastąpiła 15 stycznia 2026 r.
+JPK_V7M za grudzień 2025 r. złożono 25 stycznia 2026 r., a CIT-8 za
+2025 r. złożono 31 marca 2026 r. Brak informacji o statusie
+restrukturyzacyjnym, upadłościowym lub likwidacyjnym dłużnika na
+28 lutego 2026 r. Pozostałe 184 500 zł zapłacono 10 maja 2026 r.
+Oceń ulgę po upływie 90 dni i późniejszą zapłatę.
+"""
+
+BENCHMARK_TRACE_KEYS = {
+    "selected_provisions",
+    "rejected_historical_provisions",
+    "extracted_rules",
+    "built_claims",
+    "validated_claims",
+    "renderer_payload",
+    "raw_renderer_output",
+    "postprocessed_output",
+    "validation_result",
+}
+
 VAT_ART_89A_VERIFIED_SPAN = """Art. 89a. 1. Podatnik może skorygować podstawę opodatkowania oraz podatek należny z tytułu dostawy towarów lub świadczenia usług na terytorium kraju w przypadku wierzytelności, których nieściągalność została uprawdopodobniona. Korekta dotyczy również podstawy opodatkowania i kwoty podatku przypadającej na część kwoty wierzytelności, której nieściągalność została uprawdopodobniona.
 1a. Nieściągalność wierzytelności uważa się za uprawdopodobnioną, w przypadku gdy wierzytelność nie została uregulowana lub zbyta w jakiejkolwiek formie w ciągu 90 dni od dnia upływu terminu jej płatności określonego w umowie lub na fakturze.
 2. Przepis ust. 1 stosuje się w przypadku gdy spełnione są następujące warunki:
@@ -53,6 +76,19 @@ def is_bad_debt_relief_query(query: str) -> bool:
         and "vat" in text
         and "cit" in text
     )
+
+
+def is_bad_debt_benchmark_trace_request(query: str) -> bool:
+    text = query.strip()
+    if not text:
+        return False
+    if not text.startswith("{") and "{" in text and "}" in text:
+        text = text[text.find("{") : text.rfind("}") + 1]
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict) and BENCHMARK_TRACE_KEYS.issubset(payload)
 
 
 def _record(

@@ -11,6 +11,7 @@ from app.bad_debt_pipeline import (
     build_bad_debt_registry,
     calculate_bad_debt,
     can_run_bad_debt_pipeline,
+    is_bad_debt_benchmark_trace_request,
     parse_bad_debt_facts,
     run_bad_debt_pipeline,
 )
@@ -50,6 +51,24 @@ class BadDebtPipelineEndToEndTests(unittest.TestCase):
                 "Jak działa ulga na złe długi w VAT i CIT?"
             )
         )
+
+    def test_benchmark_trace_skeleton_is_detected_without_model_path(self) -> None:
+        skeleton = """
+        odpal ten benchmark
+        {
+          "selected_provisions": [],
+          "rejected_historical_provisions": [],
+          "extracted_rules": [],
+          "built_claims": [],
+          "validated_claims": [],
+          "renderer_payload": {},
+          "raw_renderer_output": "",
+          "postprocessed_output": "",
+          "validation_result": {}
+        }
+        """
+
+        self.assertTrue(is_bad_debt_benchmark_trace_request(skeleton))
 
     def test_benchmark_passes_three_times_with_expected_results(self) -> None:
         for _ in range(3):

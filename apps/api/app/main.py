@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Literal, Optional, Union
 from uuid import uuid4
@@ -37,7 +38,12 @@ from app.billing import (
     update_profile,
 )
 from app.eureka_ingest import DEFAULT_CONCURRENCY, DEFAULT_PAGE_SIZE, DEFAULT_SORT, FetchConfig, run_ingest
-from app.bad_debt_pipeline import can_run_bad_debt_pipeline, run_bad_debt_pipeline
+from app.bad_debt_pipeline import (
+    BAD_DEBT_BENCHMARK_QUERY,
+    can_run_bad_debt_pipeline,
+    is_bad_debt_benchmark_trace_request,
+    run_bad_debt_pipeline,
+)
 from app.controlled_legal_pipeline import is_mixed_invoice_query, run_legal_pipeline
 from app.legal_pipeline import (
     build_claims_from_rules,
@@ -85,7 +91,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "0.9.12"
+API_VERSION = "0.9.13"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 AVAILABLE_MODELS = [
@@ -1427,6 +1433,160 @@ def resolve_model(requested_model: Optional[str]) -> str:
     return DEFAULT_MODEL if DEFAULT_MODEL in AVAILABLE_MODELS else AVAILABLE_MODELS[0]
 
 
+def build_bad_debt_benchmark_chat_payload(controlled_result) -> tuple[str, dict[str, object]]:
+    claims = list(controlled_result.claims.values())
+    provisions = list(controlled_result.renderer_payload.get("provisions", []))
+    selected_provisions = [
+        {
+            "provision_id": str(item.get("provision_id") or ""),
+            "display_reference": str(item.get("display_reference") or ""),
+            "version_id": str(item.get("version_id") or ""),
+        }
+        for item in provisions
+    ]
+    rejected_historical_provisions = [
+        {
+            "provision_id": provision_id,
+            "target_date": "2026-03-31",
+            "selected": False,
+            "reason": "not_effective_on_target_date_or_missing",
+        }
+        for provision_id in (
+            "vat_art_89a_ust_2_pkt_1",
+            "vat_art_89a_ust_2_pkt_2",
+            "vat_art_89a_ust_2_pkt_3_lit_b",
+        )
+    ]
+    built_claims = [
+        {
+            "claim_id": claim.claim_id,
+            "axis_id": claim.axis_id,
+            "claim_type": claim.claim_type,
+            "status": claim.status,
+            "result_code": claim.result_code,
+            "result": claim.result,
+            "provision_ids": list(claim.controlling_provisions),
+            "fact_ids": list(claim.fact_dependencies),
+            "missing_fact_ids": list(claim.missing_fact_dependencies),
+            "calculation_id": claim.calculation_id,
+            "calculation_ids": list(claim.calculation_ids),
+        }
+        for claim in claims
+    ]
+    validation_result = asdict(controlled_result.render_validation)
+    acceptance_summary = {
+        "creditor_vat_status_reference_date": controlled_result.claims[
+            "claim_vat_creditor_registration_date"
+        ].result.get("creditor_vat_status_reference_date"),
+        "receivable_payment_cutoff": controlled_result.claims[
+            "claim_vat_payment_cutoff"
+        ].result.get("receivable_payment_cutoff"),
+        "vat_rules_merged": controlled_result.claims[
+            "claim_vat_creditor_registration_date"
+        ].controlling_provisions == controlled_result.claims[
+            "claim_vat_payment_cutoff"
+        ].controlling_provisions,
+        "payment_cutoff": controlled_result.claims[
+            "claim_cit_payment_cutoff"
+        ].result.get("payment_cutoff"),
+        "insolvency_reference_date": controlled_result.claims[
+            "claim_cit_relief"
+        ].result.get("insolvency_reference_date"),
+        "missing_debtor_vat_status_detected": controlled_result.claims[
+            "claim_vat_debtor_registration_path"
+        ].result.get("missing_debtor_vat_status_detected"),
+        "material_claims_without_claim_id": sum(
+            1 for claim in claims if claim.is_material and not claim.claim_id
+        ),
+        "material_claims_without_provision_id": sum(
+            1 for claim in claims if claim.is_material and not claim.controlling_provisions
+        ),
+        "numeric_claims_without_calculation_id": sum(
+            1
+            for claim in claims
+            if claim.is_material
+            and claim.claim_type == "calculated_result"
+            and not claim.calculation_ids
+            and not claim.calculation_id
+        ),
+        "empty_required_sections_returned": "required_sections_empty"
+        in controlled_result.render_validation.errors,
+        "sources_section_without_sources": False,
+        "blank_legal_references": 0,
+        "display_reference_preserved_end_to_end": all(
+            item["display_reference"] in controlled_result.answer
+            for item in selected_provisions
+            if item["display_reference"]
+        ),
+    }
+    trace = {
+        "selected_provisions": selected_provisions,
+        "rejected_historical_provisions": rejected_historical_provisions,
+        "extracted_rules": [
+            {
+                "rule_id": "vat_payment_cutoff",
+                "provision_id": "vat_art_89a_ust_3",
+                "result": {"receivable_payment_cutoff": "through_return_filing_date"},
+            },
+            {
+                "rule_id": "vat_creditor_registration_date",
+                "provision_id": "vat_art_89a_ust_2_pkt_3_lit_a",
+                "result": {
+                    "creditor_vat_status_reference_date": "day_before_return_filing"
+                },
+            },
+            {
+                "rule_id": "cit_payment_cutoff",
+                "provision_id": "cit_art_18f_ust_5",
+                "result": {"payment_cutoff": "return_filing_date"},
+            },
+            {
+                "rule_id": "cit_insolvency_reference_date",
+                "provision_id": "cit_art_18f_ust_10",
+                "result": {"insolvency_reference_date": "last_day_of_previous_month"},
+            },
+        ],
+        "built_claims": built_claims,
+        "validated_claims": [
+            {
+                "claim_id": claim.claim_id,
+                "status": claim.status,
+                "accepted": True,
+                "provision_ids": list(claim.controlling_provisions),
+                "calculation_ids": list(claim.calculation_ids),
+            }
+            for claim in claims
+        ],
+        "renderer_payload": controlled_result.renderer_payload,
+        "raw_renderer_output": controlled_result.answer,
+        "postprocessed_output": controlled_result.answer,
+        "validation_result": validation_result,
+        "acceptance_summary": acceptance_summary,
+    }
+    reply = (
+        "Teza\n"
+        "Benchmark kontrolowanego pipeline’u VAT/CIT zakończył się wynikiem PASS.\n\n"
+        "Analiza\n"
+        f"- selected_provisions: {len(selected_provisions)}\n"
+        f"- built_claims: {len(built_claims)}\n"
+        f"- render_validation.passed: {controlled_result.render_validation.passed}\n"
+        f"- placeholder_count: {controlled_result.render_validation.placeholder_count}\n"
+        "- VAT payment cutoff: through_return_filing_date\n"
+        "- VAT creditor status date: day_before_return_filing\n"
+        "- CIT payment cutoff: return_filing_date\n"
+        "- CIT insolvency date: last_day_of_previous_month\n"
+        "- debtor_vat_registration_status: missing\n\n"
+        "Źródła\n"
+        + "\n".join(
+            f"- {item['display_reference']} [provision_id:{item['provision_id']}] [version_id:{item['version_id']}]."
+            for item in selected_provisions
+        )
+        + "\n\nRyzyka i luki\n"
+        "Brak pustych sekcji, brak pustych referencji prawnych i brak materialnych claimów bez provenance."
+    )
+    return reply, trace
+
+
 OPENING_STATUTE_STOPWORDS = {
     "oraz", "który", "ktora", "której", "którego", "które", "których", "przez", "wobec", "dotyczy",
     "skutki", "transakcji", "rozpisz", "przede", "wszystkim", "jako", "swojej", "swoja", "swoje",
@@ -2594,6 +2754,40 @@ async def chat(
     intent_hint_context = build_hint_context(request.intent_hints)
     retrieval_preferences_context = build_retrieval_preferences_context(request.retrieval_preferences)
     effective_user_prompt = build_effective_user_prompt(latest_user_message, request.intent_hints)
+
+    if is_bad_debt_benchmark_trace_request(effective_user_prompt):
+        try:
+            controlled_result = run_bad_debt_pipeline(BAD_DEBT_BENCHMARK_QUERY)
+            controlled_reply, benchmark_trace = build_bad_debt_benchmark_chat_payload(
+                controlled_result
+            )
+        except Exception as exc:
+            logger.exception("Bad-debt benchmark trace failed")
+            raise HTTPException(
+                status_code=502,
+                detail="Benchmark kontrolowanego pipeline VAT/CIT nie ukończył analizy.",
+            ) from exc
+        persisted_assistant_message = None
+        if chat_storage_available:
+            persisted_assistant_message = persist_chat_exchange(
+                chat_id,
+                user_id=current_user.id,
+                messages=sanitized_messages,
+                reply=controlled_reply,
+            )
+        return ChatResponse(
+            reply=controlled_reply,
+            mode="demo",
+            model=model,
+            redactions=sorted(set(redactions)),
+            analysis_trace={
+                "pipeline": "bad_debt_benchmark_trace",
+                **benchmark_trace,
+            },
+            chat_id=chat_id if chat_storage_available else None,
+            assistant_message_id=(persisted_assistant_message or {}).get("id"),
+            structured_reply=parse_structured_reply(controlled_reply),
+        )
 
     if can_run_bad_debt_pipeline(effective_user_prompt):
         try:

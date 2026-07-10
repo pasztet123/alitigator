@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Literal, Optional, Union
@@ -91,7 +92,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "0.9.15"
+API_VERSION = "0.9.16"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 AVAILABLE_MODELS = [
@@ -107,6 +108,10 @@ CHAT_MAX_TOKENS = max(1024, int(os.getenv("ANTHROPIC_CHAT_MAX_TOKENS", "6000")))
 ANTHROPIC_CHAT_TIMEOUT_SECONDS = min(
     180.0,
     max(30.0, float(os.getenv("ANTHROPIC_CHAT_TIMEOUT_SECONDS", "110"))),
+)
+CHAT_REQUEST_DEADLINE_SECONDS = min(
+    180.0,
+    max(30.0, float(os.getenv("ALITIGATOR_CHAT_REQUEST_DEADLINE_SECONDS", "50"))),
 )
 
 SYSTEM_PROMPT = """
@@ -2722,6 +2727,11 @@ async def chat(
     request: ChatRequest,
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> ChatResponse:
+    request_started_at = time.monotonic()
+
+    def remaining_request_seconds(*, reserve_seconds: float = 3.0) -> float:
+        return CHAT_REQUEST_DEADLINE_SECONDS - (time.monotonic() - request_started_at) - reserve_seconds
+
     ensure_profile(current_user)
     redactions: list[str] = []
     sanitized_messages: list[dict[str, str]] = []
@@ -2957,6 +2967,16 @@ async def chat(
             structured_reply=parse_structured_reply(controlled_reply),
         )
 
+    remaining_before_retrieval = remaining_request_seconds(reserve_seconds=5.0)
+    if remaining_before_retrieval <= 0:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                "Analiza przekroczyła limit czasu tej usługi. "
+                "Dla bardzo długich pytań trzeba zwiększyć timeout Cloud Run albo uruchomić tryb zadania w tle."
+            ),
+        )
+
     retrieved_chunks = search_chat_chunks(
         effective_user_prompt,
         include_interpretations=(request.retrieval_preferences.include_interpretations if request.retrieval_preferences else True),
@@ -3148,8 +3168,28 @@ async def chat(
     validation: dict[str, object] = {}
     last_render_error: Optional[HTTPException] = None
     try:
-        async with httpx.AsyncClient(timeout=ANTHROPIC_CHAT_TIMEOUT_SECONDS) as client:
+        model_timeout = min(
+            ANTHROPIC_CHAT_TIMEOUT_SECONDS,
+            max(5.0, remaining_request_seconds(reserve_seconds=6.0)),
+        )
+        if model_timeout < 10.0:
+            raise HTTPException(
+                status_code=504,
+                detail=(
+                    "Analiza źródeł zajęła zbyt dużo czasu przed wygenerowaniem odpowiedzi. "
+                    "Dla bardzo długich pytań trzeba zwiększyć timeout Cloud Run albo zawęzić zakres pytania."
+                ),
+            )
+        async with httpx.AsyncClient(timeout=model_timeout) as client:
             for attempt in range(2):
+                if remaining_request_seconds(reserve_seconds=6.0) < 10.0:
+                    raise HTTPException(
+                        status_code=504,
+                        detail=(
+                            "Model potrzebuje więcej czasu niż pozwala obecny limit requestu. "
+                            "Dla pełnych, kompleksowych analiz trzeba zwiększyć timeout Cloud Run."
+                        ),
+                    )
                 attempt_payload = dict(payload)
                 if attempt:
                     retry_feedback = ""

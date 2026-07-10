@@ -4,6 +4,7 @@ import unittest
 
 from app.main import (
     ANTHROPIC_CHAT_TIMEOUT_SECONDS,
+    CHAT_REQUEST_DEADLINE_SECONDS,
     RENDER_COMPLETION_MARKER,
     build_chat_system_prompt,
     enforce_reply_guardrails,
@@ -16,6 +17,8 @@ class ConditionalAnswerGuardrailTests(unittest.TestCase):
     def test_model_timeout_allows_complex_answers_but_is_bounded(self) -> None:
         self.assertGreaterEqual(ANTHROPIC_CHAT_TIMEOUT_SECONDS, 90.0)
         self.assertLessEqual(ANTHROPIC_CHAT_TIMEOUT_SECONDS, 180.0)
+        self.assertGreaterEqual(CHAT_REQUEST_DEADLINE_SECONDS, 30.0)
+        self.assertLessEqual(CHAT_REQUEST_DEADLINE_SECONDS, 180.0)
 
     def test_axis_validator_accepts_common_markdown_heading_levels(self) -> None:
         for heading in ("CIT", "## CIT", "#### CIT", "**CIT**", "### CIT – rozliczenie"):

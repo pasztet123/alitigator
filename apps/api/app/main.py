@@ -91,7 +91,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "0.9.13"
+API_VERSION = "0.9.14"
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 AVAILABLE_MODELS = [
@@ -104,7 +104,10 @@ AVAILABLE_MODELS = [
 ]
 HINTS_MODEL = os.getenv("ANTHROPIC_HINTS_MODEL", "claude-haiku-4-5-20251001")
 CHAT_MAX_TOKENS = max(1024, int(os.getenv("ANTHROPIC_CHAT_MAX_TOKENS", "6000")))
-ANTHROPIC_CHAT_TIMEOUT_SECONDS = max(30.0, float(os.getenv("ANTHROPIC_CHAT_TIMEOUT_SECONDS", "240")))
+ANTHROPIC_CHAT_TIMEOUT_SECONDS = min(
+    24.0,
+    max(10.0, float(os.getenv("ANTHROPIC_CHAT_TIMEOUT_SECONDS", "24"))),
+)
 
 SYSTEM_PROMPT = """
 Jesteś asystentem aLitigator dla polskich prawników podatkowych.

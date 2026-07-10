@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from app.main import (
+    ANTHROPIC_CHAT_TIMEOUT_SECONDS,
     RENDER_COMPLETION_MARKER,
     build_chat_system_prompt,
     enforce_reply_guardrails,
@@ -12,6 +13,9 @@ from app.main import (
 
 
 class ConditionalAnswerGuardrailTests(unittest.TestCase):
+    def test_model_timeout_is_shorter_than_cloud_run_timeout(self) -> None:
+        self.assertLessEqual(ANTHROPIC_CHAT_TIMEOUT_SECONDS, 24.0)
+
     def test_axis_validator_accepts_common_markdown_heading_levels(self) -> None:
         for heading in ("CIT", "## CIT", "#### CIT", "**CIT**", "### CIT – rozliczenie"):
             with self.subTest(heading=heading):

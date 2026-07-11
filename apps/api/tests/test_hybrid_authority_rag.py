@@ -294,6 +294,187 @@ class HybridAuthorityRetrievalUnitTests(unittest.TestCase):
         self.assertIn("W przeszukanym zbiorze", context)
         self.assertIn("issue=", context)
 
+    def test_housing_relief_pre_2022_authority_is_historical(self) -> None:
+        issue = replace(
+            self.issue,
+            issue_id="pit_housing_relief",
+            query="Spłata kredytu zaciągniętego na zbywaną nieruchomość.",
+            tax="PIT",
+            mechanism="housing_relief",
+            contrast="credit_on_sold_property_vs_credit_on_new_property",
+        )
+        old_authority = chunk(
+            document_id="old",
+            tax="PIT",
+            subject="Ulga mieszkaniowa - kredyt na zbywaną nieruchomość",
+            text=(
+                "Stan faktyczny: spłata kredytu zaciągniętego na zbywaną nieruchomość. "
+                "Ocena stanowiska: Państwa stanowisko jest nieprawidłowe. Uzasadnienie interpretacji."
+            ),
+            provisions=["[PIT] Ustawa o PIT-art. 21-ust. 30"],
+            published_date="2021-12-31",
+        )
+        card = extract_authority_card(old_authority, target_date="2026-01-01", config=self.config)
+
+        status, reasons = prefilter_authority_card(card, issue, self.intent, self.fact_graph, self.primary)
+
+        self.assertEqual(status, "penalized")
+        self.assertIn("pre_material_amendment", reasons)
+        bundles = build_evidence_bundles(
+            (issue,),
+            (
+                replace(
+                    self.primary,
+                    issue_id=issue.issue_id,
+                    controlling_provisions=(self._housing_full_primary_chunk(),),
+                ),
+            ),
+            [
+                _scored_authority(
+                    issue.issue_id,
+                    card,
+                    old_authority,
+                    0.9,
+                    filter_status=status,
+                    filter_reasons=tuple(reasons),
+                )
+            ],
+            config=self.config,
+        )
+        self.assertEqual(bundles[0].historical_authorities[0]["temporal_status"], "historical")
+        self.assertFalse(bundles[0].supporting_authorities)
+
+    def test_incomplete_housing_primary_bundle_suppresses_authority_merge(self) -> None:
+        issue = replace(
+            self.issue,
+            issue_id="pit_housing_relief",
+            query="Spłata kredytu zaciągniętego na zbywaną nieruchomość.",
+            tax="PIT",
+            mechanism="housing_relief",
+            contrast="credit_on_sold_property_vs_credit_on_new_property",
+        )
+        incomplete_primary = chunk(
+            chunk_id="pit30",
+            document_id="pit_act",
+            source_type="statute",
+            source_subtype="consolidated_text",
+            signature="ustawa PIT art. 21 ust. 30",
+            subject="Ustawa PIT art. 21 ust. 30",
+            provisions=["[PIT] Ustawa o PIT-art. 21-ust. 30"],
+            text="art. 21 ust. 30 ustawy PIT",
+            tax="PIT",
+        )
+        authority = chunk(
+            document_id="current-auth",
+            tax="PIT",
+            subject="Ulga mieszkaniowa - kredyt na zbywaną nieruchomość",
+            text=(
+                "Stan faktyczny: spłata kredytu zaciągniętego na zbywaną nieruchomość. "
+                "Ocena stanowiska: Państwa stanowisko jest prawidłowe. Uzasadnienie interpretacji art. 21 ust. 30a."
+            ),
+            provisions=["[PIT] Ustawa o PIT-art. 21-ust. 30a"],
+            published_date="2026-01-15",
+        )
+        card = extract_authority_card(authority, target_date="2026-01-01", config=self.config)
+        bundles = build_evidence_bundles(
+            (issue,),
+            (
+                PrimaryLaneResult(
+                    issue_id=issue.issue_id,
+                    target_date="2026-01-01",
+                    queries=(),
+                    controlling_provisions=(incomplete_primary,),
+                ),
+            ),
+            [_scored_authority(issue.issue_id, card, authority, 0.92)],
+            config=self.config,
+        )
+
+        self.assertFalse(bundles[0].supporting_authorities)
+        self.assertTrue(
+            any(item.startswith("primary_bundle_incomplete") for item in bundles[0].missing_source_requirements)
+        )
+
+    def test_authority_citing_current_special_rule_is_boosted(self) -> None:
+        issue = replace(
+            self.issue,
+            issue_id="pit_housing_relief",
+            query="Spłata kredytu zaciągniętego na zbywaną nieruchomość.",
+            tax="PIT",
+            mechanism="housing_relief",
+            contrast="credit_on_sold_property_vs_credit_on_new_property",
+        )
+        primary = replace(
+            self.primary,
+            issue_id=issue.issue_id,
+            controlling_provisions=(self._housing_full_primary_chunk(),),
+        )
+        with_rule = extract_authority_card(
+            chunk(
+                document_id="with30a",
+                tax="PIT",
+                subject="Ulga mieszkaniowa - kredyt na zbywaną nieruchomość",
+                text=(
+                    "Stan faktyczny: spłata kredytu na zbywaną nieruchomość. "
+                    "Ocena stanowiska: Państwa stanowisko jest prawidłowe na podstawie art. 21 ust. 30a."
+                ),
+                provisions=["[PIT] Ustawa o PIT-art. 21-ust. 30a"],
+            ),
+            target_date="2026-01-01",
+            config=self.config,
+        )
+        without_rule = extract_authority_card(
+            chunk(
+                document_id="without30a",
+                tax="PIT",
+                subject="Ulga mieszkaniowa - kredyt na zbywaną nieruchomość",
+                text=(
+                    "Stan faktyczny: spłata kredytu na zbywaną nieruchomość. "
+                    "Ocena stanowiska: Państwa stanowisko jest prawidłowe."
+                ),
+                provisions=["[PIT] Ustawa o PIT-art. 21-ust. 30"],
+            ),
+            target_date="2026-01-01",
+            config=self.config,
+        )
+
+        boosted = score_authority_card(
+            with_rule,
+            issue=issue,
+            fact_graph=self.fact_graph,
+            primary_result=primary,
+            family_score=0.0,
+            filter_status="kept",
+        )
+        baseline = score_authority_card(
+            without_rule,
+            issue=issue,
+            fact_graph=self.fact_graph,
+            primary_result=primary,
+            family_score=0.0,
+            filter_status="kept",
+        )
+
+        self.assertGreater(boosted.score, baseline.score)
+        self.assertIn("cites current special rule", boosted.positive_reasons)
+
+    def _housing_full_primary_chunk(self) -> RagChunk:
+        return chunk(
+            chunk_id="pit-full",
+            document_id="pit_act",
+            source_type="statute",
+            source_subtype="consolidated_text",
+            signature="ustawa PIT art. 21",
+            subject="Ustawa PIT art. 21 ust. 25 pkt 2, ust. 30 i ust. 30a",
+            text="art. 21 ust. 25 pkt 2 ustawy PIT; art. 21 ust. 30 ustawy PIT; art. 21 ust. 30a ustawy PIT",
+            provisions=[
+                "[PIT] Ustawa o PIT-art. 21-ust. 25-pkt 2",
+                "[PIT] Ustawa o PIT-art. 21-ust. 30",
+                "[PIT] Ustawa o PIT-art. 21-ust. 30a",
+            ],
+            tax="PIT",
+        )
+
 
 class HybridAuthorityIntegrationTests(unittest.TestCase):
     def test_retrieval_mode_defaults_to_baseline_and_flag_enables_hybrid(self) -> None:
@@ -382,7 +563,15 @@ class HybridAuthorityIntegrationTests(unittest.TestCase):
         self.assertEqual(result.evidence_bundles[0].historical_authorities[0]["temporal_status"], "historical")
 
 
-def _scored_authority(issue_id: str, card: AuthorityCard, source_chunk: RagChunk, score: float):
+def _scored_authority(
+    issue_id: str,
+    card: AuthorityCard,
+    source_chunk: RagChunk,
+    score: float,
+    *,
+    filter_status: str = "kept",
+    filter_reasons: tuple[str, ...] = (),
+):
     from app.hybrid_authority_rag import RerankScore, ScoredAuthority
 
     return ScoredAuthority(
@@ -391,8 +580,8 @@ def _scored_authority(issue_id: str, card: AuthorityCard, source_chunk: RagChunk
         chunk=source_chunk,
         candidate_rank=1,
         family_scores={"natural_language": 1.0},
-        filter_status="kept",
-        filter_reasons=(),
+        filter_status=filter_status,
+        filter_reasons=filter_reasons,
         rerank=RerankScore(score=score, dimensions={}, positive_reasons=("same provision",), negative_reasons=()),
     )
 

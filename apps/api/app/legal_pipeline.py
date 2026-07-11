@@ -525,6 +525,12 @@ def validate_claim(
             best_conflict = max(conflicting, key=_specificity_score)
             if _specificity_score(best_support) <= _specificity_score(best_conflict):
                 errors.append("unresolved_rule_conflict")
+        if (
+            claim.legal_mechanism == "housing_relief_credit_repayment"
+            and claim.result_code == "credit_on_sold_property_disqualified"
+            and "pit_art_21_ust_30a" in applicable_by_id
+        ):
+            errors.append("credit_repayment_disqualification_blocked")
     if claim.legal_mechanism in MANDATORY_MECHANISM_SOURCE_BUNDLES:
         required_bundle = set(MANDATORY_MECHANISM_SOURCE_BUNDLES[claim.legal_mechanism])
         if not required_bundle.issubset(applicable_by_id):

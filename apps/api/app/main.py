@@ -1120,15 +1120,24 @@ GENERIC_PRIMARY_LAW_PLACEHOLDER_RE = re.compile(
     re.IGNORECASE,
 )
 EMPTY_LEGAL_REFERENCE_SLOT_RE = re.compile(
-    r"\(\s*i\s+ust\.|\b(?:jest|regulowan\w*|wymaga|nakłada|wynika\s+z|podstawa\s+prawna:?)\s+ustawy\s+o\s+(?:VAT|CIT)\b",
+    r"\(\s*(?!art\.)[^)]{0,80}\bustawy\s+o\s+(?:VAT|CIT|PIT|PCC|AKCYZA)\s*\)|"
+    r"\b(?:jest|regulowan\w*|wymaga|nakłada|wynika\s+z|zgodnie\s+z|podstawa\s+prawna:?)\s+ustawy\s+o\s+(?:VAT|CIT|PIT|PCC|AKCYZA)\b",
     re.IGNORECASE,
 )
 EMPTY_LEGAL_REFERENCE_PAREN_RE = re.compile(
-    r"\(\s*i\s+[^)]*?ustawy\s+o\s+(VAT|CIT)\s*\)",
+    r"\(\s*(?!art\.)[^)]*?ustawy\s+o\s+(VAT|CIT|PIT|PCC|AKCYZA)\s*\)",
     re.IGNORECASE,
 )
 EMPTY_LEGAL_REFERENCE_STATUTE_RE = re.compile(
-    r"\b(?P<prefix>jest|regulowan\w*|wymaga|nakłada|wynika\s+z|podstawa\s+prawna:?)\s+ustawy\s+o\s+(?P<domain>VAT|CIT)\b",
+    r"\b(?P<prefix>jest|regulowan\w*|wymaga|nakłada|wynika\s+z|zgodnie\s+z|podstawa\s+prawna:?)\s+ustawy\s+o\s+(?P<domain>VAT|CIT|PIT|PCC|AKCYZA)\b",
+    re.IGNORECASE,
+)
+UNSUPPORTED_AUTHORITY_LINE_RE = re.compile(
+    r"\b(?:ugruntowan\w* stanowisk\w*|utrwalon\w* lini\w*|jednolit\w* lini\w*|konsekwentn\w* stanowisk\w*|organy podatkowe i sądy administracyjne konsekwentnie)\b",
+    re.IGNORECASE,
+)
+AUTHORITY_SIGNATURE_RE = re.compile(
+    r"\b(?:\d{4}-[A-Z0-9.-]{10,}|[IVXLCDM]{0,4}\s*(?:FSK|SA|SK|FPS|GPS|GSK|OSK)[/\s][A-Z]{0,4}\s*\d+/\d{2,4})\b",
     re.IGNORECASE,
 )
 UNCERTAIN_PROVISION_PHRASES_RE = re.compile(
@@ -1299,6 +1308,10 @@ def validate_final_output(
             UNCERTAIN_PROVISION_PHRASES_RE.search(stripped_reply)
             or UNCERTAIN_NUMBERING_FRAGMENT_RE.search(stripped_reply)
         ),
+        "authority_line_claims_supported": (
+            not bool(UNSUPPORTED_AUTHORITY_LINE_RE.search(stripped_reply))
+            or bool(AUTHORITY_SIGNATURE_RE.search(stripped_reply))
+        ),
         "tables_closed": stripped_reply.count("|") == 0
         or all(
             line.count("|") >= 2
@@ -1316,6 +1329,7 @@ def validate_final_output(
         or not validation["no_placeholder_tokens"]
         or not validation["no_empty_legal_reference_slots"]
         or not validation["no_uncertain_provision_phrases"]
+        or not validation["authority_line_claims_supported"]
         or not validation["tables_closed"]
     ):
         failed_checks: list[str] = []
@@ -1338,6 +1352,8 @@ def validate_final_output(
             failed_checks.append("puste miejsce po referencji prawnej")
         if not validation["no_uncertain_provision_phrases"]:
             failed_checks.append("niepewna podstawa prawna")
+        if not validation["authority_line_claims_supported"]:
+            failed_checks.append("twierdzenie o linii organów lub sądów bez sygnatur")
         if not validation["tables_closed"]:
             failed_checks.append("niezamknięta tabela")
         raise HTTPException(

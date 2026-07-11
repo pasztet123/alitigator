@@ -264,6 +264,7 @@ class ClaimGateTests(unittest.TestCase):
 
         self.assertFalse(validation.claim_supported)
         self.assertIn("unresolved_rule_conflict", validation.errors)
+        self.assertIn("credit_repayment_disqualification_blocked", validation.errors)
 
     def test_housing_relief_bundle_is_mandatory(self) -> None:
         housing_rules = [

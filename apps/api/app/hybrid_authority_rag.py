@@ -1479,6 +1479,9 @@ def prefilter_authority_card(
     if card.temporal_status == "historical":
         reasons.append("historical_document")
         status = "penalized"
+    if _is_pre_material_amendment_authority(card, issue):
+        reasons.append("pre_material_amendment")
+        status = "penalized"
     if not (card.authority_holding or card.court_holding):
         reasons.append("holding_not_found")
         status = "penalized" if status == "kept" else status
@@ -1524,7 +1527,12 @@ def score_authority_card(
     if issue.preferred_targets and not provision_terms:
         preferred = {article for _domain, article in issue.preferred_targets}
         provision_match = len(preferred & card_provisions) / max(len(preferred), 1)
+    current_special_rule_match = 1.0 if _card_cites_current_special_rule(card, issue) else 0.0
+    if current_special_rule_match:
+        provision_match = max(provision_match, 1.0)
+        positives.append("cites current special rule")
     dimensions["provision_match"] = min(1.0, provision_match)
+    dimensions["current_special_rule_match"] = current_special_rule_match
     if provision_match:
         positives.append("same provision")
 
@@ -1535,6 +1543,8 @@ def score_authority_card(
     dimensions["temporal_match"] = 1.0 if card.temporal_status == "current" else (0.45 if card.temporal_status == "uncertain" else 0.15)
     if card.temporal_status == "historical":
         negatives.append("historical document")
+    if _is_pre_material_amendment_authority(card, issue):
+        negatives.append("pre-material-amendment authority")
     dimensions["exception_match"] = 0.5
     dimensions["holding_relevance"] = 1.0 if (card.authority_holding or card.court_holding) else 0.2
     if dimensions["holding_relevance"] >= 1.0:
@@ -1561,6 +1571,7 @@ def score_authority_card(
         + dimensions["temporal_match"] * 0.08
         + dimensions["holding_relevance"] * 0.08
         + dimensions["document_authority_weight"] * 0.05
+        + dimensions["current_special_rule_match"] * 0.08
         - wrong_neighbor_penalty
     )
     score = round(max(0.0, min(1.0, weighted)), 4)
@@ -1619,6 +1630,77 @@ def _is_wrong_neighbor(card: AuthorityCard, issue: IssueNode, fact_graph: FactGr
     return False
 
 
+def _card_cites_current_special_rule(card: AuthorityCard, issue: IssueNode) -> bool:
+    if issue.contrast != "credit_on_sold_property_vs_credit_on_new_property":
+        return False
+    provisions_text = " ".join(card.cited_provisions).lower()
+    return bool(
+        re.search(r"art\.?\s*21[^.;,\n]{0,80}ust\.?\s*30a", provisions_text)
+        or re.search(r"art\.\s*21-ust\.\s*30a", provisions_text)
+    )
+
+
+def _is_pre_material_amendment_authority(card: AuthorityCard, issue: IssueNode) -> bool:
+    if issue.contrast != "credit_on_sold_property_vs_credit_on_new_property":
+        return False
+    parsed = _parse_date(card.date)
+    if parsed is None:
+        return False
+    return parsed < date(2022, 1, 1) and not _card_cites_current_special_rule(card, issue)
+
+
+def _authority_effective_temporal_status(item: ScoredAuthority) -> str:
+    if item.card.temporal_status == "historical" or "pre_material_amendment" in item.filter_reasons:
+        return "historical"
+    return item.card.temporal_status
+
+
+def _required_primary_bundle_for_issue(issue: IssueNode) -> tuple[str, ...]:
+    if issue.contrast == "credit_on_sold_property_vs_credit_on_new_property":
+        return (
+            "pit_art_21_ust_25_pkt_2",
+            "pit_art_21_ust_30",
+            "pit_art_21_ust_30a",
+        )
+    return ()
+
+
+def _missing_required_primary_bundle(
+    issue: IssueNode,
+    primary: Optional[PrimaryLaneResult],
+) -> tuple[str, ...]:
+    required = set(_required_primary_bundle_for_issue(issue))
+    if not required:
+        return ()
+    present: set[str] = set()
+    for chunk in (
+        *((primary.controlling_provisions if primary else ()) or ()),
+        *((primary.dependency_provisions if primary else ()) or ()),
+        *((primary.exception_provisions if primary else ()) or ()),
+    ):
+        present.update(_primary_bundle_keys_from_chunk(chunk))
+    return tuple(sorted(required - present))
+
+
+def _primary_bundle_keys_from_chunk(chunk: RagChunk) -> set[str]:
+    text = " ".join(
+        [
+            chunk.subject or "",
+            chunk.signature or "",
+            chunk.chunk_text or "",
+            *chunk.legal_provisions,
+        ]
+    ).lower()
+    keys: set[str] = set()
+    if re.search(r"art\.?\s*21[^.;,\n]{0,100}ust\.?\s*25[^.;,\n]{0,60}pkt\s*2|art\.\s*21-ust\.\s*25-pkt\s*2", text):
+        keys.add("pit_art_21_ust_25_pkt_2")
+    if re.search(r"art\.?\s*21[^.;,\n]{0,100}ust\.?\s*30a|art\.\s*21-ust\.\s*30a", text):
+        keys.add("pit_art_21_ust_30a")
+    if re.search(r"art\.?\s*21[^.;,\n]{0,100}ust\.?\s*30(?!a)|art\.\s*21-ust\.\s*30(?!a)", text):
+        keys.add("pit_art_21_ust_30")
+    return keys
+
+
 def build_authority_lines(
     scored_authorities: list[ScoredAuthority],
     *,
@@ -1632,8 +1714,8 @@ def build_authority_lines(
 
     lines: list[AuthorityLine] = []
     for issue_id, items in by_issue.items():
-        current = [item for item in items if item.card.temporal_status != "historical"]
-        historical = [item for item in items if item.card.temporal_status == "historical"]
+        current = [item for item in items if _authority_effective_temporal_status(item) != "historical"]
+        historical = [item for item in items if _authority_effective_temporal_status(item) == "historical"]
         supporting = [
             item for item in current
             if item.card.result_for_taxpayer not in {"unfavorable", "unfavorable_or_mixed"}
@@ -1700,9 +1782,10 @@ def build_evidence_bundles(
     for issue in issues:
         primary = primary_by_issue.get(issue.issue_id)
         issue_scores = sorted(scored_by_issue.get(issue.issue_id, []), key=lambda item: -item.rerank.score)
+        missing_primary_bundle = _missing_required_primary_bundle(issue, primary)
         current = [
             item for item in issue_scores
-            if item.card.temporal_status != "historical" and item.rerank.score >= config.min_authority_score
+            if _authority_effective_temporal_status(item) != "historical" and item.rerank.score >= config.min_authority_score
         ]
         supporting = [
             item for item in current
@@ -1714,11 +1797,15 @@ def build_evidence_bundles(
         ][: config.contrary_limit_per_issue]
         historical = [
             item for item in issue_scores
-            if item.card.temporal_status == "historical"
+            if _authority_effective_temporal_status(item) == "historical"
         ][: config.historical_limit_per_issue]
         missing: list[str] = []
         if not primary or not primary.controlling_provisions:
             missing.append("controlling_primary_law")
+        if missing_primary_bundle:
+            missing.append("primary_bundle_incomplete:" + ",".join(missing_primary_bundle))
+            supporting = []
+            contrary = []
         if not supporting and not contrary:
             missing.append("supporting_authority")
         confidence = _bundle_confidence(primary, supporting, contrary)
@@ -1767,7 +1854,8 @@ def _authority_ref(item: ScoredAuthority) -> dict[str, Any]:
         "holding": card.authority_holding or card.court_holding,
         "outcome": card.outcome,
         "result_for_taxpayer": card.result_for_taxpayer,
-        "temporal_status": card.temporal_status,
+        "temporal_status": _authority_effective_temporal_status(item),
+        "applicable_law_period": card.target_law_period,
         "source_spans": card.source_spans,
     }
 

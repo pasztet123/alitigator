@@ -23,32 +23,104 @@ from app.legal_pipeline import (
 
 HOUSING_RELIEF_BENCHMARK_QUERY = """
 Ulga mieszkaniowa po sprzedaży mieszkania w 2025 r. Przychód wynosi 900 000 zł,
-dochód wynosi 300 000 zł, a wydatki mieszkaniowe wyniosą 600 000 zł.
-Chodzi o wpłaty do dewelopera i spłatę kredytu mieszkaniowego. Przeniesienie
-własności nowego lokalu ma nastąpić w 2029 r. Oceń art. 21 ust. 1 pkt 131,
-art. 21 ust. 25 pkt 2 lit. a, art. 21 ust. 25a, art. 21 ust. 30a oraz podatek
-z art. 30e.
+dochód wynosi 300 000 zł. Podatnik spłacił 300 000 zł kredytu zaciągniętego
+na sprzedane mieszkanie i wpłacił 300 000 zł deweloperowi na nowe mieszkanie.
+Przeniesienie własności nowego lokalu ma nastąpić w 2029 r. Oceń art. 21
+ust. 1 pkt 131, art. 21 ust. 25 pkt 2, art. 21 ust. 25a, art. 21 ust. 30,
+art. 21 ust. 30a oraz podatek z art. 30e.
 """
+
+MONEY_PATTERN = (
+    r"(?P<amount>\d+(?:[ .]\d{3})*(?:[,.]\d+)?)\s*"
+    r"(?P<scale>tys\.?|tysi(?:ą|a)c\w*|tysi[eę]cy|mln|milion\w*)?\s*zł"
+)
+MONEY_RE = re.compile(MONEY_PATTERN, re.IGNORECASE)
 
 
 def is_housing_relief_query(query: str) -> bool:
     normalized = query.lower()
+    has_housing_relief = bool(
+        re.search(r"ulg\w*\s+mieszkaniow\w*|art\.\s*21\s*ust\.\s*1\s*pkt\s*131", normalized)
+    )
+    has_real_estate_sale = bool(
+        re.search(r"(?:sprzeda\w*|zby\w*).{0,80}(?:mieszka\w*|lokal\w*|nieruchomo\w*)", normalized, re.DOTALL)
+        or re.search(r"(?:mieszka\w*|lokal\w*|nieruchomo\w*).{0,80}(?:sprzeda\w*|zby\w*)", normalized, re.DOTALL)
+    )
+    has_amount_context = bool(
+        re.search(r"przych[oó]d\w*|doch[oó]d\w*|art\.\s*30e", normalized)
+        or (MONEY_RE.search(query) and re.search(r"sprzeda\w*|zby\w*|naby\w*|kupi\w*", normalized))
+    )
+    has_housing_expense = bool(
+        re.search(r"deweloper\w*|przeniesieni\w*\s+własnoś\w*|przeniesieni\w*\s+wlasnos\w*|kredyt\w*", normalized)
+    )
     return (
-        bool(re.search(r"ulg\w*\s+mieszkaniow\w*|art\.\s*21\s*ust\.\s*1\s*pkt\s*131", normalized))
-        and bool(re.search(r"przych[oó]d\w*|doch[oó]d\w*|art\.\s*30e", normalized))
-        and bool(re.search(r"deweloper\w*|przeniesieni\w*\s+własnoś\w*|przeniesieni\w*\s+wlasnos\w*|kredyt\w*", normalized))
+        (has_housing_relief or has_real_estate_sale)
+        and has_amount_context
+        and has_housing_expense
     )
 
 
-def _money_after(label: str, query: str) -> int:
+def _parse_money_match(match: re.Match[str]) -> int:
+    amount = match.group("amount").replace(" ", "")
+    scale = (match.group("scale") or "").lower()
+    if "," in amount:
+        amount = amount.replace(".", "").replace(",", ".")
+    elif "." in amount and not scale:
+        amount = amount.replace(".", "")
+    value = Decimal(amount)
+    if scale.startswith(("tys", "tysi")):
+        value *= Decimal(1000)
+    elif scale.startswith(("mln", "milion")):
+        value *= Decimal(1_000_000)
+    return int(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _optional_money_after(label: str, query: str, *, max_chars: int = 80) -> int | None:
     match = re.search(
-        rf"{label}.{{0,40}}?(\d{{1,3}}(?:[ .]\d{{3}})*)\s*zł",
+        rf"{label}.{{0,{max_chars}}}?{MONEY_PATTERN}",
         query,
         re.IGNORECASE | re.DOTALL,
     )
-    if not match:
+    return _parse_money_match(match) if match else None
+
+
+def _optional_money_before(label: str, query: str, *, max_chars: int = 80) -> int | None:
+    match = re.search(
+        rf"{MONEY_PATTERN}.{{0,{max_chars}}}?{label}",
+        query,
+        re.IGNORECASE | re.DOTALL,
+    )
+    return _parse_money_match(match) if match else None
+
+
+def _optional_money_in_context(
+    query: str,
+    *,
+    before_pattern: str = "",
+    after_pattern: str = "",
+    before_chars: int = 100,
+    after_chars: int = 100,
+) -> int | None:
+    for match in MONEY_RE.finditer(query):
+        before = query[max(0, match.start() - before_chars) : match.start()].lower()
+        after = query[match.end() : match.end() + after_chars].lower()
+        if before_pattern and not re.search(before_pattern, before, re.IGNORECASE):
+            continue
+        if after_pattern and not re.search(after_pattern, after, re.IGNORECASE):
+            continue
+        return _parse_money_match(match)
+    return None
+
+
+def _money_after(label: str, query: str, *, max_chars: int = 80) -> int:
+    value = _optional_money_after(label, query, max_chars=max_chars)
+    if value is None:
         raise ValueError(f"Missing value for {label}")
-    return int(re.sub(r"\D", "", match.group(1)))
+    return value
+
+
+def _format_money(value: int) -> str:
+    return f"{value:,}".replace(",", " ")
 
 
 def _extract_year(query: str, pattern: str) -> int:
@@ -62,34 +134,114 @@ def _extract_year(query: str, pattern: str) -> int:
 class HousingReliefFacts:
     records: dict[str, FactRecord]
     sale_year: int
+    purchase_year: int | None
     revenue: int
+    acquisition_cost: int | None
     income: int
+    credit_repayment: int
+    developer_payment: int
+    declared_housing_expenses: int
     qualified_expenses: int
+    disqualified_developer_expense: int
     planned_transfer_year: int
     deadline: str
 
 
 def parse_housing_relief_facts(query: str) -> HousingReliefFacts:
-    sale_year = _extract_year(query, r"sprzeda\w*.*?\b(20\d{2})\b")
-    revenue = _money_after(r"przych[oó]d\w*", query)
-    income = _money_after(r"doch[oó]d\w*", query)
-    qualified_expenses = _money_after(
-        r"(?:wydatk\w*\s+mieszkaniow\w*|kwalifikowan\w*\s+wydatk\w*|w\W*tym)",
-        query,
+    sale_year = _extract_year(query, r"(?:sprzeda\w*|zby\w*).*?\b(20\d{2})\b")
+    purchase_year_match = re.search(r"(?:naby\w*|kupi\w*|zakup\w*).*?\b(20\d{2})\b", query, re.IGNORECASE)
+    purchase_year = int(purchase_year_match.group(1)) if purchase_year_match else None
+    revenue = (
+        _optional_money_after(r"przych[oó]d\w*", query)
+        or _optional_money_after(r"(?:sprzeda\w*|zby\w*)", query, max_chars=100)
+        or _optional_money_in_context(query, before_pattern=r"(?:sprzeda\w*|zby\w*|sprzedał|sprzedal)", before_chars=80)
+    )
+    if revenue is None:
+        raise ValueError("Missing sale revenue")
+    acquisition_cost = (
+        _optional_money_after(r"(?:cena\s+nabycia|koszt\w*\s+nabycia|cena\s+zakupu)", query)
+        or _optional_money_after(r"(?:naby\w*|kupi\w*)", query, max_chars=60)
+        or _optional_money_before(r"(?:cena\s+nabycia|koszt\w*\s+nabycia|cena\s+zakupu)", query)
+    )
+    explicit_income = _optional_money_after(r"doch[oó]d\w*", query)
+    if explicit_income is not None:
+        income = explicit_income
+    elif acquisition_cost is not None:
+        income = revenue - acquisition_cost
+    else:
+        raise ValueError("Missing income or acquisition cost")
+    credit_repayment = (
+        _optional_money_after(r"(?:spłat\w*|spłaci\w*|splaci\w*).{0,50}kredyt\w*", query, max_chars=100)
+        or _optional_money_after(r"(?:spłat\w*|spłaci\w*|splaci\w*)", query, max_chars=80)
+        or _optional_money_in_context(
+            query,
+            before_pattern=r"(?:spłat\w*|spłaci\w*|splaci\w*)",
+            after_pattern=r"kredyt\w*",
+        )
+        or 0
+    )
+    developer_payment = (
+        _optional_money_after(r"(?:wpłat\w*|wpłaci\w*|wplaci\w*).{0,60}deweloper\w*", query, max_chars=100)
+        or _optional_money_after(r"deweloper\w*", query, max_chars=100)
+        or _optional_money_in_context(
+            query,
+            before_pattern=r"(?:wpłat\w*|wpłaci\w*|wplaci\w*)",
+            after_pattern=r"deweloper\w*",
+        )
+        or _optional_money_in_context(query, after_pattern=r"deweloper\w*")
+        or 0
+    )
+    declared_housing_expenses = (
+        _optional_money_after(
+            r"(?:wydatk\w*\s+mieszkaniow\w*|kwalifikowan\w*\s+wydatk\w*)",
+            query,
+        )
+        or credit_repayment + developer_payment
     )
     planned_transfer_year = _extract_year(
         query,
-        r"przeniesieni\w*\s+w(?:ł|l)asnoś\w*.*?\b(20\d{2})\b",
+        r"(?:przeniesieni\w*\s+w(?:ł|l)asnoś\w*|akt\w*\s+notarialn\w*).*?\b(20\d{2})\b",
     )
     deadline = date(sale_year + 3, 12, 31).isoformat()
+    developer_expense_qualifies = planned_transfer_year <= int(deadline[:4])
+    disqualified_developer_expense = 0 if developer_expense_qualifies else developer_payment
+    qualified_expenses = credit_repayment + (
+        developer_payment if developer_expense_qualifies else 0
+    )
     records = {
         "sale_year": FactRecord("sale_year", "year", sale_year, subject_role="transaction"),
+        "purchase_year": FactRecord("purchase_year", "year", purchase_year, subject_role="transaction") if purchase_year is not None else FactRecord("purchase_year", "year", None, status="missing", subject_role="transaction"),
         "revenue": FactRecord("revenue", "money", revenue, subject_role="transaction"),
+        "acquisition_cost": FactRecord("acquisition_cost", "money", acquisition_cost, subject_role="transaction") if acquisition_cost is not None else FactRecord("acquisition_cost", "money", None, status="missing", subject_role="transaction"),
         "income": FactRecord("income", "money", income, subject_role="transaction"),
+        "credit_repayment": FactRecord(
+            "credit_repayment",
+            "money",
+            credit_repayment,
+            subject_role="transaction",
+        ),
+        "developer_payment": FactRecord(
+            "developer_payment",
+            "money",
+            developer_payment,
+            subject_role="transaction",
+        ),
+        "declared_housing_expenses": FactRecord(
+            "declared_housing_expenses",
+            "money",
+            declared_housing_expenses,
+            subject_role="transaction",
+        ),
         "qualified_housing_expenses": FactRecord(
             "qualified_housing_expenses",
             "money",
             qualified_expenses,
+            subject_role="transaction",
+        ),
+        "disqualified_developer_expense": FactRecord(
+            "disqualified_developer_expense",
+            "money",
+            disqualified_developer_expense,
             subject_role="transaction",
         ),
         "planned_transfer_year": FactRecord(
@@ -109,9 +261,15 @@ def parse_housing_relief_facts(query: str) -> HousingReliefFacts:
     return HousingReliefFacts(
         records=records,
         sale_year=sale_year,
+        purchase_year=purchase_year,
         revenue=revenue,
+        acquisition_cost=acquisition_cost,
         income=income,
+        credit_repayment=credit_repayment,
+        developer_payment=developer_payment,
+        declared_housing_expenses=declared_housing_expenses,
         qualified_expenses=qualified_expenses,
+        disqualified_developer_expense=disqualified_developer_expense,
         planned_transfer_year=planned_transfer_year,
         deadline=deadline,
     )
@@ -127,6 +285,7 @@ def can_run_housing_relief_pipeline(query: str) -> bool:
     return (
         facts.revenue > 0
         and facts.income >= 0
+        and facts.credit_repayment > 0
         and facts.qualified_expenses >= 0
         and facts.revenue >= facts.income
     )
@@ -138,6 +297,11 @@ def _record(
     text: str,
     *,
     result_codes: tuple[str, ...],
+    legal_mechanism: str = "housing_relief_sale",
+    rule_relationship: str = "peer",
+    related_provisions: tuple[str, ...] = (),
+    special_rule_provisions: tuple[str, ...] = (),
+    general_rule_provisions: tuple[str, ...] = (),
 ) -> ProvisionRecord:
     return ProvisionRecord(
         provision_id=provision_id,
@@ -158,8 +322,12 @@ def _record(
         display_reference=citation,
         tax_domain="PIT",
         taxpayer_role="taxpayer",
-        legal_mechanism="housing_relief_sale",
+        legal_mechanism=legal_mechanism,
         entailed_result_codes=result_codes,
+        rule_relationship=rule_relationship,  # type: ignore[arg-type]
+        related_provisions=related_provisions,
+        special_rule_provisions=special_rule_provisions,
+        general_rule_provisions=general_rule_provisions,
     )
 
 
@@ -178,22 +346,37 @@ def build_housing_relief_registry() -> ProvisionRegistry:
             result_codes=("housing_relief_formula", "housing_relief_exempt_income"),
         ),
         _record(
-            "pit_art_21_ust_25_pkt_2_lit_a",
-            "art. 21 ust. 25 pkt 2 lit. a ustawy PIT",
+            "pit_art_21_ust_25_pkt_2",
+            "art. 21 ust. 25 pkt 2 ustawy PIT",
             "Za wydatki mieszkaniowe uważa się spłatę kredytu zaciągniętego na cele mieszkaniowe.",
-            result_codes=("housing_relief_credit_scope",),
+            result_codes=("credit_repayment_qualified", "credit_on_sold_property_qualified"),
+            legal_mechanism="housing_relief_credit_repayment",
+            special_rule_provisions=("pit_art_21_ust_30a",),
         ),
         _record(
             "pit_art_21_ust_25a",
             "art. 21 ust. 25a ustawy PIT",
             "Wydatki na nabycie od dewelopera wymagają nabycia własności w ustawowym terminie.",
             result_codes=("housing_relief_developer_deadline",),
+            legal_mechanism="",
+        ),
+        _record(
+            "pit_art_21_ust_30",
+            "art. 21 ust. 30 ustawy PIT",
+            "Ogólna reguła ogranicza ponowne uwzględnianie wydatków już rozliczonych przy ulgach podatkowych.",
+            result_codes=("credit_on_sold_property_disqualified",),
+            legal_mechanism="housing_relief_credit_repayment",
+            rule_relationship="general_rule",
+            special_rule_provisions=("pit_art_21_ust_30a",),
         ),
         _record(
             "pit_art_21_ust_30a",
             "art. 21 ust. 30a ustawy PIT",
             "Przepis szczególny dla spłaty kredytu dotyczącego zbywanej nieruchomości.",
-            result_codes=("housing_relief_credit_scope",),
+            result_codes=("credit_on_sold_property_qualified",),
+            legal_mechanism="housing_relief_credit_repayment",
+            rule_relationship="special_extension",
+            general_rule_provisions=("pit_art_21_ust_30",),
         ),
         _record(
             "pit_art_30e_ust_1",
@@ -240,6 +423,24 @@ def calculate_housing_relief(
             "identity",
             {"qualified_expenses": facts.qualified_expenses},
             facts.qualified_expenses,
+        ),
+        "calc_housing_relief_credit_repayment": CalculationRecord(
+            "calc_housing_relief_credit_repayment",
+            "identity",
+            {"credit_repayment": facts.credit_repayment},
+            facts.credit_repayment,
+        ),
+        "calc_housing_relief_developer_payment": CalculationRecord(
+            "calc_housing_relief_developer_payment",
+            "identity",
+            {"developer_payment": facts.developer_payment},
+            facts.developer_payment,
+        ),
+        "calc_housing_relief_disqualified_developer_expense": CalculationRecord(
+            "calc_housing_relief_disqualified_developer_expense",
+            "identity",
+            {"disqualified_developer_expense": facts.disqualified_developer_expense},
+            facts.disqualified_developer_expense,
         ),
         "calc_housing_relief_exempt_income": CalculationRecord(
             "calc_housing_relief_exempt_income",
@@ -292,6 +493,7 @@ def _claim(
     *,
     calculation_ids: tuple[str, ...] = (),
     status: str = "approved",
+    legal_mechanism: str = "housing_relief_sale",
 ) -> LegalClaim:
     return LegalClaim(
         claim_id=claim_id,
@@ -307,7 +509,7 @@ def _claim(
         result=result,
         result_code=result_code,
         taxpayer_role="taxpayer",
-        legal_mechanism="housing_relief_sale",
+        legal_mechanism=legal_mechanism,
     )
 
 
@@ -336,13 +538,15 @@ def build_housing_relief_claims(
             (
                 f"Dochód zwolniony trzeba policzyć wyłącznie wzorem D × W / P. "
                 f"Dla D = {facts.income:,} zł, W = {facts.qualified_expenses:,} zł i P = {facts.revenue:,} zł "
-                f"dochód zwolniony wynosi {exempt_income:,} zł."
+                f"dochód zwolniony wynosi {exempt_income:,} zł. W obejmuje spłatę kredytu, "
+                "ale nie obejmuje wpłaty deweloperskiej, jeżeli własność ma przejść po terminie."
             ).replace(",", " "),
             "housing_relief_formula",
             {
                 "income": facts.income,
                 "revenue": facts.revenue,
                 "qualified_housing_expenses": facts.qualified_expenses,
+                "declared_housing_expenses": facts.declared_housing_expenses,
                 "exempt_income": exempt_income,
                 "direct_expense_income_offset_used": False,
             },
@@ -358,11 +562,12 @@ def build_housing_relief_claims(
         _claim(
             "claim_expense_not_income",
             (
-                f"Kwota {facts.qualified_expenses:,} zł oznacza wydatki mieszkaniowe, a nie dochód zwolniony; "
+                f"Kwota {facts.qualified_expenses:,} zł oznacza kwalifikowane wydatki mieszkaniowe, a nie dochód zwolniony; "
                 f"dochód zwolniony po odrębnym obliczeniu proporcji wynosi {exempt_income:,} zł."
             ).replace(",", " "),
             "housing_relief_exempt_income",
             {
+                "declared_housing_expenses": facts.declared_housing_expenses,
                 "qualified_housing_expenses": facts.qualified_expenses,
                 "exempt_income": exempt_income,
                 "values_treated_as_identical": False,
@@ -405,6 +610,8 @@ def build_housing_relief_claims(
             {
                 "housing_expense_deadline": facts.deadline,
                 "planned_transfer_year": facts.planned_transfer_year,
+                "developer_payment": facts.developer_payment,
+                "disqualified_developer_expense": facts.disqualified_developer_expense,
                 "developer_expense_qualifies": False,
                 "status": "approved_not_qualifying",
                 "interpretive_risk_status_used": False,
@@ -415,18 +622,27 @@ def build_housing_relief_claims(
         ),
         _claim(
             "claim_credit_scope",
-            "Spłata kredytu mieszkaniowego wymaga łącznego zastosowania art. 21 ust. 25 pkt 2 lit. a ustawy PIT, art. 21 ust. 25a ustawy PIT, art. 21 ust. 30a ustawy PIT. Ta kwalifikacja nie pozwala zastąpić ustawowego wzoru prostym odjęciem wydatków od dochodu.",
-            "housing_relief_credit_scope",
+            (
+                f"Spłata {_format_money(facts.credit_repayment)} zł kredytu zaciągniętego na zbywane mieszkanie "
+                "może być wydatkiem na własne cele mieszkaniowe. Wymaga łącznego zastosowania "
+                "art. 21 ust. 25 pkt 2 ustawy PIT, art. 21 ust. 30 ustawy PIT, oraz przepisu szczególnego "
+                "z art. 21 ust. 30a ustawy PIT. Nie wolno jej dyskwalifikować samą regułą ogólną z art. 21 ust. 30."
+            ),
+            "credit_on_sold_property_qualified",
             {
                 "special_credit_rule_present": True,
+                "credit_repayment": facts.credit_repayment,
+                "credit_repayment_qualifies": True,
                 "direct_expense_income_offset_used": False,
             },
             (
-                "pit_art_21_ust_25_pkt_2_lit_a",
-                "pit_art_21_ust_25a",
+                "pit_art_21_ust_25_pkt_2",
+                "pit_art_21_ust_30",
                 "pit_art_21_ust_30a",
             ),
-            ("planned_transfer_year",),
+            ("credit_repayment",),
+            calculation_ids=("calc_housing_relief_credit_repayment",),
+            legal_mechanism="housing_relief_credit_repayment",
         ),
     ]
     return {item.claim_id: item for item in claims}

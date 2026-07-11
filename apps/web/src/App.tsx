@@ -191,13 +191,14 @@ const modelLabels: Record<string, string> = {
   'claude-haiku-4-5-20251001': 'Claude Haiku 4.5',
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
+const configuredApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').trim().replace(/\/+$/, '')
+const API_BASE_URL = configuredApiBaseUrl || (import.meta.env.DEV ? 'http://localhost:8000' : '')
 const LOCAL_THREAD_PREFIX = 'local-thread-'
 const HINT_DEBOUNCE_MS = 900
 const MIN_DRAFT_LENGTH_FOR_HINTS = 24
 const ACTIVE_HINT_COUNT = 3
 const MAX_HINT_QUESTION_COUNT = 5
-const APP_VERSION = '9.19.0'
+const APP_VERSION = '9.19.1'
 const ASSISTANT_SECTION_TITLES = [
   'Teza',
   'Analiza',
@@ -589,6 +590,40 @@ async function readErrorResponse(response: Response) {
   return `Backend zwrócił ${response.status}`
 }
 
+function buildApiUrl(path: string) {
+  return `${API_BASE_URL}${path}`
+}
+
+function describeApiNetworkError(error: unknown) {
+  const originalMessage = error instanceof Error ? error.message : ''
+  const apiTarget = API_BASE_URL || 'ten sam host co frontend'
+  const hint = configuredApiBaseUrl
+    ? `Sprawdź, czy backend ${apiTarget} odpowiada i dopuszcza origin frontendu.`
+    : 'W produkcji nie ustawiono VITE_API_BASE_URL, więc frontend próbuje używać tego samego hosta co aplikacja.'
+
+  if (/load failed|failed to fetch|network|cors/i.test(originalMessage)) {
+    return `Nie udało się połączyć z backendem. ${hint}`
+  }
+
+  return originalMessage || `Nie udało się połączyć z backendem. ${hint}`
+}
+
+function describeSupabaseAuthError(error: unknown) {
+  const originalMessage = error instanceof Error ? error.message : ''
+  if (/load failed|failed to fetch|network|cors/i.test(originalMessage)) {
+    return 'Nie udało się odświeżyć sesji Supabase. Zaloguj się ponownie; jeśli błąd wraca, trzeba sprawdzić konfigurację Supabase URL / publishable key oraz dozwolone originy projektu.'
+  }
+  return originalMessage || 'Nie udało się odświeżyć sesji Supabase.'
+}
+
+async function appFetch(path: string, init?: RequestInit) {
+  try {
+    return await fetch(buildApiUrl(path), init)
+  } catch (fetchError) {
+    throw new Error(describeApiNetworkError(fetchError))
+  }
+}
+
 async function apiFetch(path: string, session: Session, init?: RequestInit) {
   const headers = new Headers(init?.headers)
   headers.set('Authorization', `Bearer ${session.access_token}`)
@@ -596,7 +631,7 @@ async function apiFetch(path: string, session: Session, init?: RequestInit) {
     headers.set('Content-Type', 'application/json')
   }
 
-  return fetch(`${API_BASE_URL}${path}`, {
+  return appFetch(path, {
     ...init,
     headers,
   })
@@ -689,7 +724,7 @@ async function fetchPromptHints({
     return { hints: [], model: 'fallback', mode: 'fallback' as const }
   }
 
-  const response = await fetch(`${API_BASE_URL}/api/chat/hints`, {
+  const response = await appFetch('/api/chat/hints', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -784,20 +819,36 @@ async function fetchPromptHints({
       return
     }
 
+    const authClient = supabaseBrowserClient
     let isMounted = true
 
-    void supabaseBrowserClient.auth.refreshSession().then(({ data, error: refreshError }) => {
-      if (!isMounted) {
-        return
+    async function restoreSession() {
+      try {
+        const { data, error: refreshError } = await authClient.auth.refreshSession()
+        if (!isMounted) {
+          return
+        }
+        if (refreshError && refreshError.message) {
+          setAuthError(refreshError.message)
+        }
+        setSession(data.session ?? null)
+      } catch (refreshError) {
+        if (!isMounted) {
+          return
+        }
+        setSession(null)
+        setAuthError(describeSupabaseAuthError(refreshError))
+        void authClient.auth.signOut({ scope: 'local' }).catch(() => undefined)
+      } finally {
+        if (isMounted) {
+          setAuthLoading(false)
+        }
       }
-      if (refreshError && refreshError.message) {
-        setAuthError(refreshError.message)
-      }
-      setSession(data.session ?? null)
-      setAuthLoading(false)
-    })
+    }
 
-    const { data } = supabaseBrowserClient.auth.onAuthStateChange((_event, nextSession) => {
+    void restoreSession()
+
+    const { data } = authClient.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession)
       setAuthLoading(false)
       setAuthError('')
@@ -828,8 +879,8 @@ async function fetchPromptHints({
 
       try {
         const [healthResponse, modelsResponse] = await Promise.all([
-          fetch(`${API_BASE_URL}/api/health`),
-          fetch(`${API_BASE_URL}/api/models`),
+          appFetch('/api/health'),
+          appFetch('/api/models'),
         ])
 
         const healthPayload = healthResponse.ok

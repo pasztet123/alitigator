@@ -120,6 +120,33 @@ class MixedInvoiceEndToEndTests(unittest.TestCase):
         self.assertIn("Źródła", validation.missing_required_sections)
         self.assertIn("Ryzyka i luki", validation.missing_required_sections)
 
+    def test_validator_rejects_sources_without_exact_references(self) -> None:
+        result = run_legal_pipeline(BENCHMARK_QUERY)
+        registry = build_mixed_invoice_registry()
+        payload = build_renderer_payload(
+            result.claims, registry, target_date="2026-06-30"
+        )
+        sources_start, sources_sep, sources_and_rest = result.answer.partition("\n\nŹródła\n")
+        sources_body, risks_sep, risks_and_rest = sources_and_rest.partition("\n\nRyzyka i luki\n")
+        broken_sources = sources_body.replace(
+            "[provision_id:vat_art_108a_ust_1a]",
+            "",
+            1,
+        )
+        broken = (
+            sources_start
+            + sources_sep
+            + broken_sources
+            + risks_sep
+            + risks_and_rest
+            + f"\n\n{END_MARKER}"
+        )
+
+        validation = validate_rendered_answer(broken, payload)
+
+        self.assertFalse(validation.passed)
+        self.assertIn("sources_missing_exact_references", validation.errors)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,6 +14,7 @@ ClaimStatus = Literal[
     "blocked_missing_provision_reference",
 ]
 ProvisionStatus = Literal["active", "repealed", "unknown"]
+RuleRelationship = Literal["general_rule", "special_extension", "exception", "notwithstanding", "peer"]
 
 
 class TemporalConflictError(RuntimeError):
@@ -85,6 +86,11 @@ class ProvisionRecord:
     taxpayer_role: str = ""
     legal_mechanism: str = ""
     entailed_result_codes: tuple[str, ...] = ()
+    rule_relationship: RuleRelationship = "peer"
+    related_provisions: tuple[str, ...] = ()
+    special_rule_provisions: tuple[str, ...] = ()
+    exception_provisions: tuple[str, ...] = ()
+    general_rule_provisions: tuple[str, ...] = ()
 
     def is_effective_on(self, target_date: date) -> bool:
         start = _date(self.effective_from)
@@ -108,11 +114,13 @@ class ProvisionRegistry:
         self._documents = {(item.document_id, item.version_id): item for item in documents}
         self._provisions: dict[str, list[ProvisionRecord]] = {}
         self._by_reference: dict[tuple[str, str], list[ProvisionRecord]] = {}
+        self._by_article: dict[tuple[str, str], list[ProvisionRecord]] = {}
         for item in provisions:
             self._provisions.setdefault(item.provision_id, []).append(item)
             self._by_reference.setdefault(
                 (item.document_id, normalize_reference(item.citation)), []
             ).append(item)
+            self._by_article.setdefault((item.document_id, item.article), []).append(item)
 
     @property
     def provisions(self) -> tuple[ProvisionRecord, ...]:
@@ -161,6 +169,48 @@ class ProvisionRegistry:
                 1 for item in self.provisions if not _date(item.effective_from)
             ),
         }
+
+    def resolve_applicable_provisions(
+        self,
+        provision_ids: Iterable[str],
+        target_date: str,
+    ) -> tuple[ProvisionRecord, ...]:
+        resolved: list[ProvisionRecord] = []
+        seen: set[str] = set()
+        queue = [item for item in provision_ids if item]
+        while queue:
+            provision_id = queue.pop(0)
+            if provision_id in seen:
+                continue
+            seen.add(provision_id)
+            record = self.get(provision_id, target_date)
+            if record is None:
+                continue
+            resolved.append(record)
+            queue.extend(self._neighboring_special_rules(record, target_date))
+            queue.extend(record.related_provisions)
+            queue.extend(record.special_rule_provisions)
+            queue.extend(record.exception_provisions)
+            queue.extend(record.general_rule_provisions)
+        return tuple(resolved)
+
+    def _neighboring_special_rules(
+        self,
+        record: ProvisionRecord,
+        target_date: str,
+    ) -> tuple[str, ...]:
+        if not record.paragraph:
+            return ()
+        article_records = self._by_article.get((record.document_id, record.article), [])
+        next_key = _next_paragraph_key(record.paragraph)
+        if next_key is None:
+            return ()
+        neighbors = [
+            item.provision_id
+            for item in article_records
+            if item.paragraph == next_key and self.get(item.provision_id, target_date) is not None
+        ]
+        return tuple(neighbors)
 
 
 @dataclass(frozen=True)
@@ -317,7 +367,59 @@ class ClaimValidation:
     temporal_match: bool
     facts_satisfy_conditions: bool
     calculation_bound: bool
+    applicable_provisions: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
+
+
+MANDATORY_MECHANISM_SOURCE_BUNDLES: dict[str, tuple[str, ...]] = {
+    "housing_relief_credit_repayment": (
+        "pit_art_21_ust_25_pkt_2",
+        "pit_art_21_ust_30",
+        "pit_art_21_ust_30a",
+    ),
+}
+
+
+RULE_RELATIONSHIP_PRECEDENCE: dict[RuleRelationship, int] = {
+    "general_rule": 0,
+    "peer": 1,
+    "special_extension": 3,
+    "exception": 4,
+    "notwithstanding": 5,
+}
+
+
+def _paragraph_sort_key(value: Optional[str]) -> tuple[int, str]:
+    if not value:
+        return (-1, "")
+    match = re.fullmatch(r"(\d+)([a-z]?)", value.strip().lower())
+    if not match:
+        return (-1, value.strip().lower())
+    return (int(match.group(1)), match.group(2))
+
+
+def _next_paragraph_key(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    match = re.fullmatch(r"(\d+)([a-z]?)", value.strip().lower())
+    if not match:
+        return None
+    number = match.group(1)
+    suffix = match.group(2)
+    if not suffix:
+        return f"{number}a"
+    if suffix == "z":
+        return str(int(number) + 1)
+    return f"{number}{chr(ord(suffix) + 1)}"
+
+
+def _specificity_score(record: ProvisionRecord) -> tuple[int, int, int, int]:
+    return (
+        RULE_RELATIONSHIP_PRECEDENCE.get(record.rule_relationship, 1),
+        1 if record.letter else 0,
+        1 if record.point else 0,
+        1 if record.paragraph else 0,
+    )
 
 
 def validate_claim(
@@ -330,10 +432,12 @@ def validate_claim(
 ) -> ClaimValidation:
     errors: list[str] = []
     controlling_ids = claim.controlling_provisions or claim.source_provisions
-    resolved = [
-        registry.get(provision_id, target_date)
-        for provision_id in controlling_ids
-    ]
+    applicable = registry.resolve_applicable_provisions(
+        (*controlling_ids, *claim.dependency_provisions),
+        target_date,
+    )
+    applicable_by_id = {item.provision_id: item for item in applicable}
+    resolved = [applicable_by_id.get(provision_id) for provision_id in controlling_ids]
     temporal_match = bool(resolved) and all(item is not None for item in resolved)
     if claim.is_material and not controlling_ids:
         errors.append("material_claim_without_source")
@@ -363,16 +467,33 @@ def validate_claim(
         and item.legal_mechanism
         and claim.legal_mechanism
         and item.legal_mechanism != claim.legal_mechanism
-        for item in resolved
+        for item in applicable
     ):
         errors.append("source_mechanism_mismatch")
-    if claim.result_code and any(
-        item is not None
-        and item.entailed_result_codes
-        and claim.result_code not in item.entailed_result_codes
-        for item in resolved
-    ):
-        errors.append("source_does_not_entail_claim")
+    if claim.result_code:
+        supporting = [
+            item
+            for item in applicable
+            if item.entailed_result_codes
+            and claim.result_code in item.entailed_result_codes
+        ]
+        conflicting = [
+            item
+            for item in applicable
+            if item.entailed_result_codes
+            and claim.result_code not in item.entailed_result_codes
+        ]
+        if conflicting and not supporting:
+            errors.append("source_does_not_entail_claim")
+        elif supporting and conflicting:
+            best_support = max(supporting, key=_specificity_score)
+            best_conflict = max(conflicting, key=_specificity_score)
+            if _specificity_score(best_support) <= _specificity_score(best_conflict):
+                errors.append("unresolved_rule_conflict")
+    if claim.legal_mechanism in MANDATORY_MECHANISM_SOURCE_BUNDLES:
+        required_bundle = set(MANDATORY_MECHANISM_SOURCE_BUNDLES[claim.legal_mechanism])
+        if not required_bundle.issubset(applicable_by_id):
+            errors.append("incomplete_mechanism_source_bundle")
     dependency_only = (
         bool(claim.dependency_provisions)
         and not claim.controlling_provisions
@@ -420,6 +541,7 @@ def validate_claim(
         temporal_match=temporal_match,
         facts_satisfy_conditions=not missing_facts,
         calculation_bound=calculation_bound,
+        applicable_provisions=tuple(sorted(applicable_by_id)),
         errors=tuple(errors),
     )
 
@@ -525,6 +647,21 @@ def build_registry_from_rules(
                 legal_mechanism=str(rule.get("legal_mechanism") or ""),
                 entailed_result_codes=tuple(
                     str(item) for item in rule.get("entailed_result_codes") or []
+                ),
+                rule_relationship=str(
+                    rule.get("rule_relationship") or "peer"
+                ),
+                related_provisions=tuple(
+                    str(item) for item in rule.get("related_provisions") or []
+                ),
+                special_rule_provisions=tuple(
+                    str(item) for item in rule.get("special_rule_provisions") or []
+                ),
+                exception_provisions=tuple(
+                    str(item) for item in rule.get("exception_provisions") or []
+                ),
+                general_rule_provisions=tuple(
+                    str(item) for item in rule.get("general_rule_provisions") or []
                 ),
             )
         )

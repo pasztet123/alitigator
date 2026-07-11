@@ -339,6 +339,7 @@ def validate_rendered_answer(
         )
     ))
     placeholders = len(PLACEHOLDER_RE.findall(answer))
+    sources_text = answer.partition("\n\nŹródła\n")[2].partition("\n\nRyzyka i luki\n")[0]
     known_provisions = {item["display_reference"] for item in payload.provisions}
     referenced = set(re.findall(r"art\.\s*[0-9a-z]+(?:\s+(?:ust\.|pkt|§)\s*[0-9a-z]+)*[^,\n.)]*", answer, re.I))
     unknown = tuple(sorted(
@@ -444,6 +445,20 @@ def validate_rendered_answer(
     )
     unknown_provision_markers = rendered_provision_ids - known_provision_ids
     unknown_claim_markers = rendered - expected
+    sources_have_exact_markers = bool(
+        re.search(r"\[provision_id:[a-z0-9_:.-]+]", sources_text, re.I)
+    )
+    sources_missing_exact_pairs = tuple(
+        item["provision_id"]
+        for item in payload.provisions
+        if not re.search(
+            re.escape(item["display_reference"])
+            + r".*?"
+            + re.escape(f"[provision_id:{item['provision_id']}]"),
+            sources_text,
+            re.I | re.S,
+        )
+    )
     stripped = answer.removesuffix(END_MARKER).rstrip()
     truncated = not marker or (bool(stripped) and stripped[-1] not in ".!?)]")
     errors: list[str] = []
@@ -467,6 +482,8 @@ def validate_rendered_answer(
         errors.append("required_sections_missing")
     if empty_required_sections:
         errors.append("required_sections_empty")
+    if not sources_have_exact_markers or sources_missing_exact_pairs:
+        errors.append("sources_missing_exact_references")
     if not tables_closed:
         errors.append("tables_not_closed")
     if unknown_provision_markers:

@@ -131,6 +131,192 @@ class ClaimGateTests(unittest.TestCase):
         )
         self.assertTrue(bound.calculation_bound)
 
+    def test_special_following_provision_is_resolved_for_housing_relief_bundle(self) -> None:
+        housing_rules = [
+            {
+                "source_id": "pit_act",
+                "provision_id": "pit_art_21_ust_25_pkt_2",
+                "citation": "art. 21 ust. 25 pkt 2",
+                "article_key": "21",
+                "paragraph": "25",
+                "point": "2",
+                "directive": "Za wydatki na własne cele mieszkaniowe uważa się spłatę kredytu wraz z odsetkami.",
+                "legal_state_date": "2025-01-01",
+                "rule_type": "permission",
+                "legal_mechanism": "housing_relief_credit_repayment",
+                "entailed_result_codes": ["credit_repayment_qualified"],
+            },
+            {
+                "source_id": "pit_act",
+                "provision_id": "pit_art_21_ust_30",
+                "citation": "art. 21 ust. 30",
+                "article_key": "21",
+                "paragraph": "30",
+                "directive": "Wydatków nie uwzględnia się ponownie.",
+                "legal_state_date": "2025-01-01",
+                "rule_type": "restriction",
+                "rule_relationship": "general_rule",
+                "legal_mechanism": "housing_relief_credit_repayment",
+            },
+            {
+                "source_id": "pit_act",
+                "provision_id": "pit_art_21_ust_30a",
+                "citation": "art. 21 ust. 30a",
+                "article_key": "21",
+                "paragraph": "30a",
+                "directive": "Przepis ust. 30 nie wyłącza spłaty kredytu zaciągniętego na zbywaną nieruchomość.",
+                "legal_state_date": "2025-01-01",
+                "rule_type": "permission",
+                "rule_relationship": "special_extension",
+                "legal_mechanism": "housing_relief_credit_repayment",
+                "entailed_result_codes": ["credit_on_sold_property_qualified"],
+            },
+        ]
+        registry = build_registry_from_rules(housing_rules)
+        claim = LegalClaim(
+            claim_id="housing_relief_credit",
+            axis_id="pit_housing_relief",
+            claim_type="legal_conclusion",
+            text="Spłata kredytu dotyczącego sprzedawanej nieruchomości może korzystać z ulgi.",
+            source_provisions=("pit_art_21_ust_30",),
+            controlling_provisions=("pit_art_21_ust_30",),
+            dependency_provisions=("pit_art_21_ust_25_pkt_2",),
+            status="approved",
+            result_code="credit_on_sold_property_qualified",
+            legal_mechanism="housing_relief_credit_repayment",
+        )
+
+        validation = validate_claim(
+            claim,
+            registry,
+            target_date="2026-03-31",
+            facts={},
+            calculations={},
+        )
+
+        self.assertTrue(validation.claim_supported)
+        self.assertIn("pit_art_21_ust_30a", validation.applicable_provisions)
+        self.assertNotIn("incomplete_mechanism_source_bundle", validation.errors)
+        self.assertNotIn("unresolved_rule_conflict", validation.errors)
+
+    def test_special_rule_overrides_general_disqualification_claim(self) -> None:
+        housing_rules = [
+            {
+                "source_id": "pit_act",
+                "provision_id": "pit_art_21_ust_25_pkt_2",
+                "citation": "art. 21 ust. 25 pkt 2",
+                "article_key": "21",
+                "paragraph": "25",
+                "point": "2",
+                "directive": "Za wydatki na własne cele mieszkaniowe uważa się spłatę kredytu wraz z odsetkami.",
+                "legal_state_date": "2025-01-01",
+                "rule_type": "permission",
+                "legal_mechanism": "housing_relief_credit_repayment",
+            },
+            {
+                "source_id": "pit_act",
+                "provision_id": "pit_art_21_ust_30",
+                "citation": "art. 21 ust. 30",
+                "article_key": "21",
+                "paragraph": "30",
+                "directive": "Wydatków nie uwzględnia się ponownie.",
+                "legal_state_date": "2025-01-01",
+                "rule_type": "restriction",
+                "rule_relationship": "general_rule",
+                "legal_mechanism": "housing_relief_credit_repayment",
+                "entailed_result_codes": ["credit_on_sold_property_disqualified"],
+            },
+            {
+                "source_id": "pit_act",
+                "provision_id": "pit_art_21_ust_30a",
+                "citation": "art. 21 ust. 30a",
+                "article_key": "21",
+                "paragraph": "30a",
+                "directive": "Przepis ust. 30 nie wyłącza spłaty kredytu zaciągniętego na zbywaną nieruchomość.",
+                "legal_state_date": "2025-01-01",
+                "rule_type": "permission",
+                "rule_relationship": "special_extension",
+                "legal_mechanism": "housing_relief_credit_repayment",
+                "entailed_result_codes": ["credit_on_sold_property_qualified"],
+            },
+        ]
+        registry = build_registry_from_rules(housing_rules)
+        invalid_claim = LegalClaim(
+            claim_id="housing_relief_credit_denied",
+            axis_id="pit_housing_relief",
+            claim_type="legal_conclusion",
+            text="Spłata kredytu dotyczącego sprzedawanej nieruchomości nie kwalifikuje się do ulgi.",
+            source_provisions=("pit_art_21_ust_30",),
+            controlling_provisions=("pit_art_21_ust_30",),
+            dependency_provisions=("pit_art_21_ust_25_pkt_2",),
+            status="approved",
+            result_code="credit_on_sold_property_disqualified",
+            legal_mechanism="housing_relief_credit_repayment",
+        )
+
+        validation = validate_claim(
+            invalid_claim,
+            registry,
+            target_date="2026-03-31",
+            facts={},
+            calculations={},
+        )
+
+        self.assertFalse(validation.claim_supported)
+        self.assertIn("unresolved_rule_conflict", validation.errors)
+
+    def test_housing_relief_bundle_is_mandatory(self) -> None:
+        housing_rules = [
+            {
+                "source_id": "pit_act",
+                "provision_id": "pit_art_21_ust_25_pkt_2",
+                "citation": "art. 21 ust. 25 pkt 2",
+                "article_key": "21",
+                "paragraph": "25",
+                "point": "2",
+                "directive": "Za wydatki na własne cele mieszkaniowe uważa się spłatę kredytu wraz z odsetkami.",
+                "legal_state_date": "2025-01-01",
+                "rule_type": "permission",
+                "legal_mechanism": "housing_relief_credit_repayment",
+            },
+            {
+                "source_id": "pit_act",
+                "provision_id": "pit_art_21_ust_30",
+                "citation": "art. 21 ust. 30",
+                "article_key": "21",
+                "paragraph": "30",
+                "directive": "Wydatków nie uwzględnia się ponownie.",
+                "legal_state_date": "2025-01-01",
+                "rule_type": "restriction",
+                "rule_relationship": "general_rule",
+                "legal_mechanism": "housing_relief_credit_repayment",
+            },
+        ]
+        registry = build_registry_from_rules(housing_rules)
+        claim = LegalClaim(
+            claim_id="housing_relief_incomplete_bundle",
+            axis_id="pit_housing_relief",
+            claim_type="legal_conclusion",
+            text="Analiza została oparta na niepełnym pakiecie przepisów.",
+            source_provisions=("pit_art_21_ust_30",),
+            controlling_provisions=("pit_art_21_ust_30",),
+            dependency_provisions=("pit_art_21_ust_25_pkt_2",),
+            status="approved",
+            result_code="credit_on_sold_property_qualified",
+            legal_mechanism="housing_relief_credit_repayment",
+        )
+
+        validation = validate_claim(
+            claim,
+            registry,
+            target_date="2026-03-31",
+            facts={},
+            calculations={},
+        )
+
+        self.assertFalse(validation.claim_supported)
+        self.assertIn("incomplete_mechanism_source_bundle", validation.errors)
+
 
 if __name__ == "__main__":
     unittest.main()

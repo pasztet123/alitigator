@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+import asyncio
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Literal, Optional, Union
@@ -17,6 +18,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from postgrest.exceptions import APIError
 from pydantic import BaseModel, Field
+
+from app.model_gateway import (
+    ModelGatewayError,
+    ModelSchemaError,
+    ModelTechnicalError,
+    configured_model_ids,
+    create_model_gateway,
+    get_model_gateway_config,
+    is_model_gateway_configured,
+)
 
 from app.auth import AuthenticatedUser, get_current_user, is_admin_user
 from app.billing import (
@@ -66,6 +77,7 @@ from app.hybrid_authority_rag import (
     to_jsonable,
     write_hybrid_trace_artifacts,
 )
+from app.legal_rag_v2.pipeline import create_default_pipeline
 from app.rag import (
     RagChunk,
     add_primary_source_fallback_chunks,
@@ -106,23 +118,56 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "0.9.16"
-ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-DEFAULT_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
-AVAILABLE_MODELS = [
-    model.strip()
-    for model in os.getenv(
-        "ANTHROPIC_MODELS",
-        "claude-opus-4-8,claude-sonnet-4-6,claude-haiku-4-5-20251001",
-    ).split(",")
-    if model.strip()
-]
-HINTS_MODEL = os.getenv("ANTHROPIC_HINTS_MODEL", "claude-haiku-4-5-20251001")
-CHAT_MAX_TOKENS = max(1024, int(os.getenv("ANTHROPIC_CHAT_MAX_TOKENS", "6000")))
-ANTHROPIC_CHAT_TIMEOUT_SECONDS = min(
-    180.0,
-    max(30.0, float(os.getenv("ANTHROPIC_CHAT_TIMEOUT_SECONDS", "110"))),
+API_VERSION = "0.10.0"
+MODEL_GATEWAY_CONFIG = get_model_gateway_config()
+DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
+AVAILABLE_MODELS = list(
+    dict.fromkeys(
+        [
+            DEFAULT_MODEL,
+            *(configured_model_ids(MODEL_GATEWAY_CONFIG)),
+        ]
+    )
 )
+HINTS_MODEL = os.getenv("LEGAL_HINTS_MODEL", DEFAULT_MODEL)
+CHAT_MAX_TOKENS = max(1024, MODEL_GATEWAY_CONFIG.max_output_tokens)
+MODEL_CHAT_TIMEOUT_SECONDS = min(
+    180.0,
+    max(30.0, MODEL_GATEWAY_CONFIG.timeout_seconds),
+)
+
+_LEGAL_PIPELINE_MODES = {"legacy", "legal_rag_v2", "shadow"}
+_legal_rag_v2_pipeline = None
+_shadow_tasks: set[asyncio.Task] = set()
+_shadow_semaphore = asyncio.Semaphore(
+    max(1, int(os.getenv("LEGAL_RAG_V2_SHADOW_MAX_CONCURRENCY", "2")))
+)
+
+
+def get_legal_pipeline_mode() -> str:
+    mode = os.getenv("LEGAL_PIPELINE_MODE", "legacy").strip().lower()
+    return mode if mode in _LEGAL_PIPELINE_MODES else "legacy"
+
+
+def get_legal_rag_v2_pipeline():
+    global _legal_rag_v2_pipeline
+    if _legal_rag_v2_pipeline is None:
+        _legal_rag_v2_pipeline = create_default_pipeline()
+    return _legal_rag_v2_pipeline
+
+
+async def run_legal_rag_v2_shadow(question: str) -> None:
+    async with _shadow_semaphore:
+        try:
+            await get_legal_rag_v2_pipeline().run(question, mode="shadow")
+        except Exception:
+            logger.exception("legal_rag_v2 shadow run failed")
+
+
+def schedule_legal_rag_v2_shadow(question: str) -> None:
+    task = asyncio.create_task(run_legal_rag_v2_shadow(question))
+    _shadow_tasks.add(task)
+    task.add_done_callback(_shadow_tasks.discard)
 CHAT_REQUEST_DEADLINE_SECONDS = min(
     180.0,
     max(30.0, float(os.getenv("ALITIGATOR_CHAT_REQUEST_DEADLINE_SECONDS", "50"))),
@@ -248,6 +293,19 @@ class PromptHintsResponse(BaseModel):
     mode: Literal["live", "fallback"]
 
 
+class ModelPromptHintOption(BaseModel):
+    label: str = Field(min_length=1, max_length=80)
+
+
+class ModelPromptHint(BaseModel):
+    question: str = Field(min_length=1, max_length=600)
+    options: list[ModelPromptHintOption] = Field(min_length=2, max_length=5)
+
+
+class ModelPromptHints(BaseModel):
+    hints: list[ModelPromptHint] = Field(default_factory=list, max_length=3)
+
+
 class ModelsResponse(BaseModel):
     default_model: str
     models: list[str]
@@ -256,7 +314,8 @@ class ModelsResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     version: str
-    anthropic_configured: bool
+    llm_configured: bool
+    llm_provider: str
     supabase_configured: bool
     rag_index_configured: bool
     chat_storage_available: bool
@@ -809,8 +868,7 @@ async def request_prompt_hints(
     excluded_questions: Optional[list[str]] = None,
     max_hints: int = 3,
 ) -> PromptHintsResponse:
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
+    if not is_model_gateway_configured(MODEL_GATEWAY_CONFIG):
         return PromptHintsResponse(
             hints=fallback_prompt_hints(
                 draft,
@@ -841,7 +899,7 @@ async def request_prompt_hints(
         " Pytania mają być po polsku, proste i praktyczne."
         " Nie zadawaj pytań typu 'czy A, czy B, czy C?', jeśli odpowiedzią nie byłoby sensowne Tak/Nie."
         f" Zwróć maksymalnie {max_hints} pytań."
-        " Zwróć wyłącznie JSON w postaci {\"hints\":[{\"question\":\"...\",\"options\":[{\"label\":\"...\"}]}]}."
+        " Wynik musi być zgodny z przekazanym schematem Structured Output."
     )
     user_prompt = (
         f"Wersja robocza wiadomości użytkownika:\n{draft}\n\n"
@@ -852,31 +910,20 @@ async def request_prompt_hints(
         " czy sprawa ma element zagraniczny, oraz czy ważny jest konkretny moment w czasie."
     )
 
-    payload = {
-        "model": HINTS_MODEL,
-        "max_tokens": 220,
-        "temperature": 0.2,
-        "system": system_prompt,
-        "messages": [
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": user_prompt}],
-            }
-        ],
-    }
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            response = await client.post(ANTHROPIC_API_URL, headers=headers, json=payload)
-        if response.status_code >= 400:
-            raise RuntimeError(response.text)
-        text = extract_text_from_anthropic(response.json())
-        hints = parse_prompt_hints_response(text)
+        gateway = create_model_gateway(MODEL_GATEWAY_CONFIG)
+        model_output = await gateway.generate_structured(
+            response_model=ModelPromptHints,
+            input=user_prompt,
+            system_prompt=system_prompt,
+            model=HINTS_MODEL,
+            reasoning_effort="low",
+            max_output_tokens=600,
+        )
+        hints = [
+            build_hint(item.question, [option.label for option in item.options])
+            for item in model_output.hints
+        ]
         excluded_question_set = {
             question.strip().lower()
             for question in excluded_questions or []
@@ -890,7 +937,7 @@ async def request_prompt_hints(
         if not hints:
             raise RuntimeError("Hint model returned no parseable hints")
         return PromptHintsResponse(hints=hints, model=HINTS_MODEL, mode="live")
-    except Exception:
+    except (ModelGatewayError, ValueError):
         return PromptHintsResponse(
             hints=fallback_prompt_hints(
                 draft,
@@ -1455,16 +1502,6 @@ def build_demo_reply(user_prompt: str, retrieved_chunks: list, *, retrieval_prom
         "Do odpowiedzi merytorycznej potrzebny jest skonfigurowany model językowy; powyższe źródła są jednak dostępne w RAG.\n\n"
         f"{RENDER_COMPLETION_MARKER}"
     )
-
-
-def extract_text_from_anthropic(payload: dict) -> str:
-    parts: list[str] = []
-
-    for block in payload.get("content", []):
-        if block.get("type") == "text":
-            parts.append(block.get("text", ""))
-
-    return "\n".join(part for part in parts if part).strip()
 
 
 def resolve_model(requested_model: Optional[str]) -> str:
@@ -2417,7 +2454,8 @@ def health() -> HealthResponse:
     return HealthResponse(
         status="ok",
         version=API_VERSION,
-        anthropic_configured=bool(os.getenv("ANTHROPIC_API_KEY")),
+        llm_configured=is_model_gateway_configured(MODEL_GATEWAY_CONFIG),
+        llm_provider=MODEL_GATEWAY_CONFIG.provider,
         supabase_configured=is_supabase_configured(),
         rag_index_configured=index_exists(),
         chat_storage_available=is_chat_storage_available(),
@@ -2785,7 +2823,7 @@ async def chat(
         redactions.extend(applied)
         sanitized_messages.append({"role": message.role, "content": clean_content})
 
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    model_configured = is_model_gateway_configured(MODEL_GATEWAY_CONFIG)
     model = resolve_model(request.model)
     chat_id = request.chat_id or str(uuid4())
     chat_storage_available = is_chat_storage_available()
@@ -2811,6 +2849,89 @@ async def chat(
     intent_hint_context = build_hint_context(request.intent_hints)
     retrieval_preferences_context = build_retrieval_preferences_context(request.retrieval_preferences)
     effective_user_prompt = build_effective_user_prompt(latest_user_message, request.intent_hints)
+
+    pipeline_mode = get_legal_pipeline_mode()
+    if pipeline_mode == "shadow":
+        schedule_legal_rag_v2_shadow(effective_user_prompt)
+    elif pipeline_mode == "legal_rag_v2":
+        run_id = uuid4().hex
+        try:
+            v2_result = await get_legal_rag_v2_pipeline().run(
+                effective_user_prompt,
+                mode="legal_rag_v2",
+                request_id=str(uuid4()),
+                run_id=run_id,
+            )
+        except Exception as exc:
+            logger.exception("legal_rag_v2 request failed", extra={"run_id": run_id})
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Nowy pipeline prawny nie ukończył analizy. "
+                    f"Trace diagnostyczny: {run_id}."
+                ),
+            ) from exc
+
+        failed_validations = [
+            item.stage for item in v2_result.validation if not item.passed
+        ]
+        if failed_validations:
+            logger.error(
+                "legal_rag_v2 result blocked by deterministic validation",
+                extra={"run_id": run_id, "failed_stages": failed_validations},
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Nowy pipeline prawny zablokował odpowiedź po walidacji. "
+                    f"Trace diagnostyczny: {run_id}."
+                ),
+            )
+
+        v2_reply = v2_result.final_answer or (
+            "Teza\nBrak zatwierdzonej odpowiedzi.\n\n"
+            "Analiza\nPipeline nie utworzył renderowalnego wyniku.\n\n"
+            "Źródła\nBrak.\n\n"
+            "Ryzyka i luki\nSprawdź trace przebiegu."
+        )
+        if model_configured:
+            consume_credit_for_chat(
+                user_id=current_user.id,
+                model=v2_result.writer_output and MODEL_GATEWAY_CONFIG.answer_writer_model or model,
+                chat_id=chat_id,
+                request_id=str(uuid4()),
+            )
+        persisted_assistant_message = None
+        if chat_storage_available:
+            persisted_assistant_message = persist_chat_exchange(
+                chat_id,
+                user_id=current_user.id,
+                messages=sanitized_messages,
+                reply=v2_reply,
+            )
+        return ChatResponse(
+            reply=v2_reply,
+            mode="live" if model_configured else "demo",
+            model=MODEL_GATEWAY_CONFIG.answer_writer_model,
+            redactions=sorted(set(redactions)),
+            analysis_trace={
+                "pipeline": "legal_rag_v2",
+                "run_id": v2_result.run_id,
+                "fallback": v2_result.fallback_trace.model_dump(mode="json"),
+                "plan": v2_result.legal_research_plan.model_dump(mode="json"),
+                "evidence_bundles": [
+                    item.model_dump(mode="json") for item in v2_result.evidence_bundles
+                ],
+                "claims": [item.model_dump(mode="json") for item in v2_result.claims],
+                "validation": [
+                    item.model_dump(mode="json") for item in v2_result.validation
+                ],
+                "timings_ms": v2_result.timings_ms,
+            },
+            chat_id=chat_id if chat_storage_available else None,
+            assistant_message_id=(persisted_assistant_message or {}).get("id"),
+            structured_reply=parse_structured_reply(v2_reply),
+        )
 
     if is_bad_debt_benchmark_trace_request(effective_user_prompt):
         try:
@@ -2857,7 +2978,7 @@ async def chat(
             ) from exc
         controlled_reply = controlled_result.answer
         persisted_assistant_message = None
-        if api_key:
+        if model_configured:
             consume_credit_for_chat(
                 user_id=current_user.id,
                 model=model,
@@ -2873,7 +2994,7 @@ async def chat(
             )
         return ChatResponse(
             reply=controlled_reply,
-            mode="live" if api_key else "demo",
+            mode="live" if model_configured else "demo",
             model=model,
             redactions=sorted(set(redactions)),
             analysis_trace={
@@ -2962,7 +3083,7 @@ async def chat(
             ) from exc
         controlled_reply = controlled_result.answer
         persisted_assistant_message = None
-        if api_key:
+        if model_configured:
             consume_credit_for_chat(
                 user_id=current_user.id,
                 model=model,
@@ -2978,7 +3099,7 @@ async def chat(
             )
         return ChatResponse(
             reply=controlled_reply,
-            mode="live" if api_key else "demo",
+            mode="live" if model_configured else "demo",
             model=model,
             redactions=sorted(set(redactions)),
             analysis_trace={
@@ -3022,7 +3143,7 @@ async def chat(
             ) from exc
         controlled_reply = controlled_result.answer
         persisted_assistant_message = None
-        if api_key:
+        if model_configured:
             consume_credit_for_chat(
                 user_id=current_user.id,
                 model=model,
@@ -3038,7 +3159,7 @@ async def chat(
             )
         return ChatResponse(
             reply=controlled_reply,
-            mode="live" if api_key else "demo",
+            mode="live" if model_configured else "demo",
             model=model,
             redactions=sorted(set(redactions)),
             analysis_trace={
@@ -3226,7 +3347,7 @@ async def chat(
             "selected_chunk_ids": [chunk.chunk_id for chunk in hybrid_result.selected_chunks],
             "timings": hybrid_result.timings,
         }
-    if not api_key:
+    if not model_configured:
         demo_reply = build_demo_reply(latest_user_message, retrieved_chunks, retrieval_prompt=effective_user_prompt)
         demo_reply = enforce_reply_guardrails(
             demo_reply,
@@ -3332,32 +3453,12 @@ async def chat(
         + retrieved_context[:30000]
     )
 
-    payload = {
-        "model": model,
-        "max_tokens": CHAT_MAX_TOKENS,
-        "temperature": 0.15,
-        "system": system_prompt,
-        "messages": [
-            {
-                "role": message["role"],
-                "content": [{"type": "text", "text": message["content"]}],
-            }
-            for message in sanitized_messages
-        ],
-    }
-
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-
     reply = ""
     validation: dict[str, object] = {}
     last_render_error: Optional[HTTPException] = None
     try:
         model_timeout = min(
-            ANTHROPIC_CHAT_TIMEOUT_SECONDS,
+            MODEL_CHAT_TIMEOUT_SECONDS,
             max(5.0, remaining_request_seconds(reserve_seconds=6.0)),
         )
         if model_timeout < 10.0:
@@ -3368,73 +3469,72 @@ async def chat(
                     "Dla bardzo długich pytań trzeba zwiększyć timeout Cloud Run albo zawęzić zakres pytania."
                 ),
             )
-        async with httpx.AsyncClient(timeout=model_timeout) as client:
-            for attempt in range(2):
-                if remaining_request_seconds(reserve_seconds=6.0) < 10.0:
-                    raise HTTPException(
-                        status_code=504,
-                        detail=(
-                            "Model potrzebuje więcej czasu niż pozwala obecny limit requestu. "
-                            "Dla pełnych, kompleksowych analiz trzeba zwiększyć timeout Cloud Run."
-                        ),
-                    )
-                attempt_payload = dict(payload)
-                if attempt:
-                    retry_feedback = ""
-                    if last_render_error is not None:
-                        retry_feedback = (
-                            "\n\nPoprzedni render został odrzucony przez walidator: "
-                            f"{last_render_error.detail}"
-                            "\nNapraw dokładnie wskazane błędy. Nie zostawiaj pustych slotów typu "
-                            "'ustawy o VAT', 'ustawy o CIT' ani '( i ust. ... )'. "
-                            "Każde odwołanie do przepisu musi mieć konkretny numer artykułu/ustępu albo zostać pominięte."
-                        )
-                    attempt_payload["system"] = compact_system_prompt + retry_feedback
-                    attempt_payload["temperature"] = 0
-                    attempt_payload["messages"] = [
-                        {
-                            "role": "user",
-                            "content": [{"type": "text", "text": latest_user_message}],
-                        }
-                    ]
-                response = await client.post(
-                    ANTHROPIC_API_URL, headers=headers, json=attempt_payload
+        gateway = create_model_gateway(MODEL_GATEWAY_CONFIG)
+        for attempt in range(2):
+            if remaining_request_seconds(reserve_seconds=6.0) < 10.0:
+                raise HTTPException(
+                    status_code=504,
+                    detail=(
+                        "Model potrzebuje więcej czasu niż pozwala obecny limit requestu. "
+                        "Dla pełnych, kompleksowych analiz trzeba zwiększyć timeout Cloud Run."
+                    ),
                 )
-                if response.status_code >= 400:
-                    raise HTTPException(status_code=response.status_code, detail=response.text)
-                candidate = extract_text_from_anthropic(response.json())
-                if not candidate:
-                    last_render_error = HTTPException(
-                        status_code=502, detail="Anthropic returned an empty response"
+            retry_feedback = ""
+            writer_system_prompt = system_prompt
+            writer_input: list[dict[str, str]] = list(sanitized_messages)
+            if attempt:
+                if last_render_error is not None:
+                    retry_feedback = (
+                        "\n\nPoprzedni render został odrzucony przez walidator: "
+                        f"{last_render_error.detail}"
+                        "\nNapraw dokładnie wskazane błędy. Nie zostawiaj pustych slotów typu "
+                        "'ustawy o VAT', 'ustawy o CIT' ani '( i ust. ... )'. "
+                        "Każde odwołanie do przepisu musi mieć konkretny numer artykułu/ustępu albo zostać pominięte."
                     )
-                    continue
-                candidate = enforce_reply_guardrails(
+                writer_system_prompt = compact_system_prompt + retry_feedback
+                writer_input = [{"role": "user", "content": latest_user_message}]
+            candidate = await asyncio.wait_for(
+                gateway.generate_text(
+                    input=writer_input,
+                    system_prompt=writer_system_prompt,
+                    model=model,
+                    reasoning_effort="medium",
+                    max_output_tokens=CHAT_MAX_TOKENS,
+                ),
+                timeout=model_timeout,
+            )
+            candidate = enforce_reply_guardrails(
+                candidate,
+                allowed_provision_references=allowed_provision_references,
+                missing_required_facts=missing_required_facts,
+                timeline_issues=timeline_issues,
+                claim_source_traces=list(analysis_trace.get("claim_source_traces") or []),
+            )
+            try:
+                validation = validate_final_output(
                     candidate,
-                    allowed_provision_references=allowed_provision_references,
-                    missing_required_facts=missing_required_facts,
-                    timeline_issues=timeline_issues,
-                    claim_source_traces=list(analysis_trace.get("claim_source_traces") or []),
+                    axis_coverage=axis_coverage,
+                    expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
                 )
-                try:
-                    validation = validate_final_output(
-                        candidate,
-                        axis_coverage=axis_coverage,
-                        expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
-                    )
-                except HTTPException as exc:
-                    last_render_error = exc
-                    continue
-                reply = candidate
-                break
-    except httpx.ReadTimeout as exc:
+            except HTTPException as exc:
+                last_render_error = exc
+                continue
+            reply = candidate
+            break
+    except asyncio.TimeoutError as exc:
         raise HTTPException(
             status_code=504,
             detail="Model odpowiadał zbyt długo. Spróbuj ponowić zapytanie albo skrócić zakres odpowiedzi."
         ) from exc
-    except httpx.HTTPError as exc:
+    except ModelTechnicalError as exc:
         raise HTTPException(
             status_code=502,
             detail="Nie udało się połączyć z modelem odpowiedzi."
+        ) from exc
+    except (ModelSchemaError, ModelGatewayError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Model odpowiedzi zwrócił niepoprawny wynik."
         ) from exc
 
     if not reply:

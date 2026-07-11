@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+
+from app.legal_rag_v2.backends import CorpusFtsBackend
+
+
+class CorpusFtsBackendTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sqlite_search_is_typed_filtered_and_policy_free(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rag.sqlite3"
+            connection = sqlite3.connect(path)
+            connection.executescript(
+                """
+                CREATE TABLE documents (
+                    document_id TEXT PRIMARY KEY, subject TEXT, signature TEXT,
+                    published_date TEXT, source_url TEXT, category TEXT,
+                    tax_domain TEXT, source TEXT, source_type TEXT,
+                    source_subtype TEXT, authority TEXT, publication TEXT,
+                    legal_state_date TEXT, legal_provisions_json TEXT,
+                    source_pages_json TEXT
+                );
+                CREATE TABLE chunks (
+                    chunk_id TEXT PRIMARY KEY, document_id TEXT, chunk_index INTEGER,
+                    chunk_text TEXT
+                );
+                CREATE VIRTUAL TABLE chunks_fts USING fts5(
+                    chunk_text, subject, signature, keywords, legal_provisions,
+                    issues, question_text, facts_text, tax_domain
+                );
+                """
+            )
+            connection.execute(
+                "INSERT INTO documents VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "law-a", "Ustawa PIT", "", "2025-01-01", "", "", "PIT",
+                    "eli", "statute", "consolidated_text", "Sejm", "Dz.U.",
+                    "2025-01-01", '["art. 21"]', "[]",
+                ),
+            )
+            connection.execute(
+                "INSERT INTO chunks VALUES (?,?,?,?)",
+                ("chunk-a", "law-a", 0, "Ulga mieszkaniowa obejmuje określone wydatki."),
+            )
+            connection.execute(
+                "INSERT INTO chunks_fts(rowid, chunk_text, subject, signature, keywords, legal_provisions, issues, question_text, facts_text, tax_domain) VALUES (1,?,?,?,?,?,?,?,?,?)",
+                (
+                    "Ulga mieszkaniowa obejmuje określone wydatki.", "Ustawa PIT", "",
+                    "", "art. 21", "ulga", "", "", "PIT",
+                ),
+            )
+            connection.commit()
+            connection.close()
+
+            backend = CorpusFtsBackend(backend="sqlite", sqlite_path=path)
+            hits = await backend.search(
+                "wydatki na ulgę mieszkaniową",
+                limit=5,
+                source_types=frozenset({"statute"}),
+                metadata_filters={"tax_domains": ["PIT"]},
+            )
+
+            self.assertEqual([item.document_id for item in hits], ["law-a"])
+            self.assertEqual(hits[0].source_type, "statute")
+            self.assertEqual(hits[0].backend, "legal_rag_v2_generic_fts")
+            self.assertEqual(hits[0].metadata["legal_provisions"], ["art. 21"])
+
+
+if __name__ == "__main__":
+    unittest.main()

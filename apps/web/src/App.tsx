@@ -82,7 +82,8 @@ type ModelsResponse = {
 
 type HealthResponse = {
   status: string
-  anthropic_configured: boolean
+  llm_configured: boolean
+  llm_provider: string
   supabase_configured: boolean
   rag_index_configured: boolean
   chat_storage_available: boolean
@@ -186,6 +187,8 @@ type ParsedAssistantMessage = {
 }
 
 const modelLabels: Record<string, string> = {
+  'gpt-5.6-terra': 'GPT-5.6 Terra',
+  'gpt-5.6-luna': 'GPT-5.6 Luna',
   'claude-opus-4-8': 'Claude Opus 4.8',
   'claude-sonnet-4-6': 'Claude Sonnet 4.6',
   'claude-haiku-4-5-20251001': 'Claude Haiku 4.5',
@@ -198,7 +201,7 @@ const HINT_DEBOUNCE_MS = 900
 const MIN_DRAFT_LENGTH_FOR_HINTS = 24
 const ACTIVE_HINT_COUNT = 3
 const MAX_HINT_QUESTION_COUNT = 5
-const APP_VERSION = '9.19.2'
+const APP_VERSION = '10.0.0'
 const ASSISTANT_SECTION_TITLES = [
   'Teza',
   'Analiza',
@@ -660,8 +663,8 @@ function App() {
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null)
   const [showArchived, setShowArchived] = useState(false)
   const [localThreadMessages, setLocalThreadMessages] = useState<LocalThreadMessages>({})
-  const [availableModels, setAvailableModels] = useState<string[]>(['claude-sonnet-4-6'])
-  const [selectedModel, setSelectedModel] = useState('claude-sonnet-4-6')
+  const [availableModels, setAvailableModels] = useState<string[]>(['gpt-5.6-terra'])
+  const [selectedModel, setSelectedModel] = useState('gpt-5.6-terra')
   const [lastRedactions, setLastRedactions] = useState<string[]>([])
   const [chatStorageAvailable, setChatStorageAvailable] = useState(false)
   const [promptHints, setPromptHints] = useState<PromptHint[]>([])

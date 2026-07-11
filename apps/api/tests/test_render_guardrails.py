@@ -3,8 +3,8 @@ from __future__ import annotations
 import unittest
 
 from app.main import (
-    ANTHROPIC_CHAT_TIMEOUT_SECONDS,
     CHAT_REQUEST_DEADLINE_SECONDS,
+    MODEL_CHAT_TIMEOUT_SECONDS,
     RENDER_COMPLETION_MARKER,
     build_chat_system_prompt,
     enforce_reply_guardrails,
@@ -15,8 +15,8 @@ from app.main import (
 
 class ConditionalAnswerGuardrailTests(unittest.TestCase):
     def test_model_timeout_allows_complex_answers_but_is_bounded(self) -> None:
-        self.assertGreaterEqual(ANTHROPIC_CHAT_TIMEOUT_SECONDS, 90.0)
-        self.assertLessEqual(ANTHROPIC_CHAT_TIMEOUT_SECONDS, 180.0)
+        self.assertGreaterEqual(MODEL_CHAT_TIMEOUT_SECONDS, 90.0)
+        self.assertLessEqual(MODEL_CHAT_TIMEOUT_SECONDS, 180.0)
         self.assertGreaterEqual(CHAT_REQUEST_DEADLINE_SECONDS, 30.0)
         self.assertLessEqual(CHAT_REQUEST_DEADLINE_SECONDS, 180.0)
 

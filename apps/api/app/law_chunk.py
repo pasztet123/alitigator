@@ -30,11 +30,271 @@ HEADER_RE = re.compile(r"^(?:©Kancelaria Sejmu\s+s\.\s*\d+/\d+|Dziennik Ustaw\s
 WHITESPACE_RE = re.compile(r"[ \t]+")
 BLANKS_RE = re.compile(r"\n{3,}")
 
+CHUNKER_VERSION = "provision_units_v1"
+_ARTICLE_WORD_RE = re.compile(r"(?im)^(?P<indent>[ \t]*)artyku(?:ł|l|∏)\b")
+_INLINE_ARTICLE_CHILD_RE = re.compile(
+    r"(?im)^(?P<parent>[ \t]*art\.[ \t]*\d+[a-z]*\.?)"
+    r"(?P<gap>[ \t]+)(?=(?:(?:ust\.[ \t]*)?\d+[a-z]*\.[ \t]+|§[ \t]*\d))"
+)
+_INLINE_PARAGRAPH_SECTION_RE = re.compile(
+    r"(?im)^(?P<parent>[ \t]*§[ \t]*\d+[a-z]*\.?)"
+    r"(?P<gap>[ \t]+)(?=(?:ust\.[ \t]*)?\d+[a-z]*\.[ \t]+)"
+)
+_INLINE_SECTION_POINT_RE = re.compile(
+    r"(?im)^(?P<parent>[ \t]*(?:ust\.[ \t]*)?\d+[a-z]*\.)"
+    r"(?P<gap>[ \t]+)(?=(?:pkt[ \t]*)?\d+[a-z]*\)[ \t]+)"
+)
+_INLINE_POINT_LETTER_RE = re.compile(
+    r"(?im)^(?P<parent>[ \t]*(?:pkt[ \t]*)?\d+[a-z]*\))"
+    r"(?P<gap>[ \t]+)(?=(?:lit\.[ \t]*)?[a-z]\)[ \t]+)"
+)
+_PROVISION_ARTICLE_RE = re.compile(r"^\s*art\.\s*(\d+[a-z]*)\.?\s*(.*)$", re.IGNORECASE)
+_PROVISION_PARAGRAPH_RE = re.compile(r"^\s*§\s*(\d+[a-z]*)\.?\s*(.*)$", re.IGNORECASE)
+_PROVISION_EXPLICIT_SECTION_RE = re.compile(r"^\s*ust\.\s*(\d+[a-z]*)\.?\s*(.*)$", re.IGNORECASE)
+_PROVISION_EXPLICIT_POINT_RE = re.compile(r"^\s*pkt\s*(\d+[a-z]*)\.?\s*(.*)$", re.IGNORECASE)
+_PROVISION_EXPLICIT_LETTER_RE = re.compile(r"^\s*lit\.\s*([a-z])\)?\s*(.*)$", re.IGNORECASE)
+_PROVISION_SECTION_RE = re.compile(r"^\s*(\d+[a-z]*)\.\s+(.+)$", re.IGNORECASE)
+_PROVISION_POINT_RE = re.compile(r"^\s*(\d+[a-z]*)\)\s*(.+)$", re.IGNORECASE)
+_PROVISION_LETTER_RE = re.compile(r"^\s*([a-z])\)\s*(.+)$", re.IGNORECASE)
+
 
 @dataclass(frozen=True)
 class PageText:
     number: int
     text: str
+
+
+def _replace_gap_with_newline(match: re.Match[str]) -> str:
+    """Expose an inline child marker without changing any source offsets."""
+    gap = match.group("gap")
+    return f"{match.group('parent')}\n{' ' * (len(gap) - 1)}"
+
+
+def _provision_parser_view(text: str) -> str:
+    """Return a same-length parser view for common PDF/OCR legal markers.
+
+    ``ProvisionParser`` understands ``Art.`` while treaty PDFs normally use
+    ``Artykuł``.  PDF extraction can also put an article and its first child on
+    one line.  Both normalizations below preserve the number of characters, so
+    offsets produced against this view remain offsets into the source text.
+    """
+
+    def replace_article_word(match: re.Match[str]) -> str:
+        marker = match.group(0)
+        indent = match.group("indent")
+        return f"{indent}Art.{' ' * (len(marker) - len(indent) - 4)}"
+
+    parser_text = _ARTICLE_WORD_RE.sub(replace_article_word, text)
+    for pattern in (
+        _INLINE_ARTICLE_CHILD_RE,
+        _INLINE_PARAGRAPH_SECTION_RE,
+        _INLINE_SECTION_POINT_RE,
+        _INLINE_POINT_LETTER_RE,
+    ):
+        parser_text = pattern.sub(_replace_gap_with_newline, parser_text)
+    assert len(parser_text) == len(text)
+    return parser_text
+
+
+def _format_provision_citation(context: dict[str, str | None]) -> str:
+    parts: list[str] = []
+    for key, label in (
+        ("article", "art."),
+        ("paragraph", "§"),
+        ("section", "ust."),
+        ("point", "pkt"),
+        ("letter", "lit."),
+    ):
+        if context[key]:
+            parts.append(f"{label} {context[key]}")
+    return " ".join(parts)
+
+
+def _provision_id(document_id: str, context: dict[str, str | None]) -> str:
+    path = _format_provision_citation(context) or "document"
+    digest = hashlib.sha256(f"{document_id}\0current\0{path}".encode("utf-8")).hexdigest()[:16]
+    return f"{document_id}:current:{digest}"
+
+
+def _parse_provision_marker(
+    line: str,
+    context: dict[str, str | None],
+) -> tuple[str, str] | None:
+    for level, pattern in (
+        ("article", _PROVISION_ARTICLE_RE),
+        ("paragraph", _PROVISION_PARAGRAPH_RE),
+        ("section", _PROVISION_EXPLICIT_SECTION_RE),
+        ("point", _PROVISION_EXPLICIT_POINT_RE),
+        ("letter", _PROVISION_EXPLICIT_LETTER_RE),
+    ):
+        match = pattern.match(line)
+        if match:
+            return level, match.group(1).casefold()
+    match = _PROVISION_SECTION_RE.match(line)
+    if match and (context["article"] or context["paragraph"]):
+        return "section", match.group(1).casefold()
+    match = _PROVISION_POINT_RE.match(line)
+    if match and (context["section"] or context["paragraph"]):
+        return "point", match.group(1).casefold()
+    match = _PROVISION_LETTER_RE.match(line)
+    if match and context["point"]:
+        return "letter", match.group(1).casefold()
+    return None
+
+
+def _advance_provision_context(
+    context: dict[str, str | None],
+    level: str,
+    value: str,
+) -> None:
+    if level == "article":
+        context.update(article=value, paragraph=None, section=None, point=None, letter=None)
+    elif level == "paragraph":
+        context.update(paragraph=value, section=None, point=None, letter=None)
+    elif level == "section":
+        context.update(section=value, point=None, letter=None)
+    elif level == "point":
+        context.update(point=value, letter=None)
+    else:
+        context["letter"] = value
+
+
+def _parent_provision_id(
+    document_id: str,
+    context: dict[str, str | None],
+    level: str,
+) -> str | None:
+    if level == "article":
+        return None
+    parent = dict(context)
+    if level == "paragraph":
+        parent["paragraph"] = None
+    elif level == "section":
+        parent["section"] = None
+    elif level == "point":
+        parent["point"] = None
+    else:
+        parent["letter"] = None
+    return _provision_id(document_id, parent)
+
+
+def _parse_provision_spans(text: str, document_id: str) -> list[dict]:
+    """Small CLI-safe adapter mirroring the v2 provision marker semantics."""
+    context: dict[str, str | None] = {
+        "article": None,
+        "paragraph": None,
+        "section": None,
+        "point": None,
+        "letter": None,
+    }
+    result: list[dict] = []
+    current: dict | None = None
+
+    def finish(end: int) -> None:
+        nonlocal current
+        if current is not None:
+            current["source_span_end"] = max(current["source_span_start"], end)
+            result.append(current)
+            current = None
+
+    offset = 0
+    for raw_line in text.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        marker = _parse_provision_marker(line, context)
+        if marker is not None:
+            finish(offset)
+            level, value = marker
+            _advance_provision_context(context, level, value)
+            current = {
+                "provision_id": _provision_id(document_id, context),
+                "version_id": "current",
+                "unit_type": {
+                    "article": "article",
+                    "paragraph": "paragraph",
+                    "section": "section",
+                    "point": "point",
+                    "letter": "letter",
+                }[level],
+                "citation": _format_provision_citation(context),
+                "article": context["article"],
+                "paragraph": context["paragraph"],
+                "section": context["section"],
+                "point": context["point"],
+                "letter": context["letter"],
+                "parent_id": _parent_provision_id(document_id, context, level),
+                "source_span_start": offset,
+            }
+        offset += len(raw_line)
+    finish(len(text))
+    return result
+
+
+def build_provision_units(
+    text: str,
+    *,
+    article_document_id: str,
+    record_document_id: str,
+    article_hint: str | None = None,
+    source_offset: int = 0,
+) -> list[dict]:
+    """Build stable, source-addressable metadata for one article record.
+
+    ``article_hint`` seeds the parser when ``text`` is a later part of a long
+    article and therefore starts at an ``ust.`` marker.  The seed is not
+    emitted and is subtracted from all spans.  Unit spans are half-open and
+    always address the exact unit text in the record's ``content_text``.
+    """
+    if not text.strip():
+        return []
+
+    parse_source = text
+    seed_length = 0
+    if article_hint and not re.match(r"^\s*(?:art\.|artyku(?:ł|l|∏)\b)", text, re.IGNORECASE):
+        article_number = article_hint.removeprefix("art. ").strip()
+        seed = f"Art. {article_number}.\n"
+        parse_source = f"{seed}{text}"
+        seed_length = len(seed)
+
+    parsed = _parse_provision_spans(_provision_parser_view(parse_source), article_document_id)
+    parsed_ids = {unit["provision_id"] for unit in parsed}
+    result: list[dict] = []
+    for unit in parsed:
+        if unit["source_span_start"] < seed_length:
+            continue
+        start = unit["source_span_start"]
+        end = unit["source_span_end"]
+        while start < end and parse_source[start].isspace():
+            start += 1
+        while end > start and parse_source[end - 1].isspace():
+            end -= 1
+        if start >= end:
+            continue
+        local_start = start - seed_length
+        local_end = end - seed_length
+        unit_text = text[local_start:local_end]
+        content_hash = hashlib.sha256(unit_text.encode("utf-8")).hexdigest()
+        result.append(
+            {
+                "provision_id": unit["provision_id"],
+                "document_id": article_document_id,
+                "record_document_id": record_document_id,
+                "version_id": unit["version_id"],
+                "unit_type": unit["unit_type"],
+                "citation": unit["citation"],
+                "article": unit["article"],
+                "paragraph": unit["paragraph"],
+                "section": unit["section"],
+                "point": unit["point"],
+                "letter": unit["letter"],
+                "parent_id": unit["parent_id"] if unit["parent_id"] in parsed_ids else None,
+                "source_span_start": source_offset + local_start,
+                "source_span_end": source_offset + local_end,
+                "text": unit_text,
+                "content_sha256": content_hash,
+                "content_hash": content_hash,
+            }
+        )
+    return result
 
 
 def normalize(text: str) -> str:
@@ -168,9 +428,13 @@ def build_records(
         content = "\n\n".join([*chunk["hierarchy"].values(), chunk["text"]])
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
         suffix = f"-part-{chunk['part_index']}" if chunk["part_count"] > 1 else ""
+        article_document_id = f"pl-{law_id}-{chunk['provision'].replace(' ', '-')}"
+        record_document_id = f"{article_document_id}{suffix}"
+        text_offset = len(content) - len(chunk["text"])
         records.append(
             {
-                "document_id": f"pl-{law_id}-{chunk['provision'].replace(' ', '-')}{suffix}",
+                "document_id": record_document_id,
+                "article_document_id": article_document_id,
                 "source": "eli",
                 "source_type": "statute",
                 "source_subtype": source_subtype,
@@ -191,6 +455,14 @@ def build_records(
                 "pre_chunked": True,
                 "content_text": content,
                 "content_sha256": digest,
+                "chunker_version": CHUNKER_VERSION,
+                "provision_units": build_provision_units(
+                    chunk["text"],
+                    article_document_id=article_document_id,
+                    record_document_id=record_document_id,
+                    article_hint=chunk["provision"],
+                    source_offset=text_offset,
+                ),
             }
         )
     occurrences = Counter(record["document_id"] for record in records)
@@ -200,6 +472,8 @@ def build_records(
         if occurrences[document_id] > 1:
             seen[document_id] += 1
             record["document_id"] = f"{document_id}-occurrence-{seen[document_id]}"
+        for unit in record["provision_units"]:
+            unit["record_document_id"] = record["document_id"]
     return records
 
 

@@ -24,6 +24,11 @@ from pypdf import PdfReader
 from PIL import Image
 
 try:
+    from .law_chunk import CHUNKER_VERSION, build_provision_units
+except ImportError:  # pragma: no cover - supports direct script execution
+    from law_chunk import CHUNKER_VERSION, build_provision_units
+
+try:
     import fitz
     from rapidocr_onnxruntime import RapidOCR
 except ModuleNotFoundError:  # pragma: no cover - optional runtime dependency
@@ -446,6 +451,7 @@ def build_record(source: TreatySource, article: dict[str, Any]) -> dict[str, Any
     content = article["text"]
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
     legal_provision = f"art. {article['article']}"
+    article_document_id = f"pl-upo-{source.slug}-{source.variant}-{legal_provision.replace(' ', '-')}"
     keywords = [
         source.country.lower(),
         "umowa o unikaniu podwójnego opodatkowania",
@@ -465,7 +471,8 @@ def build_record(source: TreatySource, article: dict[str, Any]) -> dict[str, Any
         source.variant.upper(),
     ]
     return {
-        "document_id": f"pl-upo-{source.slug}-{source.variant}-{legal_provision.replace(' ', '-')}",
+        "document_id": article_document_id,
+        "article_document_id": article_document_id,
         "source": "mf",
         "source_type": "statute",
         "source_subtype": "tax_treaty",
@@ -486,6 +493,13 @@ def build_record(source: TreatySource, article: dict[str, Any]) -> dict[str, Any
         "pre_chunked": True,
         "content_text": content,
         "content_sha256": digest,
+        "chunker_version": CHUNKER_VERSION,
+        "provision_units": build_provision_units(
+            content,
+            article_document_id=article_document_id,
+            record_document_id=article_document_id,
+            article_hint=legal_provision,
+        ),
     }
 
 
@@ -608,6 +622,8 @@ def build_outputs(sources: list[TreatySource]) -> tuple[list[dict[str, Any]], li
         if occurrences[document_id] > 1:
             seen[document_id] += 1
             record["document_id"] = f"{document_id}-occurrence-{seen[document_id]}"
+        for unit in record["provision_units"]:
+            unit["record_document_id"] = record["document_id"]
     return records, manifest
 
 

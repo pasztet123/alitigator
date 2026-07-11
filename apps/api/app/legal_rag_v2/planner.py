@@ -1,0 +1,604 @@
+"""Model-first legal query planning with an explicitly bounded legacy fallback."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import re
+from dataclasses import dataclass
+from typing import Iterable, Optional
+
+from pydantic import ValidationError
+
+from app.model_gateway import (
+    ModelGateway,
+    ModelSchemaError,
+    ModelTechnicalError,
+    ModelTransportError,
+    ModelUnavailableError,
+)
+
+from .schemas import (
+    Clarification,
+    Fact,
+    FallbackCandidate,
+    FallbackReason,
+    FallbackTrace,
+    LegalIssue,
+    LegalResearchPlan,
+    MissingFact,
+    QueryFamily,
+    ResearchIntent,
+    SourceSpan,
+)
+
+
+PLANNER_PROMPT_VERSION = "legal_query_planner_v2_1"
+DEFAULT_PLANNER_MODEL = "gpt-5.6-terra"
+
+
+PLANNER_SYSTEM_PROMPT = """\
+You are a planning component for research in Polish tax law. Return only the
+LegalResearchPlan required by the supplied schema. Do not answer the legal
+question, predict its outcome, or state a final legal conclusion.
+
+Extract only facts grounded in the user's exact question. Every explicit or
+language-inferred fact must point to a half-open character source_span in that
+question; preserve the user's literal wording in `value` for explicit facts.
+Do not assume a missing fact. Put it in missing_facts instead. A provision
+concept suggested by you is only a retrieval hint, never evidence.
+
+Separate independent legal issues and distinguish taxpayer/entity roles,
+transactions, payments, dates and jurisdictions. Include positive and negative
+fact constraints that help distinguish legally adjacent cases. For each issue,
+create useful query families, without inventing document IDs or judgment
+signatures. Unless the user's request clearly narrows the task, request primary
+law, tax interpretations and judgments.
+
+Ask at most three clarification questions. Ask only when an absent fact can
+change the legal result, materially change retrieval, or distinguish two close
+legal mechanisms. Otherwise continue with the fact marked missing. Confidence
+measures confidence in this research plan, not confidence in a legal answer.
+"""
+
+
+class PlannerValidationError(ValueError):
+    """The plan is structurally valid JSON but not grounded in the question."""
+
+
+@dataclass(frozen=True)
+class PlannerOutcome:
+    plan: LegalResearchPlan
+    fallback_trace: FallbackTrace
+    planner_model: str
+    primary_succeeded: bool
+
+
+def _slug(value: str, *, fallback: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    return (normalized[:80] or fallback).strip("_")
+
+
+def _dedupe(values: Iterable[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = " ".join(str(value).split())
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+    return result
+
+
+def _literal_terms(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", value.lower())
+        if len(token) >= 3
+    }
+
+
+def validate_plan_grounding(plan: LegalResearchPlan, question: str) -> LegalResearchPlan:
+    """Bind a structured plan to the exact input and reject unsupported facts.
+
+    This validation is deliberately deterministic. It does not try to decide
+    whether a legal issue is correct; it only enforces provenance invariants.
+    """
+
+    if not question or not question.strip():
+        raise PlannerValidationError("question cannot be empty")
+
+    for fact in plan.facts:
+        if fact.status == "missing":
+            continue
+        span = fact.source_span
+        if span is None:  # guarded by the schema, retained for defensive clarity
+            raise PlannerValidationError(f"fact {fact.fact_id!r} has no source span")
+        if span.source_id != "user_question":
+            raise PlannerValidationError(
+                f"fact {fact.fact_id!r} references a source other than the user question"
+            )
+        if span.start < 0 or span.end > len(question) or span.end <= span.start:
+            raise PlannerValidationError(f"fact {fact.fact_id!r} has an invalid source span")
+        source_text = question[span.start : span.end]
+        if not source_text.strip():
+            raise PlannerValidationError(f"fact {fact.fact_id!r} points to empty text")
+        if span.quote is not None and span.quote != source_text:
+            raise PlannerValidationError(f"fact {fact.fact_id!r} has a mismatched source quote")
+        # Explicit values must retain at least one material token from their
+        # cited wording. Canonical/inferred labels use the separate inferred
+        # status and are still anchored by the span.
+        if fact.status == "explicit":
+            value_terms = _literal_terms(fact.value)
+            source_terms = _literal_terms(source_text)
+            if value_terms and source_terms and not value_terms.intersection(source_terms):
+                raise PlannerValidationError(
+                    f"explicit fact {fact.fact_id!r} is not supported by its source span"
+                )
+
+    # The input is authoritative. A provider cannot rewrite the question.
+    return LegalResearchPlan.model_validate(
+        {**plan.model_dump(mode="python"), "user_query": question}
+    )
+
+
+class LegacyFallbackPlanner:
+    """Adapter around the existing rule-based planner.
+
+    It is intentionally unavailable as an implicit primary planner. Callers
+    must provide an allowed fallback reason, and every rule/hint is returned in
+    :class:`FallbackTrace`. It has no field or API capable of emitting a final
+    legal conclusion.
+    """
+
+    allowed_reasons: frozenset[str] = frozenset(
+        {
+            "planner_timeout",
+            "provider_unavailable",
+            "invalid_schema",
+            "low_confidence",
+            "insufficient_recall",
+            "forced",
+        }
+    )
+
+    def plan(
+        self,
+        question: str,
+        *,
+        reason: FallbackReason,
+        target_date: Optional[str] = None,
+        base_plan: Optional[LegalResearchPlan] = None,
+        primary_error: Optional[str] = None,
+    ) -> tuple[LegalResearchPlan, FallbackTrace]:
+        if reason not in self.allowed_reasons:
+            raise ValueError(f"unsupported fallback reason: {reason}")
+        if not question or not question.strip():
+            raise ValueError("question cannot be empty")
+
+        # These imports are lazy so the model-first path neither evaluates nor
+        # depends on legacy query rules during normal operation.
+        from app.hybrid_authority_rag import (
+            _heuristic_clarifier_questions,
+            build_fact_graph,
+            build_issue_graph,
+            classify_legal_research_intent,
+        )
+
+        legacy_intent = classify_legal_research_intent(question)
+        legacy_facts = build_fact_graph(question)
+        legacy_issues = build_issue_graph(question, legacy_intent, legacy_facts)
+        legacy_questions = _heuristic_clarifier_questions(question, legacy_intent)
+
+        rules = [
+            "legacy.classify_legal_research_intent",
+            "legacy.build_fact_graph",
+            "legacy.build_issue_graph",
+        ]
+        if legacy_questions:
+            rules.append("legacy.heuristic_clarifier_questions")
+
+        full_span = SourceSpan(
+            start=0,
+            end=len(question),
+            quote=question,
+            source_id="user_question",
+        )
+        inferred: list[Fact] = []
+        fact_values = (
+            ("role", legacy_facts.roles),
+            ("transaction", legacy_facts.transactions),
+            ("payment", legacy_facts.payments),
+            ("jurisdiction", legacy_facts.jurisdictions),
+            ("relationship", legacy_facts.relationships),
+            ("date", legacy_facts.dates),
+        )
+        used_fact_ids: set[str] = set()
+        for category, values in fact_values:
+            for index, value in enumerate(values, start=1):
+                candidate_id = f"fallback_{category}_{_slug(value, fallback=str(index))}"
+                while candidate_id in used_fact_ids:
+                    candidate_id = f"{candidate_id}_{index}"
+                used_fact_ids.add(candidate_id)
+                inferred.append(
+                    Fact(
+                        fact_id=candidate_id,
+                        subject="case",
+                        role=value if category == "role" else "case",
+                        predicate=category,
+                        value=value,
+                        status="inferred_from_language",
+                        source_span=full_span,
+                    )
+                )
+
+        missing_facts = [
+            MissingFact(
+                fact_id=f"fallback_missing_{_slug(item.id, fallback=str(index))}",
+                question=item.question,
+                materiality="retrieval_relevant",
+            )
+            for index, item in enumerate(legacy_questions[:3], start=1)
+        ]
+
+        fallback_candidates: list[FallbackCandidate] = []
+        converted_issues: list[LegalIssue] = []
+        for index, issue in enumerate(legacy_issues, start=1):
+            issue_id = issue.issue_id or f"fallback_issue_{index}"
+            concepts: list[str] = []
+            query_families = [
+                QueryFamily(
+                    family="natural_language",
+                    query=issue.query or question,
+                    lane="both",
+                    origin="fallback",
+                )
+            ]
+            fallback_candidates.append(
+                FallbackCandidate(
+                    candidate_type="query_hint",
+                    value=issue.query or question,
+                    issue_id=issue_id,
+                )
+            )
+            if issue.mechanism:
+                concepts.append(issue.mechanism)
+                query_families.append(
+                    QueryFamily(
+                        family="legal_concept",
+                        query=issue.mechanism.replace("_", " "),
+                        lane="both",
+                        origin="fallback",
+                    )
+                )
+            for tax, provision in issue.preferred_targets:
+                hint = " ".join(item for item in (tax, provision) if item).strip()
+                if not hint:
+                    continue
+                concepts.append(hint)
+                query_families.append(
+                    QueryFamily(
+                        family="explicit_provision_reference",
+                        query=hint,
+                        lane="primary_law",
+                        origin="fallback",
+                    )
+                )
+                fallback_candidates.append(
+                    FallbackCandidate(
+                        candidate_type="provision_hint",
+                        value=hint,
+                        issue_id=issue_id,
+                    )
+                )
+
+            converted_issues.append(
+                LegalIssue(
+                    issue_id=issue_id,
+                    label=issue.label or "General tax issue",
+                    tax_domains=[issue.tax] if issue.tax else [],
+                    legal_mechanism=issue.mechanism or "general_tax_analysis",
+                    taxpayer_roles=list(legacy_facts.roles),
+                    transactions=list(legacy_facts.transactions),
+                    payments=list(legacy_facts.payments),
+                    jurisdictions=list(legacy_facts.jurisdictions),
+                    relevant_dates=list(legacy_facts.dates),
+                    possible_provision_concepts=_dedupe(concepts),
+                    positive_fact_constraints=list(legacy_facts.known_facts),
+                    negative_fact_constraints=[issue.contrast] if issue.contrast else [],
+                    requested_source_types=["statute", "interpretation", "judgment"],
+                    query_families=query_families,
+                    priority=issue.priority if issue.priority in {"high", "medium", "low"} else "medium",
+                )
+            )
+
+        fallback_plan = LegalResearchPlan(
+            user_query=question,
+            intent=ResearchIntent(
+                mode=legacy_intent.answer_mode,
+                needs_normative_answer=legacy_intent.needs_normative_answer,
+                needs_interpretations=True,
+                needs_case_law=True,
+                needs_conflict_analysis=legacy_intent.needs_conflict_analysis,
+                needs_calculations=legacy_intent.needs_calculations,
+            ),
+            target_date=target_date,
+            facts=inferred,
+            missing_facts=missing_facts,
+            issues=converted_issues,
+            clarification=Clarification(
+                should_ask=bool(missing_facts),
+                questions=[item.question for item in missing_facts],
+            ),
+            # This is confidence in the heuristic plan, deliberately below a
+            # normal model-first threshold and never a legal confidence score.
+            confidence=0.35,
+        )
+        plan = self._merge(base_plan, fallback_plan) if base_plan is not None else fallback_plan
+        plan = validate_plan_grounding(plan, question)
+        return plan, FallbackTrace(
+            fallback_used=True,
+            fallback_reason=reason,
+            fallback_rules=rules,
+            fallback_candidates_added=fallback_candidates,
+            primary_planner_error=primary_error,
+        )
+
+    @staticmethod
+    def _merge(primary: LegalResearchPlan, fallback: LegalResearchPlan) -> LegalResearchPlan:
+        """Add only missing research hints; never overwrite model conclusions.
+
+        Neither input can contain a conclusion by schema. The primary plan's
+        confidence and fact interpretation remain authoritative.
+        """
+
+        facts = list(primary.facts)
+        known_fact_ids = {item.fact_id for item in facts}
+        facts.extend(item for item in fallback.facts if item.fact_id not in known_fact_ids)
+
+        missing = list(primary.missing_facts)
+        missing_ids = {item.fact_id for item in missing}
+        missing.extend(item for item in fallback.missing_facts if item.fact_id not in missing_ids)
+
+        issues = list(primary.issues)
+        issue_ids = {item.issue_id for item in issues}
+        issues.extend(item for item in fallback.issues if item.issue_id not in issue_ids)
+
+        questions = _dedupe(
+            [*primary.clarification.questions, *fallback.clarification.questions]
+        )[:3]
+        data = primary.model_dump(mode="python")
+        data.update(
+            facts=[item.model_dump(mode="python") for item in facts],
+            missing_facts=[item.model_dump(mode="python") for item in missing],
+            issues=[item.model_dump(mode="python") for item in issues],
+            clarification={"should_ask": bool(questions), "questions": questions},
+        )
+        return LegalResearchPlan.model_validate(data)
+
+
+class LegalQueryPlanner:
+    """Use a structured model as the primary legal-problem recognizer."""
+
+    def __init__(
+        self,
+        gateway: ModelGateway,
+        *,
+        model: Optional[str] = None,
+        reasoning_effort: Literal["low", "medium"] = "medium",
+        minimum_confidence: float = 0.55,
+        minimum_candidate_recall: float = 0.01,
+        fallback_planner: Optional[LegacyFallbackPlanner] = None,
+    ) -> None:
+        if not 0.0 <= minimum_confidence <= 1.0:
+            raise ValueError("minimum_confidence must be between zero and one")
+        if minimum_candidate_recall < 0.0:
+            raise ValueError("minimum_candidate_recall cannot be negative")
+        self.gateway = gateway
+        self.model = model or os.getenv("LEGAL_PLANNER_MODEL", DEFAULT_PLANNER_MODEL)
+        self.reasoning_effort = reasoning_effort
+        self.minimum_confidence = minimum_confidence
+        self.minimum_candidate_recall = minimum_candidate_recall
+        self.fallback_planner = fallback_planner or LegacyFallbackPlanner()
+        self.last_outcome: Optional[PlannerOutcome] = None
+
+    async def plan(
+        self,
+        question: str,
+        *,
+        target_date: Optional[str] = None,
+        candidate_recall: Optional[float] = None,
+        force_fallback: bool = False,
+    ) -> PlannerOutcome:
+        if not question or not question.strip():
+            raise ValueError("question cannot be empty")
+        if force_fallback:
+            return self._fallback(
+                question,
+                reason="forced",
+                target_date=target_date,
+                primary_succeeded=False,
+            )
+
+        try:
+            generated = await self.gateway.generate_structured(
+                response_model=LegalResearchPlan,
+                input=self._planner_input(question, target_date),
+                system_prompt=PLANNER_SYSTEM_PROMPT,
+                model=self.model,
+                reasoning_effort=self.reasoning_effort,
+                max_output_tokens=8000,
+            )
+            plan = (
+                generated
+                if isinstance(generated, LegalResearchPlan)
+                else LegalResearchPlan.model_validate(generated)
+            )
+            if target_date is not None:
+                plan = LegalResearchPlan.model_validate(
+                    {**plan.model_dump(mode="python"), "target_date": target_date}
+                )
+            plan = validate_plan_grounding(plan, question)
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            return self._fallback(
+                question,
+                reason="planner_timeout",
+                target_date=target_date,
+                primary_error=self._safe_error(exc),
+                primary_succeeded=False,
+            )
+        except ModelUnavailableError as exc:
+            return self._fallback(
+                question,
+                reason="provider_unavailable",
+                target_date=target_date,
+                primary_error=self._safe_error(exc),
+                primary_succeeded=False,
+            )
+        except ModelTransportError as exc:
+            reason: FallbackReason = (
+                "planner_timeout"
+                if any(
+                    marker in str(exc).lower()
+                    for marker in ("timeout", "timed out", "deadline exceeded")
+                )
+                else "provider_unavailable"
+            )
+            return self._fallback(
+                question,
+                reason=reason,
+                target_date=target_date,
+                primary_error=self._safe_error(exc),
+                primary_succeeded=False,
+            )
+        except ModelTechnicalError as exc:
+            return self._fallback(
+                question,
+                reason="provider_unavailable",
+                target_date=target_date,
+                primary_error=self._safe_error(exc),
+                primary_succeeded=False,
+            )
+        except (ModelSchemaError, ValidationError, PlannerValidationError) as exc:
+            return self._fallback(
+                question,
+                reason="invalid_schema",
+                target_date=target_date,
+                primary_error=self._safe_error(exc),
+                primary_succeeded=False,
+            )
+
+        if plan.confidence < self.minimum_confidence:
+            return self._fallback(
+                question,
+                reason="low_confidence",
+                target_date=target_date,
+                base_plan=plan,
+                primary_error=(
+                    f"planner confidence {plan.confidence:.3f} is below "
+                    f"{self.minimum_confidence:.3f}"
+                ),
+                primary_succeeded=True,
+            )
+        if candidate_recall is not None and candidate_recall < self.minimum_candidate_recall:
+            return self._fallback(
+                question,
+                reason="insufficient_recall",
+                target_date=target_date,
+                base_plan=plan,
+                primary_error=(
+                    f"candidate recall {candidate_recall:.3f} is below "
+                    f"{self.minimum_candidate_recall:.3f}"
+                ),
+                primary_succeeded=True,
+            )
+
+        outcome = PlannerOutcome(
+            plan=plan,
+            fallback_trace=FallbackTrace(),
+            planner_model=self.model,
+            primary_succeeded=True,
+        )
+        self.last_outcome = outcome
+        return outcome
+
+    async def plan_only(self, question: str, **kwargs: object) -> LegalResearchPlan:
+        """Convenience for callers which persist trace through another layer."""
+
+        outcome = await self.plan(question, **kwargs)  # type: ignore[arg-type]
+        return outcome.plan
+
+    def fallback_for_insufficient_recall(
+        self,
+        question: str,
+        existing_plan: LegalResearchPlan,
+        *,
+        target_date: Optional[str] = None,
+        candidate_recall: float = 0.0,
+    ) -> PlannerOutcome:
+        """Augment an existing plan after retrieval, without another model call."""
+
+        if candidate_recall >= self.minimum_candidate_recall:
+            outcome = PlannerOutcome(
+                plan=validate_plan_grounding(existing_plan, question),
+                fallback_trace=FallbackTrace(),
+                planner_model=self.model,
+                primary_succeeded=True,
+            )
+            self.last_outcome = outcome
+            return outcome
+        return self._fallback(
+            question,
+            reason="insufficient_recall",
+            target_date=target_date,
+            base_plan=existing_plan,
+            primary_error=(
+                f"candidate recall {candidate_recall:.3f} is below "
+                f"{self.minimum_candidate_recall:.3f}"
+            ),
+            primary_succeeded=True,
+        )
+
+    @staticmethod
+    def _planner_input(question: str, target_date: Optional[str]) -> str:
+        target = target_date or "not supplied; derive only when explicitly stated"
+        return (
+            f"Prompt version: {PLANNER_PROMPT_VERSION}\n"
+            f"Authoritative target date: {target}\n"
+            "The source_span offsets refer only to the exact text between "
+            "<user_question> tags, excluding the tags.\n"
+            f"<user_question>{question}</user_question>"
+        )
+
+    def _fallback(
+        self,
+        question: str,
+        *,
+        reason: FallbackReason,
+        target_date: Optional[str],
+        base_plan: Optional[LegalResearchPlan] = None,
+        primary_error: Optional[str] = None,
+        primary_succeeded: bool,
+    ) -> PlannerOutcome:
+        plan, trace = self.fallback_planner.plan(
+            question,
+            reason=reason,
+            target_date=target_date,
+            base_plan=base_plan,
+            primary_error=primary_error,
+        )
+        outcome = PlannerOutcome(
+            plan=plan,
+            fallback_trace=trace,
+            planner_model=self.model,
+            primary_succeeded=primary_succeeded,
+        )
+        self.last_outcome = outcome
+        return outcome
+
+    @staticmethod
+    def _safe_error(exc: BaseException) -> str:
+        # Provider exceptions should not contain credentials, and truncating
+        # avoids copying a malformed full provider payload into trace files.
+        return f"{type(exc).__name__}: {str(exc)}"[:500]

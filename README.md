@@ -6,7 +6,7 @@ Minimalne MVP platformy do researchu podatkowego i roboczego pisania pism.
 
 - frontend: React + Vite
 - backend: FastAPI
-- model: Claude API przez backendowy proxy
+- model: provider-neutral gateway (OpenAI Responses API domyślnie, Anthropic jako fallback)
 - baza danych kont i billing: Supabase
 - baza dokumentów RAG: lokalny SQLite albo zewnętrzny MariaDB/MySQL
 
@@ -34,7 +34,11 @@ uvicorn app.main:app --reload --port 8000
 
 ## Sekrety
 
-Nie zapisuj kluczy API w repo. Backend czyta `ANTHROPIC_API_KEY` z pliku `.env` albo ze zmiennych środowiskowych.
+Nie zapisuj kluczy API w repo. Domyślny provider czyta `OPENAI_API_KEY`
+wyłącznie ze środowiska procesu albo lokalnego, niecommitowanego pliku `.env`.
+Opcjonalny techniczny fallback Anthropic używa `ANTHROPIC_API_KEY`. Po
+ujawnieniu klucza w logu, czacie lub commicie trzeba go natychmiast unieważnić
+i wygenerować nowy; samo usunięcie tekstu nie cofa ujawnienia.
 
 ## Status
 
@@ -44,7 +48,7 @@ Ta wersja zawiera:
 - profile użytkowników i historię wątków przypisaną do `user_id`
 - ledger kredytów po stronie backendu
 - przygotowany checkout Stripe do sprzedaży doładowań kredytów
-- backendowy proxy do Claude
+- provider-neutral model gateway z domyślnym OpenAI Responses API
 - podstawowe maskowanie danych wrażliwych
 - RAG lokalny i opcjonalny storage w Supabase
 
@@ -202,20 +206,79 @@ Domyślny przepływ jest taki:
 - jeśli pliki źródłowe ustaw są nowsze niż lokalny SQLite, backend automatycznie odświeży indeks przy pierwszym zapytaniu.
 - chat używa retrievalu chunkowego do wyboru dokumentów, a następnie domyślnie odtwarza pełną treść do 6 wybranych dokumentów i przekazuje ją modelowi do wewnętrznej selekcji oraz syntezy.
 
-Zbudowanie albo odświeżenie indeksu:
+## Legal RAG v2
+
+Nowa architektura działa obok baseline'u i jest odwracalna jedną flagą:
+
+```text
+LEGAL_PIPELINE_MODE=legacy       # dotychczasowa odpowiedź produkcyjna
+LEGAL_PIPELINE_MODE=legal_rag_v2 # jeden model-driven research pipeline
+LEGAL_PIPELINE_MODE=shadow       # odpowiedź legacy, v2 zapisuje osobny trace
+```
+
+`legacy` pozostaje wartością domyślną do czasu przejścia benchmarków
+developerskich. V2 używa osobnych modeli konfigurowanych per etap:
+
+```text
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-5.6-terra
+LEGAL_PLANNER_MODEL=gpt-5.6-terra
+AUTHORITY_EXTRACTOR_MODEL=gpt-5.6-terra
+LEGAL_SYNTHESIS_MODEL=gpt-5.6-terra
+ANSWER_WRITER_MODEL=gpt-5.6-terra
+```
+
+Planner, extractor authorities i writer zwracają Structured Outputs
+walidowane przez Pydantic. Anthropic może przejąć request wyłącznie po błędzie
+technicznym providera; nie jest retry uruchamianym przez wynik benchmarku.
+Statyczny planner jest oznaczonym fallbackiem i może dodać query hints lub
+kandydatów, ale nie może narzucić finalnej konkluzji.
+
+Każdy przebieg v2 zapisuje etapowe artefakty pod
+`artifacts/legal_rag_v2/<run_id>/`. Tryb `shadow` nie zmienia odpowiedzi
+użytkownika. Nie należy włączać v2 produkcyjnie bez gotowego indeksu
+`text-embedding-3-large`, pomiaru candidate recall i przeglądu trace'ów.
+
+Zbudowanie albo wznowienie osobnego, wersjonowanego indeksu embeddingów v2
+(bez migracji bazy corpusu):
 
 ```bash
 cd apps/api
 . .venv/bin/activate
-PYTHONPATH=/Users/stas/alitigator/apps/api python -m uvicorn app.main:app --reload --port 8000
+PYTHONPATH="$PWD" python -m app.legal_rag_v2.reindex_embeddings
 ```
 
-W drugim terminalu:
+Indeks domyślnie używa `text-embedding-3-large` i wymaga nowego,
+zrotowanego `OPENAI_API_KEY`. Deterministyczny hash jest wyłącznie jawnym
+trybem testowym wymagającym podwójnego opt-in:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/rag/reindex \
-	-H 'Content-Type: application/json' \
-	-d '{}'
+PYTHONPATH="$PWD" python -m app.legal_rag_v2.reindex_embeddings \
+  --offline-hash --allow-offline-hash --dimensions 384 --limit 200
+```
+
+Porównanie na jawnym zbiorze deweloperskim:
+
+```bash
+PYTHONPATH="$PWD" python scripts/run_legal_rag_v2_ab.py \
+  --cases data/processed/rag_eval_cases.sample.json \
+  --variants A,B,C \
+  --artifact-root artifacts/legal_rag_v2/ab
+```
+
+- A: zachowany retrieval legacy,
+- B: pełny Legal RAG v2,
+- C: v2 z wymuszonym, oznaczonym fallbackiem planera.
+
+Runner odrzuca każdą ścieżkę zawierającą `holdout`. Raportuje osobno recall
+retrievalu, pokrycie source spans, walidację odpowiedzi, opóźnienia i użycie
+fallbacku. Koszt pozostaje `null`, dopóki bramka modeli nie udostępnia
+metryk usage; pipeline nie estymuje ani nie fabrykuje tych danych.
+
+Uruchomienie API:
+
+```bash
+PYTHONPATH="$PWD" python -m uvicorn app.main:app --reload --port 8000
 ```
 
 Przykładowa reindeksacja wymuszona tylko dla próbki:

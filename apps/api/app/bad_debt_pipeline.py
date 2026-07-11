@@ -558,7 +558,12 @@ def run_bad_debt_pipeline(
         )
         if not validation.claim_supported and not acceptable_conditional:
             raise ValueError(f"Claim {claim.claim_id} failed: {validation.errors}")
-    payload = build_renderer_payload(claims, registry, target_date=target_date)
+    payload = build_renderer_payload(
+        claims,
+        registry,
+        target_date=target_date,
+        calculations=calculations,
+    )
     rendered = render_answer(payload)
     validation = validate_rendered_answer(rendered, payload)
     if not validation.passed:

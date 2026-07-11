@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, replace
+from decimal import Decimal
 from typing import Optional
 
 from app.legal_pipeline import (
@@ -30,6 +31,7 @@ class RendererPayload:
     conditional_claims: tuple[LegalClaim, ...]
     answer_plan: AnswerPlan
     provisions: tuple[dict[str, str], ...]
+    calculations: tuple[dict[str, object], ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -37,6 +39,7 @@ class RendererPayload:
             "conditional_claims": [asdict(item) for item in self.conditional_claims],
             "answer_plan": asdict(self.answer_plan),
             "provisions": [dict(item) for item in self.provisions],
+            "calculations": [dict(item) for item in self.calculations],
         }
 
 
@@ -193,6 +196,7 @@ def build_renderer_payload(
     registry: ProvisionRegistry,
     *,
     target_date: str,
+    calculations: Optional[dict[str, CalculationRecord]] = None,
 ) -> RendererPayload:
     approved: list[LegalClaim] = []
     conditional: list[LegalClaim] = []
@@ -261,6 +265,15 @@ def build_renderer_payload(
             allowed_claim_ids=ordered_ids,
         ),
         provisions=provisions,
+        calculations=tuple(
+            {
+                "calculation_id": item.calculation_id,
+                "operation": item.operation,
+                "inputs": item.inputs,
+                "result": item.result,
+            }
+            for item in (calculations or {}).values()
+        ),
     )
 
 
@@ -385,6 +398,25 @@ def validate_rendered_answer(
         and not claim.calculation_ids
         and not claim.calculation_id
     )
+    calculation_map = {
+        str(item.get("calculation_id") or ""): item
+        for item in payload.calculations
+        if str(item.get("calculation_id") or "")
+    }
+    calculation_result_mismatches: list[str] = []
+    for claim in [*payload.approved_claims, *payload.conditional_claims]:
+        linked_ids = tuple(
+            item
+            for item in (*claim.calculation_ids, *((claim.calculation_id,) if claim.calculation_id else ()))
+            if item
+        )
+        for calculation_id in linked_ids:
+            calculation = calculation_map.get(calculation_id)
+            if calculation is None:
+                continue
+            result = calculation.get("result")
+            if not _rendered_text_contains_result(answer, result):
+                calculation_result_mismatches.append(calculation_id)
     marker = answer.rstrip().endswith(END_MARKER)
     missing_sections_list: list[str] = []
     for section in payload.answer_plan.sections:
@@ -476,6 +508,8 @@ def validate_rendered_answer(
         errors.append("material_claim_without_complete_provenance")
     if numeric_claims_without_calculation:
         errors.append("numeric_claim_without_calculation_id")
+    if calculation_result_mismatches:
+        errors.append("formula_result_text_mismatch")
     if truncated:
         errors.append("truncated_output")
     if missing_sections:
@@ -504,6 +538,22 @@ def validate_rendered_answer(
     )
 
 
+def _rendered_text_contains_result(answer: str, result: object) -> bool:
+    if isinstance(result, bool) or result is None:
+        return True
+    if isinstance(result, int):
+        normalized = f"{result:,}".replace(",", r"[ ,]")
+        return bool(re.search(rf"\b(?:{normalized}|{result})\b", answer))
+    if isinstance(result, float):
+        decimal_value = Decimal(str(result)).normalize()
+        normalized = str(decimal_value).replace(".", r"[.,]")
+        return bool(re.search(rf"\b{normalized}\b", answer))
+    if isinstance(result, Decimal):
+        normalized = format(result.normalize(), "f").replace(".", r"[.,]")
+        return bool(re.search(rf"\b{normalized}\b", answer))
+    return True
+
+
 def run_legal_pipeline(query: str, *, target_date: str = "2026-06-30") -> LegalPipelineResult:
     if not is_mixed_invoice_query(query):
         raise ValueError("No controlled pipeline is registered for this query.")
@@ -519,7 +569,12 @@ def run_legal_pipeline(query: str, *, target_date: str = "2026-06-30") -> LegalP
         )
         if claim.status == "approved" and not validation.claim_supported:
             raise ValueError(f"Claim {claim.claim_id} failed validation: {validation.errors}")
-    payload = build_renderer_payload(claims, registry, target_date=target_date)
+    payload = build_renderer_payload(
+        claims,
+        registry,
+        target_date=target_date,
+        calculations=calculations,
+    )
     answer = render_answer(payload)
     validation = validate_rendered_answer(answer, payload)
     if not validation.passed:

@@ -46,11 +46,25 @@ from app.bad_debt_pipeline import (
     run_bad_debt_pipeline,
 )
 from app.controlled_legal_pipeline import is_mixed_invoice_query, run_legal_pipeline
+from app.housing_relief_pipeline import (
+    can_run_housing_relief_pipeline,
+    run_housing_relief_pipeline,
+)
 from app.legal_pipeline import (
     build_claims_from_rules,
     build_registry_from_rules,
     claim_to_dict,
     validate_claim,
+)
+from app.hybrid_authority_rag import (
+    HybridAuthorityResult,
+    bind_claims_to_evidence_bundles,
+    build_authority_evidence_context,
+    clarifier_enabled_from_env,
+    get_legal_retrieval_mode,
+    run_hybrid_authority_retrieval,
+    to_jsonable,
+    write_hybrid_trace_artifacts,
 )
 from app.rag import (
     RagChunk,
@@ -983,6 +997,7 @@ def build_analysis_trace(
     timeline_issues: list[dict[str, str]],
     allowed_provision_references: set[str],
     axis_coverage: Optional[list[dict[str, object]]] = None,
+    evidence_bundles: Optional[list[dict[str, object]]] = None,
 ) -> dict[str, object]:
     target_date_match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", user_prompt)
     target_date = (
@@ -999,6 +1014,7 @@ def build_analysis_trace(
         ],
         missing_facts=missing_required_facts,
     )
+    claims = bind_claims_to_evidence_bundles(claims, evidence_bundles or [])
     claim_validations = [
         validate_claim(
             claim,
@@ -1016,6 +1032,7 @@ def build_analysis_trace(
         "timeline_issues": timeline_issues,
         "allowed_provision_references": sorted(allowed_provision_references),
         "axis_coverage": axis_coverage or [],
+        "evidence_bundles": evidence_bundles or [],
         "provision_registry": {
             "validation": registry.validate(),
             "provisions": [
@@ -1950,6 +1967,7 @@ def build_chat_system_prompt(
     retrieval_preferences_context: str = "",
     retrieval_coverage_context: str = "",
     source_plan_context: str = "",
+    authority_evidence_context: str = "",
     legal_rules_context: str = "",
     legal_rule_trace_context: str = "",
     missing_facts_context: str = "",
@@ -1998,6 +2016,15 @@ def build_chat_system_prompt(
         + "\nTraktuj to jako wynik plannera. Nie pokazuj pełnego planu użytkownikowi,"
         + " ale podporządkuj mu selekcję materiału i kolejność analizy."
     ) if source_plan_context else ""
+
+    authority_evidence_instruction = (
+        "\n\nEksperymentalne EvidenceBundle per issue:\n"
+        + authority_evidence_context
+        + "\nTo jest strukturalny wynik retrievalu authorities. Używaj interpretacji i wyroków wyłącznie jako"
+        + " supporting, contrary albo historical authorities, nie jako zamiennika ustawy."
+        + " Jeżeli dla osi nie ma supporting ani contrary authorities, jawnie napisz:"
+        + " W przeszukanym zbiorze nie znaleziono dostatecznie podobnej interpretacji lub orzeczenia."
+    ) if authority_evidence_context else ""
 
     legal_rules_instruction = (
         "\n\nWynik legal rule extractora:\n"
@@ -2174,6 +2201,7 @@ def build_chat_system_prompt(
         + hint_instruction
         + retrieval_preferences_instruction
         + source_plan_instruction
+        + authority_evidence_instruction
         + legal_rules_instruction
         + legal_rule_trace_instruction
         + missing_facts_instruction
@@ -2967,6 +2995,92 @@ async def chat(
             structured_reply=parse_structured_reply(controlled_reply),
         )
 
+    if can_run_housing_relief_pipeline(effective_user_prompt):
+        try:
+            controlled_result = run_housing_relief_pipeline(effective_user_prompt)
+        except Exception as exc:
+            logger.exception("Housing-relief controlled pipeline failed")
+            raise HTTPException(
+                status_code=502,
+                detail="Kontrolowany pipeline ulgi mieszkaniowej nie ukończył analizy.",
+            ) from exc
+        controlled_reply = controlled_result.answer
+        persisted_assistant_message = None
+        if api_key:
+            consume_credit_for_chat(
+                user_id=current_user.id,
+                model=model,
+                chat_id=chat_id,
+                request_id=str(uuid4()),
+            )
+        if chat_storage_available:
+            persisted_assistant_message = persist_chat_exchange(
+                chat_id,
+                user_id=current_user.id,
+                messages=sanitized_messages,
+                reply=controlled_reply,
+            )
+        return ChatResponse(
+            reply=controlled_reply,
+            mode="live" if api_key else "demo",
+            model=model,
+            redactions=sorted(set(redactions)),
+            analysis_trace={
+                "pipeline": "housing_relief_claim_renderer",
+                "facts": {
+                    fact_id: {
+                        "fact_id": fact.fact_id,
+                        "fact_type": fact.fact_type,
+                        "value": fact.value,
+                        "status": fact.status,
+                    }
+                    for fact_id, fact in controlled_result.facts.items()
+                },
+                "calculations": {
+                    calculation_id: {
+                        "calculation_id": calculation.calculation_id,
+                        "operation": calculation.operation,
+                        "result": calculation.result,
+                    }
+                    for calculation_id, calculation in controlled_result.calculations.items()
+                },
+                "claims": [
+                    {
+                        "claim_id": claim.claim_id,
+                        "status": claim.status,
+                        "result_code": claim.result_code,
+                        "result": claim.result,
+                        "provision_ids": list(claim.controlling_provisions),
+                        "display_references": [
+                            str(source.get("display_reference") or "")
+                            for source in controlled_result.renderer_payload.get("provisions", [])
+                            if str(source.get("provision_id") or "") in claim.controlling_provisions
+                        ],
+                        "fact_ids": list(claim.fact_dependencies),
+                        "calculation_id": claim.calculation_id,
+                        "calculation_ids": list(claim.calculation_ids),
+                    }
+                    for claim in controlled_result.claims.values()
+                ],
+                "renderer_payload": controlled_result.renderer_payload,
+                "render_validation": {
+                    "passed": controlled_result.render_validation.passed,
+                    "missing_claim_ids": list(controlled_result.render_validation.missing_claim_ids),
+                    "placeholder_count": controlled_result.render_validation.placeholder_count,
+                    "unknown_provision_ids": list(controlled_result.render_validation.unknown_provision_ids),
+                    "thesis_contradictions": list(controlled_result.render_validation.thesis_contradictions),
+                    "truncated": controlled_result.render_validation.truncated,
+                    "missing_required_sections": list(
+                        controlled_result.render_validation.missing_required_sections
+                    ),
+                    "errors": list(controlled_result.render_validation.errors),
+                },
+            },
+            chat_id=chat_id if chat_storage_available else None,
+            assistant_message_id=(persisted_assistant_message or {}).get("id"),
+            structured_reply=parse_structured_reply(controlled_reply),
+        )
+
     remaining_before_retrieval = remaining_request_seconds(reserve_seconds=5.0)
     if remaining_before_retrieval <= 0:
         raise HTTPException(
@@ -2977,11 +3091,39 @@ async def chat(
             ),
         )
 
-    retrieved_chunks = search_chat_chunks(
-        effective_user_prompt,
-        include_interpretations=(request.retrieval_preferences.include_interpretations if request.retrieval_preferences else True),
-        include_judgments=(request.retrieval_preferences.include_judgments if request.retrieval_preferences else None),
+    include_interpretations = (
+        request.retrieval_preferences.include_interpretations
+        if request.retrieval_preferences
+        else True
     )
+    include_judgments = (
+        request.retrieval_preferences.include_judgments
+        if request.retrieval_preferences
+        else None
+    )
+    retrieval_mode = get_legal_retrieval_mode()
+    hybrid_result: Optional[HybridAuthorityResult] = None
+    if retrieval_mode == "hybrid_authority":
+        try:
+            hybrid_result = run_hybrid_authority_retrieval(
+                effective_user_prompt,
+                include_interpretations=include_interpretations,
+                include_judgments=include_judgments,
+                clarifier_enabled=clarifier_enabled_from_env(),
+            )
+        except Exception as exc:
+            logger.exception("Hybrid authority retrieval failed")
+            raise HTTPException(
+                status_code=502,
+                detail="Eksperymentalny hybrid authority retrieval nie ukończył analizy.",
+            ) from exc
+        retrieved_chunks = list(hybrid_result.selected_chunks)
+    else:
+        retrieved_chunks = search_chat_chunks(
+            effective_user_prompt,
+            include_interpretations=include_interpretations,
+            include_judgments=include_judgments,
+        )
     retrieved_chunks = add_primary_source_fallback_chunks(effective_user_prompt, retrieved_chunks)
     if query_mentions_ksef(effective_user_prompt):
         has_current_ksef_source = any(
@@ -3010,8 +3152,8 @@ async def chat(
         retrieved_chunks = search_chunks_supabase(effective_user_prompt)
     source_plan = build_legal_source_plan(
         effective_user_prompt,
-        include_interpretations=(request.retrieval_preferences.include_interpretations if request.retrieval_preferences else True),
-        include_judgments=(request.retrieval_preferences.include_judgments if request.retrieval_preferences else None),
+        include_interpretations=include_interpretations,
+        include_judgments=include_judgments,
     )
     axis_coverage = [
         {
@@ -3050,7 +3192,24 @@ async def chat(
         timeline_issues=timeline_issues,
         allowed_provision_references=allowed_provision_references,
         axis_coverage=axis_coverage,
+        evidence_bundles=(
+            [to_jsonable(bundle) for bundle in hybrid_result.evidence_bundles]
+            if hybrid_result
+            else None
+        ),
     )
+    if hybrid_result:
+        analysis_trace["hybrid_authority_rag"] = {
+            "run_id": hybrid_result.run_id,
+            "retrieval_mode": hybrid_result.retrieval_mode,
+            "clarifier_enabled": hybrid_result.clarifier_enabled,
+            "intent_profile": to_jsonable(hybrid_result.intent_profile),
+            "fact_graph": to_jsonable(hybrid_result.fact_graph),
+            "issue_graph": to_jsonable(hybrid_result.issue_graph),
+            "authority_queries": to_jsonable(hybrid_result.authority_queries),
+            "selected_chunk_ids": [chunk.chunk_id for chunk in hybrid_result.selected_chunks],
+            "timings": hybrid_result.timings,
+        }
     if not api_key:
         demo_reply = build_demo_reply(latest_user_message, retrieved_chunks, retrieval_prompt=effective_user_prompt)
         demo_reply = enforce_reply_guardrails(
@@ -3079,6 +3238,18 @@ async def chat(
                 messages=sanitized_messages,
                 reply=demo_reply,
             )
+        if hybrid_result:
+            write_hybrid_trace_artifacts(
+                hybrid_result,
+                claims=list(analysis_trace.get("claims") or []),
+                renderer_payload={
+                    "mode": "demo",
+                    "retrieved_chunk_ids": [chunk.chunk_id for chunk in retrieved_chunks],
+                    "source_plan": legal_source_plan_to_dict(source_plan, retrieved_chunks),
+                },
+                final_answer=demo_reply,
+                validation=validation,
+            )
         return ChatResponse(
             reply=demo_reply,
             mode="demo",
@@ -3106,6 +3277,7 @@ async def chat(
         retrieval_preferences_context=retrieval_preferences_context,
         retrieval_coverage_context=retrieval_coverage_context,
         source_plan_context=build_source_plan_context(source_plan, retrieved_chunks),
+        authority_evidence_context=build_authority_evidence_context(hybrid_result),
         legal_rules_context=build_legal_rules_context(legal_rules),
         legal_rule_trace_context=build_legal_rule_trace_context(legal_rules),
         missing_facts_context=build_missing_facts_context(missing_required_facts),
@@ -3285,6 +3457,21 @@ async def chat(
             user_id=current_user.id,
             messages=sanitized_messages,
             reply=reply,
+        )
+
+    if hybrid_result:
+        write_hybrid_trace_artifacts(
+            hybrid_result,
+            claims=list(analysis_trace.get("claims") or []),
+            renderer_payload={
+                "mode": "live",
+                "model": model,
+                "retrieved_chunk_ids": [chunk.chunk_id for chunk in retrieved_chunks],
+                "source_plan": legal_source_plan_to_dict(source_plan, retrieved_chunks),
+                "context_characters": len(retrieved_context),
+            },
+            final_answer=reply,
+            validation=validation,
         )
 
     return ChatResponse(

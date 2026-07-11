@@ -192,7 +192,13 @@ class BadDebtPipelineEndToEndTests(unittest.TestCase):
             self.assertEqual(result.render_validation.thesis_contradictions, ())
             self.assertEqual(
                 set(result.renderer_payload),
-                {"approved_claims", "conditional_claims", "answer_plan", "provisions"},
+                {
+                    "approved_claims",
+                    "conditional_claims",
+                    "answer_plan",
+                    "provisions",
+                    "calculations",
+                },
             )
             self.assertNotIn("raw_documents", result.renderer_payload)
             self.assertNotIn("retrieved_chunks", result.renderer_payload)

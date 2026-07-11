@@ -358,6 +358,10 @@ class LegalClaim:
     legal_mechanism: str = ""
     provenance: tuple[dict[str, object], ...] = ()
     fact_subject_roles: dict[str, str] = field(default_factory=dict)
+    supporting_authorities: tuple[dict[str, object], ...] = ()
+    contrary_authorities: tuple[dict[str, object], ...] = ()
+    historical_authorities: tuple[dict[str, object], ...] = ()
+    authority_confidence: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -422,6 +426,29 @@ def _specificity_score(record: ProvisionRecord) -> tuple[int, int, int, int]:
     )
 
 
+def _provisions_conflict(
+    left: ProvisionRecord,
+    right: ProvisionRecord,
+) -> bool:
+    if left.document_id != right.document_id:
+        return False
+    if left.article == right.article:
+        return True
+    linked = {
+        *left.related_provisions,
+        *left.special_rule_provisions,
+        *left.exception_provisions,
+        *left.general_rule_provisions,
+    }
+    reverse_linked = {
+        *right.related_provisions,
+        *right.special_rule_provisions,
+        *right.exception_provisions,
+        *right.general_rule_provisions,
+    }
+    return right.provision_id in linked or left.provision_id in reverse_linked
+
+
 def validate_claim(
     claim: LegalClaim,
     registry: ProvisionRegistry,
@@ -477,13 +504,21 @@ def validate_claim(
             if item.entailed_result_codes
             and claim.result_code in item.entailed_result_codes
         ]
-        conflicting = [
+        all_mismatching = [
             item
             for item in applicable
             if item.entailed_result_codes
             and claim.result_code not in item.entailed_result_codes
         ]
-        if conflicting and not supporting:
+        conflicting = [
+            item
+            for item in all_mismatching
+            if any(
+                _provisions_conflict(item, supported_item)
+                for supported_item in supporting
+            )
+        ]
+        if all_mismatching and not supporting:
             errors.append("source_does_not_entail_claim")
         elif supporting and conflicting:
             best_support = max(supporting, key=_specificity_score)

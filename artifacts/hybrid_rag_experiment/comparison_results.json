@@ -1,0 +1,15 @@
+{
+  "kind": "hybrid_authority_rag_comparison",
+  "generated_at": "2026-07-11T00:00:00Z",
+  "complete": false,
+  "answer_generation": "not_run",
+  "cases_path_attempted": "apps/api/data/processed/rag_eval_cases.sample.json",
+  "case_count": 0,
+  "summary": {},
+  "results": [],
+  "status": {
+    "state": "not_completed_interactive_timeout",
+    "reason": "A one-case dev smoke was interrupted after repeated 60-90 second waits inside local SQLite candidate generation. The benchmark runner is implemented and should be run as a longer dev benchmark job.",
+    "holdout_used": false
+  }
+}

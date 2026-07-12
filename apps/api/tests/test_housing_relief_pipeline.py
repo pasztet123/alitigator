@@ -11,6 +11,7 @@ from app.housing_relief_pipeline import (
     parse_housing_relief_facts,
     run_housing_relief_pipeline,
 )
+from app.rag import build_legal_source_plan
 
 
 NATURAL_LANGUAGE_QUERY = """
@@ -19,6 +20,14 @@ za 900 tys. zł. Po sprzedaży spłacił 300 tys. zł kredytu zaciągniętego na
 tego sprzedanego mieszkania oraz wpłacił 300 tys. zł deweloperowi na nowe
 mieszkanie. Przeniesienie własności nowego mieszkania ma nastąpić w 2029 r.
 Jak rozliczyć PIT i ulgę mieszkaniową?
+"""
+
+USER_REPORTED_QUERY = """
+W 2025 r. sprzedałem za 900 tys. zł mieszkanie, które kupiłem w 2022 r. za 600 tys. zł.
+Z pieniędzy ze sprzedaży spłaciłem 300 tys. zł kredytu zaciągniętego na zakup tego
+mieszkania i wpłaciłem kolejne 300 tys. zł deweloperowi za nowe mieszkanie, ale akt
+przenoszący własność mam dostać dopiero w 2029 r. Czy muszę zapłacić PIT od sprzedaży,
+a jeżeli tak, to od jakiej kwoty?
 """
 
 
@@ -103,6 +112,19 @@ class HousingReliefPipelineTests(unittest.TestCase):
         )
         self.assertEqual(result.claims["claim_tax_result"].result["tax"], 38000)
         self.assertIn("art. 21 ust. 30a ustawy PIT", result.answer)
+
+    def test_reported_act_transferring_ownership_phrase_uses_controlled_pipeline(self) -> None:
+        self.assertTrue(can_run_housing_relief_pipeline(USER_REPORTED_QUERY))
+        result = run_housing_relief_pipeline(USER_REPORTED_QUERY)
+        self.assertTrue(result.render_validation.passed)
+        self.assertEqual(result.claims["claim_tax_result"].result["tax"], 38_000)
+
+    def test_property_sale_always_plans_general_rule_relief_and_rate(self) -> None:
+        plan = build_legal_source_plan(USER_REPORTED_QUERY)
+        self.assertEqual(
+            [(domain, article) for domain, article in plan.statute_targets if domain == "PIT"],
+            [("PIT", "10"), ("PIT", "21"), ("PIT", "30e")],
+        )
 
     def test_validator_blocks_formula_mismatch_in_text(self) -> None:
         facts = parse_housing_relief_facts(HOUSING_RELIEF_BENCHMARK_QUERY)

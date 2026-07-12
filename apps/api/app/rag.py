@@ -2386,6 +2386,24 @@ def query_targets_housing_relief_loan_repayment(query: str) -> bool:
     return has_housing_relief and has_loan_repayment
 
 
+def query_targets_property_sale_pit(query: str) -> bool:
+    """Detect a private real-estate sale that needs the PIT source bundle.
+
+    Taxpayers rarely name the relief or its article before asking whether a
+    sale is taxable.  Treating that phrasing as a generic prose query meant the
+    writer could know the rule in article 10 from model memory while retrieval
+    supplied only a later housing-relief provision.  The general tax source,
+    relief and rate therefore form one mandatory retrieval bundle.
+    """
+    normalized = normalize_whitespace(query or "").lower()
+    has_sale = bool(re.search(r"\b(sprzeda\w*|odpłatn\w*\s+zbyci\w*|zby\w*)\b", normalized))
+    has_property = bool(re.search(r"\b(mieszkani\w*|lokal\w*|nieruchomo\w*|budyn\w*|grunt\w*)\b", normalized))
+    has_pit_context = bool(
+        re.search(r"\b(pit|podat\w*|kupi\w*|naby\w*|doch[oó]d\w*|przych[oó]d\w*)\b", normalized)
+    )
+    return has_sale and has_property and has_pit_context
+
+
 def query_targets_mortgage_settlement_refund(query: str) -> bool:
     normalized = normalize_whitespace(query or "").lower()
     return bool(
@@ -3187,6 +3205,15 @@ def build_housing_relief_loan_repayment_statute_targets(query: str) -> list[tupl
         seen_targets.add(target)
         deduped_targets.append(target)
     return deduped_targets
+
+
+def build_property_sale_pit_statute_targets(query: str) -> list[tuple[str, str]]:
+    if not query_targets_property_sale_pit(query):
+        return []
+    # Article 10 is the general source rule; articles 21 and 30e govern the
+    # relief and rate.  Retrieve them together so an exception cannot crowd
+    # out the rule it qualifies.
+    return [("PIT", "10"), ("PIT", "21"), ("PIT", "30e")]
 
 
 def build_mortgage_settlement_refund_statute_targets(query: str) -> list[tuple[str, str]]:
@@ -5008,6 +5035,7 @@ def build_mechanism_statute_targets(query: str) -> list[tuple[str, str]]:
         build_poland_germany_treaty_statute_targets,
         build_poland_spain_treaty_statute_targets,
         build_debt_assumption_statute_targets,
+        build_property_sale_pit_statute_targets,
         build_housing_relief_temporary_rental_statute_targets,
         build_housing_relief_loan_repayment_statute_targets,
         build_mortgage_settlement_refund_statute_targets,

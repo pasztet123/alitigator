@@ -200,7 +200,8 @@ def parse_housing_relief_facts(query: str) -> HousingReliefFacts:
     )
     planned_transfer_year = _extract_year(
         query,
-        r"(?:przeniesieni\w*\s+w(?:ł|l)asnoś\w*|akt\w*\s+notarialn\w*).*?\b(20\d{2})\b",
+        r"(?:przeniesieni\w*\s+w(?:ł|l)asnoś\w*|"
+        r"akt\w*\s+(?:notarialn\w*|przenosz\w*\s+w(?:ł|l)asnoś\w*)).*?\b(20\d{2})\b",
     )
     deadline = date(sale_year + 3, 12, 31).isoformat()
     developer_expense_qualifies = planned_transfer_year <= int(deadline[:4])

@@ -1289,6 +1289,65 @@ def strip_render_completion_marker(reply: str) -> str:
     return reply.replace(RENDER_COMPLETION_MARKER, "").strip()
 
 
+def render_verified_retrieval_sources(retrieved_chunks: list) -> str:
+    """Render stable, validator-recognisable identifiers for retrieved documents."""
+    lines: list[str] = []
+    seen_document_ids: set[str] = set()
+    for chunk in retrieved_chunks:
+        document_id = str(getattr(chunk, "document_id", "") or "").strip()
+        if not document_id or document_id in seen_document_ids:
+            continue
+        seen_document_ids.add(document_id)
+        signature = str(getattr(chunk, "signature", "") or "").strip()
+        subject = str(getattr(chunk, "subject", "") or "").strip()
+        source_url = str(getattr(chunk, "source_url", "") or "").strip()
+        descriptor = signature or subject or "dokument z indeksu"
+        lines.append(
+            f"- source_document_id: {document_id} | {descriptor}"
+            + (f" | {source_url}" if source_url else "")
+        )
+    return "\n".join(lines)
+
+
+def complete_empty_sources_section(reply: str, *, retrieval_citations: str) -> str:
+    """Attach verified retrieval citations when the writer omitted all references.
+
+    The writer is still responsible for explaining which sources it used.  This
+    narrow repair only prevents a structurally valid answer from becoming a
+    502 because its mandatory Sources section contains prose such as "brak"
+    despite the request having verified retrieval results available.
+    """
+    if not retrieval_citations:
+        return reply
+
+    structured = parse_structured_reply(strip_render_completion_marker(reply))
+    source_content = next(
+        (section.content for section in (structured.sections if structured else []) if section.title == "Źródła"),
+        "",
+    )
+    if not source_content or re.search(
+        r"(?:art\.|Dz\.|DU/|\[provision_id:|source_document_id|https?://)",
+        source_content,
+        re.IGNORECASE,
+    ):
+        return reply
+
+    supplement = (
+        "\n\nZweryfikowane źródła z retrievalu (uzupełnione automatycznie, "
+        "bo model nie podał referencji):\n"
+        f"{retrieval_citations}"
+    )
+    section_pattern = re.compile(
+        r"(?P<heading>(?:^|\n\n)Źródła\n)(?P<content>.*?)(?=\n\n(?:Ryzyka i luki|Źródła zwrócone przez retrieval|Źródła użyte przez retrieval)\n|\Z)",
+        re.DOTALL,
+    )
+    return section_pattern.sub(
+        lambda match: f"{match.group('heading')}{match.group('content').rstrip()}{supplement}",
+        reply,
+        count=1,
+    )
+
+
 def validate_final_output(
     reply: str,
     *,
@@ -3509,6 +3568,10 @@ async def chat(
                 missing_required_facts=missing_required_facts,
                 timeline_issues=timeline_issues,
                 claim_source_traces=list(analysis_trace.get("claim_source_traces") or []),
+            )
+            candidate = complete_empty_sources_section(
+                candidate,
+                retrieval_citations=render_verified_retrieval_sources(retrieved_chunks),
             )
             try:
                 validation = validate_final_output(

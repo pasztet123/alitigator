@@ -7,6 +7,7 @@ from app.main import (
     MODEL_CHAT_TIMEOUT_SECONDS,
     RENDER_COMPLETION_MARKER,
     build_chat_system_prompt,
+    complete_empty_sources_section,
     enforce_reply_guardrails,
     repair_empty_legal_reference_slots,
     validate_final_output,
@@ -125,6 +126,35 @@ class ConditionalAnswerGuardrailTests(unittest.TestCase):
                 axis_coverage=[],
                 expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
             )
+
+    def test_empty_sources_section_is_completed_from_verified_retrieval(self) -> None:
+        reply = (
+            "Teza\nWniosek.\n\n"
+            "Analiza\nAnaliza.\n\n"
+            "Źródła\nBrak zatwierdzonego źródła.\n\n"
+            "Ryzyka i luki\nBrak.\n\n"
+            f"{RENDER_COMPLETION_MARKER}"
+        )
+
+        completed = complete_empty_sources_section(
+            reply,
+            retrieval_citations="- source_document_id: vat_2025 | art. 86 ustawy VAT | https://example.test/vat",
+        )
+        validation = validate_final_output(
+            completed,
+            axis_coverage=[],
+            expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
+        )
+
+        self.assertFalse(validation["sources_without_sources"])
+        self.assertIn("source_document_id: vat_2025", completed)
+
+    def test_empty_sources_section_is_not_fabricated_without_retrieval(self) -> None:
+        reply = "Źródła\nBrak zatwierdzonego źródła.\n\nRyzyka i luki\nBrak."
+        self.assertEqual(
+            complete_empty_sources_section(reply, retrieval_citations=""),
+            reply,
+        )
 
     def test_final_validator_rejects_empty_legal_reference_slots(self) -> None:
         reply = (

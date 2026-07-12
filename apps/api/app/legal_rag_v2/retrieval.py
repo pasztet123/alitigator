@@ -24,6 +24,13 @@ AUTHORITY_SOURCE_TYPES = frozenset(
     }
 )
 _WORD_RE = re.compile(r"[0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", re.UNICODE)
+_PROVISION_REFERENCE_RE = re.compile(
+    r"\bart\.\s*\d+[a-zA-Z]?"
+    r"(?:\s*(?:ust\.\s*\d+[a-zA-Z]?|§\s*\d+[a-zA-Z]?))?"
+    r"(?:\s*pkt\s*\d+[a-zA-Z]?)?"
+    r"(?:\s*lit\.\s*[a-zA-Z])?",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -522,7 +529,115 @@ class LegalRetriever:
         ]
         for item in (*primary, *authorities):
             trace.extend(item.trace)
+
+        # Both lanes deliberately run even if one lane is empty.  A partial
+        # statute result is useful evidence, but it must not suppress
+        # interpretations or judgments: authorities often reveal the missing
+        # editorial unit.  At most two directed retries are made, avoiding a
+        # retrieval loop while preserving the initial candidate pools.
+        if self.primary_enabled and self.authority_enabled:
+            authority_refs = _cited_provisions_by_issue(authorities)
+            if authority_refs:
+                retried_primary = await self._retry_lane(
+                    plan, primary, authority_refs, lane="primary_law"
+                )
+                primary = retried_primary
+                trace.append(
+                    {
+                        "event": "authority_backreference_retry",
+                        "retrieval_iteration": 1,
+                        "executed": True,
+                        "discovered_from_authority": authority_refs,
+                    }
+                )
+            else:
+                trace.append({"event": "authority_backreference_retry", "retrieval_iteration": 1, "executed": False, "discovered_from_authority": {}})
+
+            primary_refs = _cited_provisions_by_issue(primary)
+            if primary_refs:
+                authorities = await self._retry_lane(
+                    plan, authorities, primary_refs, lane="authority"
+                )
+                trace.append(
+                    {
+                        "event": "primary_to_authority_retry",
+                        "retrieval_iteration": 2,
+                        "executed": True,
+                        "discovered_from_primary": primary_refs,
+                    }
+                )
+            else:
+                trace.append({"event": "primary_to_authority_retry", "retrieval_iteration": 2, "executed": False, "discovered_from_primary": {}})
         return LegalRetrievalResult(primary, authorities, tuple(trace))
+
+    async def _retry_lane(
+        self,
+        plan: LegalResearchPlan,
+        existing: tuple[LaneResult, ...],
+        references: Mapping[str, list[str]],
+        *,
+        lane: str,
+    ) -> tuple[LaneResult, ...]:
+        lane_impl = self.primary_lane if lane == "primary_law" else self.authority_lane
+        existing_by_issue = {item.issue_id: item for item in existing}
+        retried: list[LaneResult] = []
+        for issue in plan.issues:
+            cited = references.get(issue.issue_id, [])
+            original = existing_by_issue.get(issue.issue_id)
+            if not cited:
+                if original is not None:
+                    retried.append(original)
+                continue
+            families = list(issue.query_families)
+            families.extend(
+                QueryFamily(
+                    family="authority_backreference",
+                    query=citation,
+                    lane=lane,
+                    origin="model",
+                )
+                for citation in cited[:12]
+            )
+            retry_issue = issue.model_copy(update={"query_families": families})
+            retry = await lane_impl.retrieve(plan, retry_issue)
+            if original is None:
+                retried.append(retry)
+                continue
+            merged_candidates = _unique_candidates((*original.candidates, *retry.candidates))
+            reranked = lane_impl.reranker.rerank(issue, merged_candidates, target_date=plan.target_date)
+            retried.append(
+                LaneResult(
+                    issue_id=issue.issue_id,
+                    lane=lane,
+                    query_families=tuple((*original.query_families, *retry.query_families)),
+                    candidates=tuple(reranked[: lane_impl.config.selected_limit_per_issue]),
+                    candidate_count_before_rerank=original.candidate_count_before_rerank + retry.candidate_count_before_rerank,
+                    trace=tuple((*original.trace, *retry.trace, {"event": "backreference_candidates_merged", "lane": lane, "preserved_initial_candidates": len(original.candidates), "references": cited})),
+                )
+            )
+        return tuple(retrieved for retrieved in retried)
+
+
+def _cited_provisions_by_issue(
+    lanes: Sequence[LaneResult],
+) -> dict[str, list[str]]:
+    """Collect citations from metadata and source text without topic rules."""
+    result: dict[str, list[str]] = {}
+    for lane in lanes:
+        values: list[str] = []
+        for candidate in lane.candidates:
+            raw = candidate.metadata.get("legal_provisions") or candidate.metadata.get("citation") or []
+            if isinstance(raw, str):
+                raw = [raw]
+            values.extend(str(item).strip() for item in raw if str(item).strip())
+            values.extend(match.group(0).strip() for match in _PROVISION_REFERENCE_RE.finditer(candidate.text))
+        # Case-insensitive stable de-duplication makes retries reproducible.
+        seen: set[str] = set()
+        result[lane.issue_id] = [
+            value for value in values
+            if not (value.casefold() in seen or seen.add(value.casefold()))
+        ]
+    return result
 
 
 def reciprocal_rank_fusion(

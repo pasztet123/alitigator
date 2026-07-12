@@ -281,6 +281,37 @@ class FakeBackend:
 
 
 class RetrievalTests(unittest.IsolatedAsyncioTestCase):
+    async def test_authority_citations_retry_primary_without_suppressing_authority_lane(self) -> None:
+        class BackreferenceBackend:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, frozenset[str]]] = []
+
+            async def search(self, query, *, limit, source_types, metadata_filters):
+                self.calls.append((query, source_types))
+                if source_types == AUTHORITY_SOURCE_TYPES:
+                    return [
+                        RetrievalCandidate(
+                            "authority", "Interpretacja stosuje art. 21 ust. 30a.",
+                            "interpretation", document_id="authority", chunk_id="authority",
+                        )
+                    ]
+                if query.casefold().startswith("art. 21 ust. 30a"):
+                    return [
+                        RetrievalCandidate(
+                            "exact-unit", "Art. 21 ust. 30a. Przepis szczególny.",
+                            "statute", document_id="pit", chunk_id="pit-30a",
+                            metadata={"provision_id": "pit-21-30a", "legal_provisions": ["art. 21 ust. 30a"]},
+                        )
+                    ]
+                return []
+
+        backend = BackreferenceBackend()
+        result = await LegalRetriever(backend, config=RetrievalConfig(selected_limit_per_issue=5)).retrieve(research_plan())
+
+        self.assertTrue(result.authorities[0].candidates)
+        self.assertEqual(result.primary_law[0].candidates[0].candidate_id, "exact-unit")
+        self.assertTrue(any(item.get("event") == "authority_backreference_retry" and item.get("executed") for item in result.trace))
+
     async def test_dual_lanes_run_per_issue_using_only_plan_query_families(self) -> None:
         backend = FakeBackend()
         retriever = LegalRetriever(

@@ -21,9 +21,11 @@ from .schemas import FallbackTrace
 DEFAULT_TRACE_ROOT = Path("artifacts/legal_rag_v2")
 
 REQUIRED_ARTIFACTS: tuple[str, ...] = (
+    "runtime.json",
     "request.json",
     "model_config.json",
     "legal_research_plan.json",
+    "research_plan.json",
     "clarification.json",
     "fallback_trace.json",
     "primary_queries.json",
@@ -31,9 +33,12 @@ REQUIRED_ARTIFACTS: tuple[str, ...] = (
     "authority_queries.json",
     "authority_candidates.json",
     "authority_cards.json",
+    "backreferences.json",
     "reranking.json",
     "provision_graph.json",
     "evidence_bundles.json",
+    "issue_coverage.json",
+    "provision_lineage.json",
     "claims.json",
     "calculations.json",
     "answer_plan.json",
@@ -43,6 +48,7 @@ REQUIRED_ARTIFACTS: tuple[str, ...] = (
     "validation.json",
     "timings.json",
     "costs.json",
+    "metrics.json",
 )
 
 JSON_ARTIFACTS = frozenset(name for name in REQUIRED_ARTIFACTS if name.endswith(".json"))
@@ -173,11 +179,15 @@ class TraceWriter:
             "authority_queries.json",
             "authority_candidates.json",
             "authority_cards.json",
+            "backreferences.json",
             "reranking.json",
             "evidence_bundles.json",
+            "issue_coverage.json",
+            "provision_lineage.json",
             "claims.json",
             "calculations.json",
             "validation.json",
+            "metrics.json",
         }
         for artifact_name in REQUIRED_ARTIFACTS:
             path = self.path_for(artifact_name)

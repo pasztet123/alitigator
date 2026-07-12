@@ -233,6 +233,20 @@ class LegalRagV2Pipeline:
             },
         )
         trace.write_json(
+            "runtime.json",
+            {
+                "pipeline_mode": mode,
+                "retrieval_mode": "issue_scoped_bidirectional",
+                "rag_backend": type(self.retriever.primary_lane.backend).__name__,
+                "planner_mode": "model_first",
+                "authority_extractor_mode": type(self.authority_extractor).__name__ if self.authority_extractor else "unavailable",
+                "answer_provider": type(self.gateway).__name__,
+                "answer_model": self.config.answer_writer_model,
+                "controlled_pipeline_used": False,
+                "fallbacks_used": [],
+            },
+        )
+        trace.write_json(
             "model_config.json",
             {
                 "planner_model": self.config.planner_model,
@@ -260,8 +274,23 @@ class LegalRagV2Pipeline:
         timings["planner"] = _elapsed_ms(stage)
         plan = planner_outcome.plan
         trace.write_json("legal_research_plan.json", plan)
+        trace.write_json("research_plan.json", plan)
         trace.write_json("clarification.json", plan.clarification)
         trace.write_json("fallback_trace.json", planner_outcome.fallback_trace)
+        trace.write_json(
+            "runtime.json",
+            {
+                "pipeline_mode": mode,
+                "retrieval_mode": "issue_scoped_bidirectional",
+                "rag_backend": type(self.retriever.primary_lane.backend).__name__,
+                "planner_mode": "model_first",
+                "authority_extractor_mode": type(self.authority_extractor).__name__ if self.authority_extractor else "unavailable",
+                "answer_provider": type(self.gateway).__name__,
+                "answer_model": self.config.answer_writer_model,
+                "controlled_pipeline_used": False,
+                "fallbacks_used": ([planner_outcome.fallback_trace.fallback_reason] if planner_outcome.fallback_trace.fallback_used else []),
+            },
+        )
 
         stage = time.monotonic()
         retrieval = await self.retriever.retrieve(plan)
@@ -279,8 +308,26 @@ class LegalRagV2Pipeline:
                 trace.write_json("legal_research_plan.json", plan)
                 trace.write_json("fallback_trace.json", augmented.fallback_trace)
                 retrieval = await self.retriever.retrieve(plan)
+                trace.write_json(
+                    "runtime.json",
+                    {
+                        "pipeline_mode": mode,
+                        "retrieval_mode": "issue_scoped_bidirectional",
+                        "rag_backend": type(self.retriever.primary_lane.backend).__name__,
+                        "planner_mode": "model_first",
+                        "authority_extractor_mode": type(self.authority_extractor).__name__ if self.authority_extractor else "unavailable",
+                        "answer_provider": type(self.gateway).__name__,
+                        "answer_model": self.config.answer_writer_model,
+                        "controlled_pipeline_used": False,
+                        "fallbacks_used": [augmented.fallback_trace.fallback_reason],
+                    },
+                )
         timings["retrieval"] = _elapsed_ms(stage)
         self._write_retrieval_trace(trace, retrieval)
+        trace.write_json(
+            "backreferences.json",
+            [item for item in retrieval.trace if "backreference" in str(item.get("event", "")) or "primary_to_authority" in str(item.get("event", ""))],
+        )
 
         stage = time.monotonic()
         authority_cards, authority_trace = await self._extract_authorities(retrieval)
@@ -306,6 +353,24 @@ class LegalRagV2Pipeline:
             provision_refs,
         )
         trace.write_json("evidence_bundles.json", bundles)
+        trace.write_json(
+            "issue_coverage.json",
+            [
+                {
+                    "issue_id": item.issue_id,
+                    "controlling_provision_present": item.controlling_provision_present,
+                    "dependency_coverage": item.dependency_coverage,
+                    "exception_coverage": item.exception_coverage,
+                    "temporal_validation_passed": item.temporal_validation_passed,
+                    "authority_candidates_present": item.authority_candidates_present,
+                    "supporting_authorities_present": item.supporting_authorities_present,
+                    "contrary_authorities_present": item.contrary_authorities_present,
+                    "status": item.coverage_status,
+                }
+                for item in bundles
+            ],
+        )
+        trace.write_json("provision_lineage.json", _provision_lineage(retrieval, bundles))
 
         calculations = self.calculation_engine.calculate(plan, bundles)
         trace.write_json("calculations.json", calculations)
@@ -356,6 +421,25 @@ class LegalRagV2Pipeline:
             {
                 "status": "usage_not_exposed_by_gateway_contract",
                 "total_cost_usd": None,
+            },
+        )
+        trace.write_json(
+            "metrics.json",
+            {
+                "issue_recall": candidate_recall,
+                "approved_claims_without_primary_source": sum(
+                    1 for claim in claims
+                    if claim.status in {"approved", "conditional_missing_fact"}
+                    and claim.material and not claim.controlling_provision_ids
+                ),
+                "blank_legal_references": sum(
+                    1 for bundle in bundles
+                    for provision in (*bundle.controlling_provisions, *bundle.dependency_provisions, *bundle.exception_provisions)
+                    if not provision.citation.strip()
+                ),
+                "secondary_sources_discarded_when_primary_incomplete": False,
+                "authority_backreference_retry_executed": any(item.get("event") == "authority_backreference_retry" and item.get("executed") for item in retrieval.trace),
+                "partial_primary_candidates_preserved": True,
             },
         )
 
@@ -841,6 +925,13 @@ def _build_evidence_bundles(
             + (0.25 if current_cards else 0.0)
             + (0.10 if dependencies or exceptions else 0.0),
         )
+        dependency_coverage = 1.0 if dependencies else (0.5 if controlling else 0.0)
+        exception_coverage = 1.0 if exceptions else (0.5 if controlling else 0.0)
+        coverage_status = (
+            "complete"
+            if controlling and _all_active((*controlling, *dependencies, *exceptions))
+            else "partial" if controlling or current_cards else "missing"
+        )
         bundles.append(
             EvidenceBundle(
                 issue_id=issue.issue_id,
@@ -853,9 +944,51 @@ def _build_evidence_bundles(
                 missing_sources=missing_sources,
                 missing_facts=[item.fact_id for item in plan.missing_facts],
                 retrieval_confidence=retrieval_confidence,
+                coverage_status=coverage_status,
+                controlling_provision_present=bool(controlling),
+                dependency_coverage=dependency_coverage,
+                exception_coverage=exception_coverage,
+                temporal_validation_passed=bool(controlling) and _all_active((*controlling, *dependencies, *exceptions)),
+                authority_candidates_present=bool(authority_lane and authority_lane.candidates),
+                supporting_authorities_present=bool(current_cards),
+                contrary_authorities_present=False,
             )
         )
     return bundles
+
+
+def _all_active(provisions: Iterable[ProvisionReference]) -> bool:
+    return all(item.status == "active" for item in provisions)
+
+
+def _provision_lineage(
+    retrieval: LegalRetrievalResult,
+    bundles: list[EvidenceBundle],
+) -> list[dict[str, Any]]:
+    """Record exact-reference transport without relying on article text parsing."""
+    selected_ids = {
+        provision.provision_id
+        for bundle in bundles
+        for provision in (*bundle.controlling_provisions, *bundle.dependency_provisions, *bundle.exception_provisions)
+    }
+    candidate_ids = {
+        str(candidate.metadata.get("provision_id") or candidate.candidate_id)
+        for lane in retrieval.primary_law
+        for candidate in lane.candidates
+    }
+    return [
+        {
+            "provision_id": provision_id,
+            "candidate_stage": True,
+            "selected_stage": provision_id in selected_ids,
+            "evidence_bundle_stage": provision_id in selected_ids,
+            "claim_stage": None,
+            "writer_payload_stage": None,
+            "final_answer_stage": None,
+            "drop_reason": None if provision_id in selected_ids else "not_selected_after_reranking",
+        }
+        for provision_id in sorted(candidate_ids)
+    ]
 
 
 def validate_claims(

@@ -119,7 +119,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "10.0.4"
+API_VERSION = "10.0.5"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -146,8 +146,29 @@ _shadow_semaphore = asyncio.Semaphore(
 
 
 def get_legal_pipeline_mode() -> str:
-    mode = os.getenv("LEGAL_PIPELINE_MODE", "legacy").strip().lower()
+    # LEGAL_RAG_MODE is the public, deployment-facing switch.  Keep the old
+    # variable as a compatibility alias for existing environments and tests.
+    raw = os.getenv("LEGAL_RAG_MODE") or os.getenv("LEGAL_PIPELINE_MODE", "legacy")
+    mode = raw.strip().lower()
+    aliases = {"rag_v2": "legal_rag_v2", "legacy": "legacy", "shadow": "shadow"}
+    mode = aliases.get(mode, mode)
     return mode if mode in _LEGAL_PIPELINE_MODES else "legacy"
+
+
+def legal_runtime_debug(*, controlled_pipeline_used: bool = False) -> dict[str, object]:
+    """Stable runtime identity included in API/debug traces, never secrets."""
+    mode = get_legal_pipeline_mode()
+    return {
+        "pipeline_mode": "rag_v2" if mode == "legal_rag_v2" else mode,
+        "retrieval_mode": "issue_scoped_bidirectional" if mode == "legal_rag_v2" else get_legal_retrieval_mode(),
+        "rag_backend": os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite"),
+        "planner_mode": "model_first" if mode == "legal_rag_v2" else "legacy_rules",
+        "authority_extractor_mode": "model_structured" if mode == "legal_rag_v2" else "heuristic_or_disabled",
+        "answer_provider": MODEL_GATEWAY_CONFIG.provider,
+        "answer_model": MODEL_GATEWAY_CONFIG.answer_writer_model if mode == "legal_rag_v2" else DEFAULT_MODEL,
+        "controlled_pipeline_used": controlled_pipeline_used,
+        "fallbacks_used": [],
+    }
 
 
 def get_legal_rag_v2_pipeline():
@@ -1074,6 +1095,7 @@ def build_analysis_trace(
         for claim in claims
     ]
     return {
+        "runtime": legal_runtime_debug(),
         "query": user_prompt,
         "target_date": target_date,
         "required_missing_facts": list(missing_required_facts),
@@ -3036,6 +3058,7 @@ async def chat(
             redactions=sorted(set(redactions)),
             analysis_trace={
                 "pipeline": "legal_rag_v2",
+                "runtime": legal_runtime_debug(),
                 "run_id": v2_result.run_id,
                 "fallback": v2_result.fallback_trace.model_dump(mode="json"),
                 "plan": v2_result.legal_research_plan.model_dump(mode="json"),

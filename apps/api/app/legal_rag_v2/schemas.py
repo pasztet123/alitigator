@@ -115,6 +115,13 @@ QueryFamilyName = Literal[
     "factual_contrast",
     "quoted_statutory_language",
     "cited_judgment_signature",
+    # Names used by the public retrieval contract.  Older aliases above are
+    # retained so persisted plans from the first v2 iteration stay readable.
+    "statutory_concept",
+    "fact_contrast",
+    "explicit_provision",
+    "authority_backreference",
+    "quoted_holding_language",
 ]
 
 
@@ -388,12 +395,21 @@ class EvidenceBundle(V2Schema):
     missing_sources: list[str] = Field(default_factory=list)
     missing_facts: list[str] = Field(default_factory=list)
     retrieval_confidence: Confidence = 0.0
+    coverage_status: Literal["complete", "partial", "missing"] = "missing"
+    controlling_provision_present: bool = False
+    dependency_coverage: Confidence = 0.0
+    exception_coverage: Confidence = 0.0
+    temporal_validation_passed: bool = False
+    authority_candidates_present: bool = False
+    supporting_authorities_present: bool = False
+    contrary_authorities_present: bool = False
 
 
 ClaimStatus = Literal[
     "approved",
     "conditional_missing_fact",
     "blocked_missing_primary_law",
+    "blocked_incomplete_dependency_bundle",
     "blocked_insufficient_authority",
     "blocked_conflicting_evidence",
     "blocked_invalid_provision",

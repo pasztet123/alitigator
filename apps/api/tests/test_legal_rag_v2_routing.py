@@ -7,7 +7,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 from app.auth import AuthenticatedUser
-from app.main import ChatMessage, ChatRequest, chat
+from app.main import ChatMessage, ChatRequest, chat, get_legal_pipeline_mode
 from app.legal_rag_v2.schemas import (
     Clarification,
     LegalIssue,
@@ -68,6 +68,10 @@ class FakePipeline:
 
 
 class LegalRagV2RoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_public_rag_mode_flag_maps_rag_v2_without_changing_legacy_alias(self) -> None:
+        with patch.dict(os.environ, {"LEGAL_RAG_MODE": "rag_v2", "LEGAL_PIPELINE_MODE": "legacy"}):
+            self.assertEqual(get_legal_pipeline_mode(), "legal_rag_v2")
+
     async def test_failed_deterministic_validation_blocks_user_response(self) -> None:
         pipeline = FakePipeline(validation_passed=False)
         request = ChatRequest(messages=[ChatMessage(role="user", content="Pytanie")])

@@ -8,6 +8,7 @@ from typing import Iterable
 
 from app.controlled_legal_pipeline import (
     LegalPipelineResult,
+    bind_authority_cards_to_claims,
     build_renderer_payload,
     render_answer,
     validate_rendered_answer,
@@ -228,9 +229,10 @@ def parse_housing_relief_facts(query: str) -> HousingReliefFacts:
     deadline = housing_expense_deadline_for_sale_year(sale_year)
     developer_expense_qualifies = planned_transfer_date <= deadline
     disqualified_developer_expense = 0 if developer_expense_qualifies else developer_payment
-    qualified_expenses = credit_repayment + (
-        developer_payment if developer_expense_qualifies else 0
-    )
+    # Credit repayment is not a settled input until its statutory conditions
+    # are evidenced.  The baseline calculation must therefore exclude it and
+    # a separate conditional scenario may add it back.
+    qualified_expenses = developer_payment if developer_expense_qualifies else 0
     records = {
         "sale_year": FactRecord("sale_year", "year", sale_year, subject_role="transaction"),
         "sale_year_end": FactRecord(
@@ -292,6 +294,13 @@ def parse_housing_relief_facts(query: str) -> HousingReliefFacts:
         ),
         "credit_not_previously_tax_preferenced": FactRecord(
             "credit_not_previously_tax_preferenced",
+            "bool",
+            None,
+            status="missing",
+            subject_role="transaction",
+        ),
+        "credit_taken_before_sale": FactRecord(
+            "credit_taken_before_sale",
             "bool",
             None,
             status="missing",
@@ -385,7 +394,11 @@ def build_housing_relief_registry() -> ProvisionRegistry:
             "pit_art_21_ust_1_pkt_131",
             "art. 21 ust. 1 pkt 131 ustawy PIT",
             "Wolne od podatku są dochody w wysokości odpowiadającej iloczynowi dochodu i udziału wydatków mieszkaniowych w przychodzie.",
-            result_codes=("housing_relief_formula", "housing_relief_exempt_income"),
+            result_codes=(
+                "housing_relief_formula",
+                "housing_relief_exempt_income",
+                "housing_relief_developer_deadline",
+            ),
         ),
         _record(
             "pit_art_21_ust_25_pkt_2",
@@ -443,6 +456,20 @@ def calculate_housing_relief(
     taxable_income = facts.income - exempt_income
     tax = int(
         (Decimal(taxable_income) * Decimal("0.19")).quantize(
+            Decimal("1"), rounding=ROUND_HALF_UP
+        )
+    )
+    qualified_expenses_if_credit_qualifies = facts.qualified_expenses + facts.credit_repayment
+    exempt_income_if_credit_qualifies = int(
+        (
+            Decimal(facts.income)
+            * Decimal(qualified_expenses_if_credit_qualifies)
+            / Decimal(facts.revenue)
+        ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    )
+    taxable_income_if_credit_qualifies = facts.income - exempt_income_if_credit_qualifies
+    tax_if_credit_qualifies = int(
+        (Decimal(taxable_income_if_credit_qualifies) * Decimal("0.19")).quantize(
             Decimal("1"), rounding=ROUND_HALF_UP
         )
     )
@@ -507,6 +534,40 @@ def calculate_housing_relief(
             {"taxable_income": taxable_income, "rate": Decimal("0.19")},
             tax,
         ),
+        "calc_housing_relief_qualified_expenses_credit_scenario": CalculationRecord(
+            "calc_housing_relief_qualified_expenses_credit_scenario",
+            "conditional_add",
+            {
+                "baseline_qualified_expenses": facts.qualified_expenses,
+                "credit_repayment": facts.credit_repayment,
+                "condition": "credit_repayment_statutory_conditions_confirmed",
+            },
+            qualified_expenses_if_credit_qualifies,
+        ),
+        "calc_housing_relief_exempt_income_credit_scenario": CalculationRecord(
+            "calc_housing_relief_exempt_income_credit_scenario",
+            "housing_relief_formula",
+            {
+                "income": facts.income,
+                "qualified_expenses": qualified_expenses_if_credit_qualifies,
+                "revenue": facts.revenue,
+                "formula": "D × W / P",
+                "scenario": "credit_repayment_qualifies",
+            },
+            exempt_income_if_credit_qualifies,
+        ),
+        "calc_housing_relief_taxable_income_credit_scenario": CalculationRecord(
+            "calc_housing_relief_taxable_income_credit_scenario",
+            "subtract",
+            {"income": facts.income, "exempt_income": exempt_income_if_credit_qualifies},
+            taxable_income_if_credit_qualifies,
+        ),
+        "calc_housing_relief_tax_credit_scenario": CalculationRecord(
+            "calc_housing_relief_tax_credit_scenario",
+            "multiply",
+            {"taxable_income": taxable_income_if_credit_qualifies, "rate": Decimal("0.19")},
+            tax_if_credit_qualifies,
+        ),
         "calc_housing_relief_deadline": CalculationRecord(
             "calc_housing_relief_deadline",
             "end_of_third_year_following_sale",
@@ -514,8 +575,8 @@ def calculate_housing_relief(
                 "sale_year": facts.sale_year,
                 "sale_year_end": facts.sale_year_end,
                 "statutory_period_years": HOUSING_EXPENSE_PERIOD_YEARS,
-                "deadline_source": "pit_art_21_ust_1_pkt_131",
-                "acquisition_condition_source": "pit_art_21_ust_25a",
+                "deadline_period_source": "pit_art_21_ust_1_pkt_131",
+                "ownership_condition_source": "pit_art_21_ust_25a",
             },
             facts.deadline,
         ),
@@ -525,7 +586,7 @@ def calculate_housing_relief(
             {
                 "planned_transfer_date": facts.planned_transfer_date,
                 "deadline": facts.deadline,
-                "acquisition_condition_source": "pit_art_21_ust_25a",
+                "ownership_condition_source": "pit_art_21_ust_25a",
             },
             developer_expense_qualifies,
         ),
@@ -551,8 +612,8 @@ def validate_housing_deadline_invariants(
     elif (
         deadline.inputs.get("sale_year_end") != expected_sale_year_end
         or deadline.inputs.get("statutory_period_years") != HOUSING_EXPENSE_PERIOD_YEARS
-        or deadline.inputs.get("deadline_source") != "pit_art_21_ust_1_pkt_131"
-        or deadline.inputs.get("acquisition_condition_source") != "pit_art_21_ust_25a"
+        or deadline.inputs.get("deadline_period_source") != "pit_art_21_ust_1_pkt_131"
+        or deadline.inputs.get("ownership_condition_source") != "pit_art_21_ust_25a"
     ):
         errors.append("deadline_calculation_provenance_invalid")
     expected_qualification = facts.planned_transfer_date <= expected_deadline
@@ -598,6 +659,20 @@ def build_housing_relief_claims(
     exempt_income = int(calculations["calc_housing_relief_exempt_income"].result)
     taxable_income = int(calculations["calc_housing_relief_taxable_income"].result)
     tax = int(calculations["calc_housing_relief_tax"].result)
+    exempt_income_if_credit_qualifies = int(calculations["calc_housing_relief_exempt_income_credit_scenario"].result)
+    taxable_income_if_credit_qualifies = int(calculations["calc_housing_relief_taxable_income_credit_scenario"].result)
+    tax_if_credit_qualifies = int(calculations["calc_housing_relief_tax_credit_scenario"].result)
+    developer_expense_qualifies = bool(
+        calculations["calc_housing_relief_developer_qualification"].result
+    )
+    developer_status = (
+        "approved_qualifying" if developer_expense_qualifies else "approved_not_qualifying"
+    )
+    developer_conclusion = (
+        "wskazany wydatek deweloperski kwalifikuje się do ulgi."
+        if developer_expense_qualifies
+        else "wskazany wydatek deweloperski nie kwalifikuje się; to wynik negatywny, a nie ryzyko interpretacyjne."
+    )
     claims = [
         _claim(
             "claim_sale_tax_regime",
@@ -615,9 +690,9 @@ def build_housing_relief_claims(
             "claim_formula",
             (
                 f"Dochód zwolniony trzeba policzyć wyłącznie wzorem D × W / P. "
-                f"Dla D = {facts.income:,} zł, W = {facts.qualified_expenses:,} zł i P = {facts.revenue:,} zł "
-                f"dochód zwolniony wynosi {exempt_income:,} zł. W obejmuje spłatę kredytu, "
-                "ale nie obejmuje wpłaty deweloperskiej, jeżeli własność ma przejść po terminie."
+                f"Dla scenariusza ostrożnego D = {facts.income:,} zł, W = {facts.qualified_expenses:,} zł i P = {facts.revenue:,} zł "
+                f"dochód zwolniony wynosi {exempt_income:,} zł. Spłata kredytu nie jest tu jeszcze doliczona, "
+                "dopóki nie zostaną potwierdzone jej ustawowe warunki."
             ).replace(",", " "),
             "housing_relief_formula",
             {
@@ -640,7 +715,7 @@ def build_housing_relief_claims(
         _claim(
             "claim_expense_not_income",
             (
-                f"Kwota {facts.qualified_expenses:,} zł oznacza kwalifikowane wydatki mieszkaniowe, a nie dochód zwolniony; "
+                f"Kwota {facts.qualified_expenses:,} zł oznacza kwalifikowane wydatki mieszkaniowe w scenariuszu ostrożnym, a nie dochód zwolniony; "
                 f"dochód zwolniony po odrębnym obliczeniu proporcji wynosi {exempt_income:,} zł."
             ).replace(",", " "),
             "housing_relief_exempt_income",
@@ -660,8 +735,8 @@ def build_housing_relief_claims(
         _claim(
             "claim_tax_result",
             (
-                f"Pozostały dochód do opodatkowania wynosi {taxable_income:,} zł, "
-                f"a podatek wynika z art. 30e ust. 1 ustawy PIT. Wynosi {tax:,} zł."
+                f"Bez potwierdzenia warunków spłaty kredytu pozostały dochód do opodatkowania wynosi {taxable_income:,} zł, "
+                f"a podatek wynosi {tax:,} zł."
             ).replace(",", " "),
             "housing_relief_tax",
             {
@@ -680,9 +755,11 @@ def build_housing_relief_claims(
         _claim(
             "claim_developer_deadline",
             (
-                f"Ustawowy termin wynika z art. 21 ust. 25a ustawy PIT. Upływa {facts.deadline}. "
+                f"Trzyletni termin wynika z art. 21 ust. 1 pkt 131 ustawy PIT. Upływa {facts.deadline}. "
+                "Warunek nabycia własności wynika z art. 21 ust. 25a ustawy PIT. "
+                "Własność trzeba nabyć przed upływem tego terminu. "
                 f"Skoro przeniesienie własności ma nastąpić {facts.planned_transfer_date}, "
-                "wskazany wydatek deweloperski nie kwalifikuje się; to wynik negatywny, a nie ryzyko interpretacyjne."
+                + developer_conclusion
             ),
             "housing_relief_developer_deadline",
             {
@@ -691,11 +768,11 @@ def build_housing_relief_claims(
                 "planned_transfer_date": facts.planned_transfer_date,
                 "developer_payment": facts.developer_payment,
                 "disqualified_developer_expense": facts.disqualified_developer_expense,
-                "developer_expense_qualifies": False,
-                "status": "approved_not_qualifying",
+                "developer_expense_qualifies": developer_expense_qualifies,
+                "status": developer_status,
                 "interpretive_risk_status_used": False,
             },
-            ("pit_art_21_ust_25a",),
+            ("pit_art_21_ust_1_pkt_131", "pit_art_21_ust_25a"),
             ("planned_transfer_date", "housing_expense_deadline"),
             calculation_ids=("calc_housing_relief_deadline",),
         ),
@@ -707,11 +784,11 @@ def build_housing_relief_claims(
                 "art. 21 ust. 25 pkt 2 ustawy PIT, art. 21 ust. 30 ustawy PIT, oraz przepisu szczególnego "
                 "z art. 21 ust. 30a ustawy PIT. Nie wolno jej dyskwalifikować samą regułą ogólną z art. 21 ust. 30."
             ),
-            "credit_on_sold_property_qualified",
+            "",
             {
                 "special_credit_rule_present": True,
                 "credit_repayment": facts.credit_repayment,
-                "credit_repayment_qualifies": True,
+                "credit_repayment_qualifies": None,
                 "direct_expense_income_offset_used": False,
             },
             (
@@ -719,19 +796,31 @@ def build_housing_relief_claims(
                 "pit_art_21_ust_30",
                 "pit_art_21_ust_30a",
             ),
-            ("credit_repayment",),
-            calculation_ids=("calc_housing_relief_credit_repayment",),
+            ("credit_repayment", "credit_taken_before_sale", "credit_not_previously_tax_preferenced"),
+            calculation_ids=(),
+            status="conditional_missing_fact",
             legal_mechanism="housing_relief_credit_repayment",
         ),
         _claim(
-            "claim_credit_prior_tax_relief_condition",
-            "Trzeba jeszcze potwierdzić, że spłacany kredyt ani jego odsetki nie zostały wcześniej rozliczone w innej uldze podatkowej; od tego zależy ostateczne uwzględnienie tej części wydatku.",
+            "claim_credit_qualifying_tax_scenario",
+            (
+                f"Jeżeli potwierdzisz termin zaciągnięcia kredytu i brak wcześniejszego rozliczenia go w innej uldze, "
+                f"spłata {facts.credit_repayment:,} zł zwiększy W do {facts.qualified_expenses + facts.credit_repayment:,} zł; "
+                f"dochód zwolniony wyniesie {exempt_income_if_credit_qualifies:,} zł, dochód opodatkowany "
+                f"{taxable_income_if_credit_qualifies:,} zł, a PIT {tax_if_credit_qualifies:,} zł."
+            ).replace(",", " "),
             "",
-            {"status": "conditional_missing_fact"},
-            ("pit_art_21_ust_30",),
-            ("credit_not_previously_tax_preferenced",),
+            {"status": "conditional_missing_fact", "tax": tax_if_credit_qualifies},
+            ("pit_art_21_ust_25_pkt_2", "pit_art_21_ust_30", "pit_art_21_ust_30a"),
+            ("credit_taken_before_sale", "credit_not_previously_tax_preferenced"),
             status="conditional_missing_fact",
-            legal_mechanism="",
+            legal_mechanism="housing_relief_credit_repayment",
+            calculation_ids=(
+                "calc_housing_relief_qualified_expenses_credit_scenario",
+                "calc_housing_relief_exempt_income_credit_scenario",
+                "calc_housing_relief_taxable_income_credit_scenario",
+                "calc_housing_relief_tax_credit_scenario",
+            ),
         ),
     ]
     return {item.claim_id: item for item in claims}
@@ -742,6 +831,7 @@ def run_housing_relief_pipeline(
     *,
     target_date: str = "2026-06-30",
     authority_cards: Iterable[dict[str, str]] = (),
+    judgment_lane_outcome: dict[str, object] | None = None,
 ) -> LegalPipelineResult:
     if not can_run_housing_relief_pipeline(query):
         raise ValueError("Query is not a supported housing-relief controlled case.")
@@ -771,7 +861,8 @@ def run_housing_relief_pipeline(
         registry,
         target_date=target_date,
         calculations=calculations,
-        authority_cards=authority_cards,
+        authority_cards=bind_authority_cards_to_claims(authority_cards, claims),
+        judgment_lane_outcome=judgment_lane_outcome,
     )
     rendered = render_answer(payload)
     validation = validate_rendered_answer(rendered, payload)

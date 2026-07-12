@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from decimal import Decimal
 from difflib import SequenceMatcher
 from typing import Iterable, Optional
@@ -36,6 +36,7 @@ class RendererPayload:
     provisions: tuple[dict[str, str], ...]
     calculations: tuple[dict[str, object], ...] = ()
     authority_cards: tuple[dict[str, str], ...] = ()
+    judgment_lane_outcome: dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -47,6 +48,8 @@ class RendererPayload:
         }
         if self.authority_cards:
             payload["authority_cards"] = [dict(item) for item in self.authority_cards]
+        if self.judgment_lane_outcome:
+            payload["judgment_lane_outcome"] = dict(self.judgment_lane_outcome)
         return payload
 
 
@@ -206,6 +209,7 @@ def build_renderer_payload(
     target_date: str,
     calculations: Optional[dict[str, CalculationRecord]] = None,
     authority_cards: Iterable[dict[str, str]] = (),
+    judgment_lane_outcome: Optional[dict[str, object]] = None,
 ) -> RendererPayload:
     approved: list[LegalClaim] = []
     conditional: list[LegalClaim] = []
@@ -284,7 +288,40 @@ def build_renderer_payload(
             for item in (calculations or {}).values()
         ),
         authority_cards=tuple(dict(item) for item in authority_cards),
+        judgment_lane_outcome=dict(judgment_lane_outcome or {}),
     )
+
+
+def bind_authority_cards_to_claims(
+    authority_cards: Iterable[dict[str, str]],
+    claims: dict[str, LegalClaim],
+) -> tuple[dict[str, str], ...]:
+    """Attach every authority to a concrete issue and its controlled claims."""
+    claim_ids_by_issue: dict[str, list[str]] = {}
+    for claim in claims.values():
+        claim_ids_by_issue.setdefault(claim.axis_id, []).append(claim.claim_id)
+    default_issue = next(iter(claim_ids_by_issue), "general")
+    bound: list[dict[str, str]] = []
+    for raw_card in authority_cards:
+        card = dict(raw_card)
+        issue_id = card.get("issue_id") or default_issue
+        claim_ids = claim_ids_by_issue.get(issue_id) or claim_ids_by_issue.get(default_issue, [])
+        card["issue_id"] = issue_id
+        card["claim_ids"] = ", ".join(claim_ids)
+        # Keep technical claim IDs in the trace payload, but never expose them in
+        # the customer-facing answer.  Their short conclusions are the readable
+        # explanation of what the authority supports.
+        claim_labels = [
+            claims[claim_id].text.split(".", 1)[0].strip()
+            for claim_id in claim_ids
+            if claim_id in claims
+        ]
+        card["claim_labels"] = "; ".join(label for label in claim_labels if label)
+        card.setdefault("holding", "Brak wystarczającego fragmentu do odtworzenia tezy rozstrzygnięcia.")
+        card.setdefault("similarity_reason", "Zwrócono ją dla tego samego zagadnienia podatkowego.")
+        card.setdefault("distinguishing_facts", "Porównaj fakty wskazane w pytaniu ze stanem faktycznym źródła.")
+        bound.append(card)
+    return tuple(bound)
 
 
 def _references_for_claim(claim: LegalClaim, provision_map: dict[str, str]) -> str:
@@ -310,15 +347,44 @@ def _thesis_claims(payload: RendererPayload) -> list[LegalClaim]:
 
 def _render_calculation_result(claim: LegalClaim, calculation_map: dict[str, dict[str, object]]) -> str:
     calculation_ids = tuple(dict.fromkeys((*claim.calculation_ids, *((claim.calculation_id,) if claim.calculation_id else ()))))
-    values = [calculation_map[item].get("result") for item in calculation_ids if item in calculation_map]
-    numeric_values = [value for value in values if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)]
-    if not numeric_values:
-        return ""
-    rendered = ", ".join(
-        f"{int(value):,} zł".replace(",", " ") if isinstance(value, int) else str(value)
-        for value in numeric_values
-    )
-    return f" Zweryfikowane obliczenie daje: {rendered}."
+    details: list[str] = []
+
+    def money(value: object) -> str:
+        return f"{int(value):,} zł".replace(",", " ") if isinstance(value, int) else str(value)
+
+    for calculation_id in calculation_ids:
+        calculation = calculation_map.get(calculation_id)
+        if calculation is None:
+            continue
+        operation = str(calculation.get("operation") or "")
+        inputs = calculation.get("inputs") or {}
+        result = calculation.get("result")
+        if not isinstance(inputs, dict):
+            continue
+        if operation == "housing_relief_formula":
+            details.append(
+                "Wzór D × W / P: "
+                f"D = {money(inputs.get('income'))}, W = {money(inputs.get('qualified_expenses'))}, "
+                f"P = {money(inputs.get('revenue'))}; wynik = {money(result)}."
+            )
+        elif operation == "subtract":
+            details.append(
+                f"Dochód opodatkowany: {money(inputs.get('income'))} − {money(inputs.get('exempt_income'))} = {money(result)}."
+            )
+        elif operation == "multiply":
+            rate = inputs.get("rate")
+            rate_text = f"{Decimal(str(rate)) * 100:g}%" if rate is not None else "stawka ustawowa"
+            details.append(
+                f"PIT: {money(inputs.get('taxable_income'))} × {rate_text} = {money(result)}."
+            )
+        elif operation == "conditional_add":
+            details.append(
+                f"Scenariusz z kredytem: W = {money(inputs.get('baseline_qualified_expenses'))} + "
+                f"{money(inputs.get('credit_repayment'))} = {money(result)}."
+            )
+        elif isinstance(result, (int, float, Decimal)) and not isinstance(result, bool):
+            details.append(f"Wynik obliczenia: {money(result)}.")
+    return (" " + " ".join(details)) if details else ""
 
 
 def _analysis_explanation(claim: LegalClaim) -> str:
@@ -366,10 +432,28 @@ def render_answer(payload: RendererPayload, *, compact: bool = False) -> str:
             analysis_parts.extend(lines)
     sources = [f"- {item['display_reference']}." for item in payload.provisions]
     sources.extend(
-        f"- [{item.get('source_type') or 'authority'}] {item.get('label') or 'brak oznaczenia'}"
-        + (f" — {item.get('source_url')}" if item.get("source_url") else ".")
+        f"- [{item.get('source_type') or 'authority'}] {item.get('label') or 'brak oznaczenia'}; "
+        f"zagadnienie: {item.get('issue_id') or 'brak'}; powiązane wnioski: {item.get('claim_labels') or 'brak'}. "
+        f"Wniosek źródła: {item.get('holding') or 'brak'}. "
+        f"Podobieństwo: {item.get('similarity_reason') or 'brak'}. "
+        f"Różnice do sprawdzenia: {item.get('distinguishing_facts') or 'brak'}."
+        + (f" Link: {item.get('source_url')}" if item.get("source_url") else "")
         for item in payload.authority_cards
     )
+    if payload.judgment_lane_outcome:
+        candidate_count = int(payload.judgment_lane_outcome.get("candidate_count") or 0)
+        selected_count = int(payload.judgment_lane_outcome.get("selected_count") or 0)
+        empty_reason = str(payload.judgment_lane_outcome.get("empty_result_reason") or "")
+        reason_text = {
+            "no_candidates_from_corpus": "brak kandydatów w korpusie",
+            "candidates_not_selected": "żaden kandydat nie spełnił kryteriów wyboru",
+            "retrieval_error": "wyszukiwanie nie zakończyło się poprawnie",
+        }.get(empty_reason, empty_reason)
+        sources.append(
+            "- Orzeczenia: wyszukiwanie wykonane; "
+            f"kandydaci: {candidate_count}; wybrane: {selected_count}."
+            + (f" Powód braku wyboru: {reason_text}." if reason_text else "")
+        )
     risks = [f"- {claim.text}" for claim in payload.conditional_claims] or [
         "- Brak warunkowych twierdzeń wymagających dodatkowego faktu."
     ]
@@ -518,6 +602,31 @@ def validate_rendered_answer(
     )
     stripped = answer.removesuffix(END_MARKER).rstrip()
     truncated = not marker or (bool(stripped) and stripped[-1] not in ".!?)]")
+    allowed_claim_ids = set(payload.answer_plan.allowed_claim_ids)
+    unbound_authorities: list[str] = []
+    for authority in payload.authority_cards:
+        claim_ids = [
+            item.strip()
+            for item in str(authority.get("claim_ids") or "").split(",")
+            if item.strip()
+        ]
+        if (
+            not authority.get("issue_id")
+            or not claim_ids
+            or any(claim_id not in allowed_claim_ids for claim_id in claim_ids)
+            or not authority.get("holding")
+            or not authority.get("similarity_reason")
+            or not authority.get("distinguishing_facts")
+        ):
+            unbound_authorities.append(str(authority.get("label") or "unknown"))
+    exposed_internal_ids = tuple(
+        identifier
+        for identifier in (
+            *payload.answer_plan.allowed_claim_ids,
+            *(str(item.get("calculation_id") or "") for item in payload.calculations),
+        )
+        if identifier and identifier in answer
+    )
     errors: list[str] = []
     if not marker:
         errors.append("end_marker_missing")
@@ -547,8 +656,10 @@ def validate_rendered_answer(
         errors.append("sources_missing_exact_references")
     if not tables_closed:
         errors.append("tables_not_closed")
-    if INTERNAL_RENDER_MARKER_RE.search(answer):
+    if INTERNAL_RENDER_MARKER_RE.search(answer) or exposed_internal_ids:
         errors.append("internal_metadata_exposed")
+    if unbound_authorities:
+        errors.append("authority_card_unbound_or_incomplete")
     return RenderValidation(
         passed=not errors,
         end_marker_present=marker,
@@ -585,6 +696,7 @@ def run_legal_pipeline(
     *,
     target_date: str = "2026-06-30",
     authority_cards: Iterable[dict[str, str]] = (),
+    judgment_lane_outcome: Optional[dict[str, object]] = None,
 ) -> LegalPipelineResult:
     if not is_mixed_invoice_query(query):
         raise ValueError("No controlled pipeline is registered for this query.")
@@ -605,7 +717,8 @@ def run_legal_pipeline(
         registry,
         target_date=target_date,
         calculations=calculations,
-        authority_cards=authority_cards,
+        authority_cards=bind_authority_cards_to_claims(authority_cards, claims),
+        judgment_lane_outcome=judgment_lane_outcome,
     )
     answer = render_answer(payload)
     validation = validate_rendered_answer(answer, payload)

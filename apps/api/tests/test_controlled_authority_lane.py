@@ -34,7 +34,19 @@ class ControlledAuthorityLaneTests(unittest.TestCase):
         self.assertEqual(search.call_count, 2)
         self.assertTrue(outcome["authority_lane_executed"])
         self.assertTrue(outcome["authority_candidates_count_recorded"])
+        self.assertTrue(outcome["judgment_lane_executed"])
+        self.assertTrue(outcome["judgment_candidate_count_recorded"])
+        self.assertTrue(outcome["judgment_selected_count_recorded"])
+        self.assertTrue(outcome["judgment_empty_result_reason_recorded"])
         self.assertEqual(outcome["candidate_counts"], {"interpretation": 1, "judgment": 0})
         self.assertFalse(outcome["empty_authority_result_explained"])
+        self.assertEqual(
+            outcome["judgment_lane"],
+            {
+                "executed": True,
+                "candidate_count": 0,
+                "selected_count": 0,
+                "empty_result_reason": "no_candidates_from_corpus",
+            },
+        )
         self.assertEqual(cards[0]["label"], "0115-KDIT3.4011.1.2026.1.AK")
-

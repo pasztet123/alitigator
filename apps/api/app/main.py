@@ -120,7 +120,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "1.1.3"
+API_VERSION = "1.1.4"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -205,13 +205,34 @@ def retrieve_controlled_authority_lane(query: str) -> tuple[list[dict[str, str]]
         if not label or key in seen:
             continue
         seen.add(key)
+        text = re.sub(r"\s+", " ", chunk.chunk_text).strip()
+        holding = next(
+            (
+                sentence.strip()
+                for sentence in re.split(r"(?<=[.!?])\s+", text)
+                if re.search(r"\b(uznano|stwierdzono|stanowisko|przychód|wydatek|zwolnien|podatek)\b", sentence, re.I)
+            ),
+            text[:360],
+        ) or "Brak fragmentu pozwalającego odtworzyć holding."
         cards.append(
             {
                 "source_type": chunk.source_type,
                 "label": label,
                 "source_url": chunk.source_url or "",
+                "holding": holding[:420],
+                "similarity_reason": "Źródło zostało znalezione dla tego samego mechanizmu i słów kluczowych zapytania.",
+                "distinguishing_facts": "Porównaj datę i cel wydatku, status nieruchomości oraz terminy ze stanem faktycznym źródła.",
             }
         )
+    judgment_candidates = counts.get("judgment", 0)
+    judgment_selected = sum(1 for card in cards if card.get("source_type") == "judgment")
+    judgment_empty_reason = (
+        "retrieval_error" if any(error.startswith("judgment:") for error in errors)
+        else "no_candidates_from_corpus" if judgment_candidates == 0
+        else "candidates_not_selected"
+        if judgment_selected == 0
+        else ""
+    )
     outcome: dict[str, object] = {
         "authority_lane_executed": True,
         "authority_candidates_count_recorded": True,
@@ -220,6 +241,16 @@ def retrieve_controlled_authority_lane(query: str) -> tuple[list[dict[str, str]]
         "empty_authority_result_explained": not cards,
         "outcome": "no_matching_authorities" if not cards else "authorities_found",
         "errors": errors,
+        "judgment_lane_executed": True,
+        "judgment_candidate_count_recorded": True,
+        "judgment_selected_count_recorded": True,
+        "judgment_empty_result_reason_recorded": True,
+        "judgment_lane": {
+            "executed": True,
+            "candidate_count": judgment_candidates,
+            "selected_count": judgment_selected,
+            "empty_result_reason": judgment_empty_reason,
+        },
     }
     return cards, outcome
 
@@ -3352,6 +3383,7 @@ async def chat(
             controlled_result = run_legal_pipeline(
                 effective_user_prompt,
                 authority_cards=authority_cards,
+                judgment_lane_outcome=dict(authority_outcome["judgment_lane"]),
             )
         except Exception as exc:
             logger.exception("Mixed-invoice controlled pipeline failed")
@@ -3417,6 +3449,7 @@ async def chat(
             controlled_result = run_housing_relief_pipeline(
                 effective_user_prompt,
                 authority_cards=authority_cards,
+                judgment_lane_outcome=dict(authority_outcome["judgment_lane"]),
             )
         except Exception as exc:
             logger.exception("Housing-relief controlled pipeline failed")

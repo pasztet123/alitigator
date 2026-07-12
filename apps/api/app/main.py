@@ -1317,26 +1317,29 @@ def complete_empty_sources_section(reply: str, *, retrieval_citations: str) -> s
     502 because its mandatory Sources section contains prose such as "brak"
     despite the request having verified retrieval results available.
     """
-    if not retrieval_citations:
-        return reply
-
     structured = parse_structured_reply(strip_render_completion_marker(reply))
     source_content = next(
         (section.content for section in (structured.sections if structured else []) if section.title == "Źródła"),
-        "",
+        None,
     )
-    if not source_content or re.search(
+    if source_content is None or re.search(
         r"(?:art\.|Dz\.|DU/|\[provision_id:|source_document_id|https?://)",
         source_content,
         re.IGNORECASE,
     ):
         return reply
 
-    supplement = (
-        "\n\nZweryfikowane źródła z retrievalu (uzupełnione automatycznie, "
-        "bo model nie podał referencji):\n"
-        f"{retrieval_citations}"
-    )
+    if retrieval_citations:
+        supplement = (
+            "\n\nZweryfikowane źródła z retrievalu (uzupełnione automatycznie, "
+            "bo model nie podał referencji):\n"
+            f"{retrieval_citations}"
+        )
+    else:
+        supplement = (
+            "\n\nNie znaleziono zweryfikowanych źródeł w retrievalu. "
+            "Wnioski wymagają potwierdzenia w aktualnych źródłach prawa."
+        )
     section_pattern = re.compile(
         r"(?P<heading>(?:^|\n\n)Źródła\n)(?P<content>.*?)(?=\n\n(?:Ryzyka i luki|Źródła zwrócone przez retrieval|Źródła użyte przez retrieval)\n|\Z)",
         re.DOTALL,
@@ -1368,11 +1371,17 @@ def validate_final_output(
         for section in expected_sections
         if section in rendered_section_titles and not section_content_by_title.get(section)
     ]
+    sources_content = section_content_by_title.get("Źródła", "")
     sources_without_sources = (
         "Źródła" in rendered_section_titles
         and not re.search(
             r"(?:art\.|Dz\.|DU/|\[provision_id:|source_document_id|https?://)",
-            section_content_by_title.get("Źródła", ""),
+            sources_content,
+            re.IGNORECASE,
+        )
+        and not re.search(
+            r"nie znaleziono zweryfikowanych źródeł w retrievalu",
+            sources_content,
             re.IGNORECASE,
         )
     )

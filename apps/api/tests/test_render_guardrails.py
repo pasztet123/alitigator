@@ -149,12 +149,22 @@ class ConditionalAnswerGuardrailTests(unittest.TestCase):
         self.assertFalse(validation["sources_without_sources"])
         self.assertIn("source_document_id: vat_2025", completed)
 
-    def test_empty_sources_section_is_not_fabricated_without_retrieval(self) -> None:
-        reply = "Źródła\nBrak zatwierdzonego źródła.\n\nRyzyka i luki\nBrak."
-        self.assertEqual(
-            complete_empty_sources_section(reply, retrieval_citations=""),
-            reply,
+    def test_empty_sources_section_declares_missing_retrieval_sources(self) -> None:
+        reply = (
+            "Teza\nWniosek.\n\n"
+            "Analiza\nAnaliza.\n\n"
+            "Źródła\nBrak zatwierdzonego źródła.\n\n"
+            "Ryzyka i luki\nBrak.\n\n"
+            f"{RENDER_COMPLETION_MARKER}"
         )
+        completed = complete_empty_sources_section(reply, retrieval_citations="")
+        validation = validate_final_output(
+            completed,
+            axis_coverage=[],
+            expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
+        )
+        self.assertFalse(validation["sources_without_sources"])
+        self.assertIn("Nie znaleziono zweryfikowanych źródeł", completed)
 
     def test_final_validator_rejects_empty_legal_reference_slots(self) -> None:
         reply = (

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare legacy retrieval with legal_rag_v2 on development cases only."""
+"""Compare legacy with Model → RAG → Model on development cases only."""
 
 from __future__ import annotations
 
@@ -13,11 +13,16 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 from uuid import uuid4
 
-from app.legal_rag_v2.pipeline import LegalRagV2Config, create_default_pipeline
+from dotenv import load_dotenv
+
+from app.legal_rag_v2.pipeline import LegalRagV2Config
+from app.legal_research.pipeline import create_default_pipeline
 from app.rag import search_chat_chunks
 
 
 VARIANTS = ("A", "B", "C")
+
+load_dotenv()
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--artifact-root",
         type=Path,
-        default=Path("artifacts/legal_rag_v2/ab"),
+        default=Path("artifacts/model_rag_model/ab"),
     )
     parser.add_argument("--report", type=Path)
     return parser.parse_args()
@@ -41,7 +46,7 @@ def parse_args() -> argparse.Namespace:
 
 def assert_dev_cases(path: Path) -> None:
     if "holdout" in str(path).casefold():
-        raise ValueError("Holdout inputs are forbidden in the legal_rag_v2 development runner")
+        raise ValueError("Holdout inputs are forbidden in the model_rag_model development runner")
 
 
 def load_cases(path: Path) -> list[dict[str, Any]]:
@@ -181,7 +186,7 @@ async def run_v2(
     failure = classify_failure(result, answer_status)
     return {
         "variant": variant,
-        "name": "legal_rag_v2" if variant == "B" else "legal_rag_v2_with_fallback",
+        "name": "model_rag_model" if variant == "B" else "model_rag_model_with_fallback",
         "run_id": run_id,
         "retrieval": {
             "authority_recall_at_5": recall_at(expected_signatures, signatures, 5),
@@ -227,7 +232,7 @@ def classify_failure(result: Any, answer_status: str) -> Optional[str]:
     if not result.legal_research_plan.issues:
         return "planner_error"
     if any(not bundle.controlling_provisions for bundle in result.evidence_bundles):
-        return "primary_retrieval_error"
+        return "primary_selection_error"
     for validation in result.validation:
         if validation.passed:
             continue

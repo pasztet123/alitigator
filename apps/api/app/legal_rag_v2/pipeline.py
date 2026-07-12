@@ -140,7 +140,7 @@ class AuthorityExtractor(Protocol):
 
 @dataclass(frozen=True)
 class LegalRagV2Config:
-    artifact_root: Path = Path("artifacts/legal_rag_v2")
+    artifact_root: Path = Path("artifacts/model_rag_model")
     planner_model: str = "gpt-5.6-terra"
     authority_extractor_model: str = "gpt-5.6-terra"
     synthesis_model: str = "gpt-5.6-terra"
@@ -156,11 +156,15 @@ class LegalRagV2Config:
         model_config = get_model_gateway_config()
         return cls(
             artifact_root=Path(
-                os.getenv("LEGAL_RAG_V2_ARTIFACT_ROOT", "artifacts/legal_rag_v2")
+                os.getenv(
+                    "MODEL_RAG_MODEL_ARTIFACT_ROOT",
+                    os.getenv("LEGAL_RAG_V2_ARTIFACT_ROOT", "artifacts/model_rag_model"),
+                )
             ),
             planner_model=os.getenv("LEGAL_PLANNER_MODEL", model_config.legal_planner_model),
             authority_extractor_model=os.getenv(
-                "AUTHORITY_EXTRACTOR_MODEL", model_config.authority_extractor_model
+                "EVIDENCE_ANALYST_MODEL",
+                os.getenv("AUTHORITY_EXTRACTOR_MODEL", model_config.authority_extractor_model),
             ),
             synthesis_model=os.getenv(
                 "LEGAL_SYNTHESIS_MODEL", model_config.legal_synthesis_model
@@ -172,7 +176,8 @@ class LegalRagV2Config:
                 os.getenv("LEGAL_RAG_V2_PLANNER_CONFIDENCE_THRESHOLD", "0.55")
             ),
             allow_legacy_fallback=_env_bool(
-                "LEGAL_RAG_V2_ALLOW_LEGACY_FALLBACK", True
+                "LEGAL_ALLOW_LEGACY_FALLBACK",
+                _env_bool("LEGAL_RAG_V2_ALLOW_LEGACY_FALLBACK", True),
             ),
             primary_candidates_per_issue=max(
                 1, int(os.getenv("LEGAL_RAG_V2_PRIMARY_LIMIT_PER_ISSUE", "8"))
@@ -224,7 +229,7 @@ class LegalRagV2Pipeline:
         target_date: Optional[str] = None,
         force_planner_fallback: bool = False,
     ) -> PipelineResult:
-        if mode not in {"legal_rag_v2", "shadow"}:
+        if mode not in {"model_rag_model", "legal_rag_v2", "shadow"}:
             raise ValueError(f"Unsupported v2 run mode: {mode}")
         if not question.strip():
             raise ValueError("question cannot be empty")
@@ -255,13 +260,19 @@ class LegalRagV2Pipeline:
                 "retrieval_mode": "issue_scoped_bidirectional",
                 "rag_backend": type(self.retriever.primary_lane.backend).__name__,
                 "planner_mode": "model_first",
+                "planner_provider": get_model_gateway_config().provider,
+                "planner_model": self.config.planner_model,
                 "authority_extractor_mode": type(self.authority_extractor).__name__ if self.authority_extractor else "unavailable",
+                "evidence_provider": get_model_gateway_config().provider,
+                "evidence_model": self.config.authority_extractor_model,
                 "answer_provider": type(self.gateway).__name__,
                 "answer_model": self.config.answer_writer_model,
+                "writer_provider": get_model_gateway_config().provider,
+                "writer_model": self.config.answer_writer_model,
                 "provider": get_model_gateway_config().provider,
                 "model": self.config.answer_writer_model,
                 "git_commit": _git_commit(),
-                "api_version": os.getenv("ALITIGATOR_API_VERSION", "1.1.6"),
+                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.0"),
                 "controlled_pipeline_used": False,
                 "fallbacks_used": [],
             },
@@ -297,6 +308,7 @@ class LegalRagV2Pipeline:
         trace.write_json("research_plan.json", plan)
         trace.write_json("clarification.json", plan.clarification)
         trace.write_json("fallback_trace.json", planner_outcome.fallback_trace)
+        trace.write_json("planner_fallback.json", planner_outcome.fallback_trace)
         trace.write_json(
             "runtime.json",
             {
@@ -304,13 +316,19 @@ class LegalRagV2Pipeline:
                 "retrieval_mode": "issue_scoped_bidirectional",
                 "rag_backend": type(self.retriever.primary_lane.backend).__name__,
                 "planner_mode": "model_first",
+                "planner_provider": get_model_gateway_config().provider,
+                "planner_model": self.config.planner_model,
                 "authority_extractor_mode": type(self.authority_extractor).__name__ if self.authority_extractor else "unavailable",
+                "evidence_provider": get_model_gateway_config().provider,
+                "evidence_model": self.config.authority_extractor_model,
                 "answer_provider": type(self.gateway).__name__,
                 "answer_model": self.config.answer_writer_model,
+                "writer_provider": get_model_gateway_config().provider,
+                "writer_model": self.config.answer_writer_model,
                 "provider": get_model_gateway_config().provider,
                 "model": self.config.answer_writer_model,
                 "git_commit": _git_commit(),
-                "api_version": os.getenv("ALITIGATOR_API_VERSION", "1.1.6"),
+                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.0"),
                 "controlled_pipeline_used": False,
                 "fallbacks_used": ([planner_outcome.fallback_trace.fallback_reason] if planner_outcome.fallback_trace.fallback_used else []),
             },
@@ -331,6 +349,7 @@ class LegalRagV2Pipeline:
                 plan = augmented.plan
                 trace.write_json("legal_research_plan.json", plan)
                 trace.write_json("fallback_trace.json", augmented.fallback_trace)
+                trace.write_json("planner_fallback.json", augmented.fallback_trace)
                 retrieval = await self.retriever.retrieve(plan)
                 trace.write_json(
                     "runtime.json",
@@ -339,13 +358,19 @@ class LegalRagV2Pipeline:
                         "retrieval_mode": "issue_scoped_bidirectional",
                         "rag_backend": type(self.retriever.primary_lane.backend).__name__,
                         "planner_mode": "model_first",
+                        "planner_provider": get_model_gateway_config().provider,
+                        "planner_model": self.config.planner_model,
                         "authority_extractor_mode": type(self.authority_extractor).__name__ if self.authority_extractor else "unavailable",
+                        "evidence_provider": get_model_gateway_config().provider,
+                        "evidence_model": self.config.authority_extractor_model,
                         "answer_provider": type(self.gateway).__name__,
                         "answer_model": self.config.answer_writer_model,
+                        "writer_provider": get_model_gateway_config().provider,
+                        "writer_model": self.config.answer_writer_model,
                         "provider": get_model_gateway_config().provider,
                         "model": self.config.answer_writer_model,
                         "git_commit": _git_commit(),
-                        "api_version": os.getenv("ALITIGATOR_API_VERSION", "1.1.6"),
+                        "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.0"),
                         "controlled_pipeline_used": False,
                         "fallbacks_used": [augmented.fallback_trace.fallback_reason],
                     },
@@ -356,6 +381,16 @@ class LegalRagV2Pipeline:
             "backreferences.json",
             [item for item in retrieval.trace if "backreference" in str(item.get("event", "")) or "primary_to_authority" in str(item.get("event", ""))],
         )
+        second_pass_events = [
+            item for item in retrieval.trace
+            if item.get("event") in {"authority_backreference_retry", "primary_to_authority_retry"}
+        ]
+        trace.write_json("second_pass_queries.json", second_pass_events)
+        trace.write_json(
+            "second_pass_candidates.json",
+            [item for item in second_pass_events if item.get("executed")],
+        )
+        trace.write_json("missing_evidence_requests.json", [])
 
         stage = time.monotonic()
         authority_cards, authority_trace = await self._extract_authorities(retrieval)
@@ -363,6 +398,20 @@ class LegalRagV2Pipeline:
         trace.write_json(
             "authority_cards.json",
             {"by_issue": authority_cards, "extraction_trace": authority_trace},
+        )
+        trace.write_json("legal_rules.json", [])
+        trace.write_json(
+            "wrong_neighbor_rejections.json",
+            [
+                {
+                    "issue_id": lane.issue_id,
+                    "document_id": candidate.document_id,
+                    "reasons": list(candidate.negative_reasons),
+                }
+                for lane in retrieval.authorities
+                for candidate in lane.candidates
+                if any("negative_constraint" in reason for reason in candidate.negative_reasons)
+            ],
         )
 
         stage = time.monotonic()
@@ -381,6 +430,24 @@ class LegalRagV2Pipeline:
             provision_refs,
         )
         trace.write_json("evidence_bundles.json", bundles)
+        evidence_bindings = [
+            {
+                "source_id": authority.document_id,
+                "target_id": bundle.issue_id,
+                "target_type": "issue",
+                "relation": "supports",
+                "score": authority.extraction_confidence,
+                "reason": "selected_for_issue_after_legal_reranking",
+                "supporting_span_ids": [
+                    f"{span.document_id}:{span.start}:{span.end}"
+                    for _, spans in authority.source_spans
+                    for span in spans
+                ],
+            }
+            for bundle in bundles
+            for authority in bundle.supporting_authorities
+        ]
+        trace.write_json("evidence_bindings.json", evidence_bindings)
         trace.write_json(
             "issue_coverage.json",
             [
@@ -399,6 +466,7 @@ class LegalRagV2Pipeline:
             ],
         )
         trace.write_json("provision_lineage.json", _provision_lineage(retrieval, bundles))
+        trace.write_json("authority_lineage.json", _authority_lineage(retrieval, bundles))
 
         calculations = self.calculation_engine.calculate(plan, bundles)
         trace.write_json("calculations.json", calculations)
@@ -413,6 +481,27 @@ class LegalRagV2Pipeline:
         timings["claim_synthesis"] = _elapsed_ms(stage)
         validations.append(synthesis_validation)
         trace.write_json("claims.json", claims)
+        claim_bindings = [
+            {
+                "source_id": authority_id,
+                "target_id": claim.claim_id,
+                "target_type": "claim",
+                "relation": (
+                    "contradicts"
+                    if authority_id in claim.contrary_authority_ids
+                    else "supports"
+                ),
+                "score": claim.confidence,
+                "reason": "authority_selected_by_structured_claim_synthesis_and_validated_within_issue_bundle",
+                "supporting_span_ids": [],
+            }
+            for claim in claims
+            for authority_id in (
+                *claim.supporting_authority_ids,
+                *claim.contrary_authority_ids,
+            )
+        ]
+        trace.write_json("evidence_bindings.json", [*evidence_bindings, *claim_bindings])
 
         answer_plan = _build_answer_plan(plan, claims, calculations)
         trace.write_json("answer_plan.json", answer_plan)
@@ -451,6 +540,10 @@ class LegalRagV2Pipeline:
                 final_answer=final_answer,
             ),
         )
+        trace.write_json(
+            "authority_lineage.json",
+            _authority_lineage(retrieval, bundles, claims=claims, final_answer=final_answer),
+        )
         trace.write_json("validation.json", validations)
         timings["total"] = _elapsed_ms(started_total)
         trace.write_json("timings.json", timings)
@@ -459,6 +552,13 @@ class LegalRagV2Pipeline:
             {
                 "status": "usage_not_exposed_by_gateway_contract",
                 "total_cost_usd": None,
+            },
+        )
+        trace.write_json(
+            "token_usage.json",
+            {
+                "status": "usage_not_exposed_by_gateway_contract",
+                "stages": [],
             },
         )
         trace.write_json(
@@ -478,6 +578,28 @@ class LegalRagV2Pipeline:
                 "secondary_sources_discarded_when_primary_incomplete": False,
                 "authority_backreference_retry_executed": any(item.get("event") == "authority_backreference_retry" and item.get("executed") for item in retrieval.trace),
                 "partial_primary_candidates_preserved": True,
+                "wrong_neighbor_rate": (
+                    sum(
+                        1 for lane in retrieval.authorities for candidate in lane.candidates
+                        if any("negative_constraint" in reason for reason in candidate.negative_reasons)
+                    )
+                    / max(1, sum(len(lane.candidates) for lane in retrieval.authorities))
+                ),
+                "authority_abstention_rate": (
+                    1.0
+                    - sum(len(cards) for cards in authority_cards.values())
+                    / max(1, sum(len(lane.candidates) for lane in retrieval.authorities))
+                ),
+                "second_retrieval_rate": float(
+                    any(
+                        item.get("executed")
+                        for item in retrieval.trace
+                        if item.get("event") in {"authority_backreference_retry", "primary_to_authority_retry"}
+                    )
+                ),
+                "fallback_rate": float(planner_outcome.fallback_trace.fallback_used),
+                "latency_ms": timings,
+                "cost_per_request_usd": None,
             },
         )
 
@@ -550,6 +672,35 @@ class LegalRagV2Pipeline:
                         for candidate in lane.candidates
                     ],
                     "trace": list(lane.trace),
+                }
+                for lane in (*retrieval.primary_law, *retrieval.authorities)
+            ],
+        )
+        trace.write_json(
+            "first_pass_reranking.json",
+            [
+                {
+                    "issue_id": lane.issue_id,
+                    "lane": lane.lane,
+                    "candidate_count_before_rerank": lane.candidate_count_before_rerank,
+                    "candidates": [
+                        {
+                            "document_id": candidate.document_id,
+                            "issue_id": lane.issue_id,
+                            "final_score": candidate.score,
+                            "issue_match": candidate.component_scores.get("tax_domain", 0.0),
+                            "material_fact_match": candidate.component_scores.get("positive_constraints", 0.0),
+                            "provision_match": candidate.component_scores.get("provision_concepts", 0.0),
+                            "role_match": candidate.component_scores.get("taxpayer_role", 0.0),
+                            "transaction_match": candidate.component_scores.get("transaction", 0.0),
+                            "temporal_match": candidate.component_scores.get("temporal", 0.0),
+                            "holding_relevance": candidate.component_scores.get("holding_relevance", 0.0),
+                            "wrong_neighbor_penalty": abs(candidate.component_scores.get("negative_constraint_penalty", 0.0)),
+                            "positive_reasons": list(candidate.positive_reasons),
+                            "negative_reasons": list(candidate.negative_reasons),
+                        }
+                        for candidate in lane.candidates
+                    ],
                 }
                 for lane in (*retrieval.primary_law, *retrieval.authorities)
             ],
@@ -742,7 +893,7 @@ def _open_embedding_index_if_available() -> Optional[VersionedEmbeddingIndex]:
     path = Path(
         os.getenv(
             "EMBEDDING_INDEX_PATH",
-            "artifacts/legal_rag_v2/embedding_index.sqlite3",
+            "artifacts/model_rag_model/embedding_index.sqlite3",
         )
     )
     if not path.exists():
@@ -1110,6 +1261,61 @@ def _provision_lineage(
             ),
         }
         for provision_id in sorted(candidate_ids)
+    ]
+
+
+def _authority_lineage(
+    retrieval: LegalRetrievalResult,
+    bundles: list[EvidenceBundle],
+    *,
+    claims: Optional[list[LegalClaim]] = None,
+    final_answer: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Track the first stage at which an authority leaves the evidence chain."""
+    candidate_ids = {
+        candidate.document_id
+        for lane in retrieval.authorities
+        for candidate in lane.candidates
+    }
+    selected_ids = {
+        authority.document_id
+        for bundle in bundles
+        for authority in (
+            *bundle.supporting_authorities,
+            *bundle.contrary_authorities,
+            *bundle.historical_authorities,
+        )
+    }
+    claim_ids = {
+        authority_id
+        for claim in claims or []
+        for authority_id in (
+            *claim.supporting_authority_ids,
+            *claim.contrary_authority_ids,
+        )
+    }
+    return [
+        {
+            "authority_id": authority_id,
+            "candidate_stage": True,
+            "selected_stage": authority_id in selected_ids,
+            "evidence_bundle_stage": authority_id in selected_ids,
+            "claim_stage": authority_id in claim_ids if claims is not None else None,
+            "writer_payload_stage": authority_id in claim_ids if claims is not None else None,
+            "final_answer_stage": (
+                authority_id in claim_ids and bool(final_answer)
+                if claims is not None
+                else None
+            ),
+            "drop_reason": (
+                None
+                if authority_id in selected_ids and (claims is None or authority_id in claim_ids)
+                else "not_selected_after_reranking"
+                if authority_id not in selected_ids
+                else "not_bound_to_approved_claim"
+            ),
+        }
+        for authority_id in sorted(candidate_ids)
     ]
 
 

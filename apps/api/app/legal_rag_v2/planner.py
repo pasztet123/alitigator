@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from app.model_gateway import (
     ModelGateway,
+    ModelGatewayError,
     ModelSchemaError,
     ModelTechnicalError,
     ModelTransportError,
@@ -137,10 +138,33 @@ def validate_plan_grounding(plan: LegalResearchPlan, question: str) -> LegalRese
                     f"explicit fact {fact.fact_id!r} is not supported by its source span"
                 )
 
+    # Keep the public Model→RAG→Model field names and the first v2 field names
+    # losslessly synchronized while the additive migration is in progress.
+    payload = plan.model_dump(mode="python")
+    for issue in payload.get("issues", []):
+        issue["possible_provision_concepts"] = _dedupe([
+            *issue.get("possible_provision_concepts", []),
+            *issue.get("possible_legal_concepts", []),
+            *issue.get("possible_provision_hints", []),
+        ])
+        issue["positive_fact_constraints"] = _dedupe([
+            *issue.get("positive_fact_constraints", []),
+            *issue.get("positive_constraints", []),
+        ])
+        issue["negative_fact_constraints"] = _dedupe([
+            *issue.get("negative_fact_constraints", []),
+            *issue.get("negative_constraints", []),
+        ])
+    public_questions = payload.get("clarification_questions", [])[:3]
+    if public_questions:
+        payload["clarification"] = {"should_ask": True, "questions": public_questions}
+        payload["should_ask_clarification"] = True
+    elif payload.get("clarification", {}).get("questions"):
+        payload["clarification_questions"] = payload["clarification"]["questions"][:3]
+        payload["should_ask_clarification"] = bool(payload["clarification_questions"])
+
     # The input is authoritative. A provider cannot rewrite the question.
-    return LegalResearchPlan.model_validate(
-        {**plan.model_dump(mode="python"), "user_query": question}
-    )
+    return LegalResearchPlan.model_validate({**payload, "user_query": question})
 
 
 class LegacyFallbackPlanner:
@@ -484,6 +508,17 @@ class LegalQueryPlanner:
             return self._fallback(
                 question,
                 reason="invalid_schema",
+                target_date=target_date,
+                primary_error=self._safe_error(exc),
+                primary_succeeded=False,
+            )
+        except ModelGatewayError as exc:
+            # Provider request failures (for example an unsupported fallback
+            # model/schema combination) are technical planning failures.  They
+            # may activate the traced rule planner, never a guessed answer.
+            return self._fallback(
+                question,
+                reason="provider_unavailable",
                 target_date=target_date,
                 primary_error=self._safe_error(exc),
                 primary_succeeded=False,

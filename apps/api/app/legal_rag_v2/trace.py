@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from .schemas import FallbackTrace
 
 
-DEFAULT_TRACE_ROOT = Path("artifacts/legal_rag_v2")
+DEFAULT_TRACE_ROOT = Path("artifacts/model_rag_model")
 
 REQUIRED_ARTIFACTS: tuple[str, ...] = (
     "runtime.json",
@@ -28,17 +28,26 @@ REQUIRED_ARTIFACTS: tuple[str, ...] = (
     "research_plan.json",
     "clarification.json",
     "fallback_trace.json",
+    "planner_fallback.json",
     "primary_queries.json",
     "primary_candidates.json",
     "authority_queries.json",
     "authority_candidates.json",
     "authority_cards.json",
+    "first_pass_reranking.json",
+    "legal_rules.json",
+    "wrong_neighbor_rejections.json",
+    "evidence_bindings.json",
+    "missing_evidence_requests.json",
+    "second_pass_queries.json",
+    "second_pass_candidates.json",
     "backreferences.json",
     "reranking.json",
     "provision_graph.json",
     "evidence_bundles.json",
     "issue_coverage.json",
     "provision_lineage.json",
+    "authority_lineage.json",
     "claims.json",
     "calculations.json",
     "answer_plan.json",
@@ -47,6 +56,7 @@ REQUIRED_ARTIFACTS: tuple[str, ...] = (
     "final_answer.txt",
     "validation.json",
     "timings.json",
+    "token_usage.json",
     "costs.json",
     "metrics.json",
 )
@@ -179,15 +189,24 @@ class TraceWriter:
             "authority_queries.json",
             "authority_candidates.json",
             "authority_cards.json",
+            "first_pass_reranking.json",
+            "legal_rules.json",
+            "wrong_neighbor_rejections.json",
+            "evidence_bindings.json",
+            "missing_evidence_requests.json",
+            "second_pass_queries.json",
+            "second_pass_candidates.json",
             "backreferences.json",
             "reranking.json",
             "evidence_bundles.json",
             "issue_coverage.json",
             "provision_lineage.json",
+            "authority_lineage.json",
             "claims.json",
             "calculations.json",
             "validation.json",
             "metrics.json",
+            "token_usage.json",
         }
         for artifact_name in REQUIRED_ARTIFACTS:
             path = self.path_for(artifact_name)

@@ -57,10 +57,12 @@ FactMateriality = Literal["outcome_determinative", "retrieval_relevant", "minor"
 SourceType = Literal[
     "statute",
     "regulation",
+    "treaty",
     "tax_treaty",
     "interpretation",
     "general_interpretation",
     "guidance",
+    "tax_guidance",
     "judgment",
     "resolution",
 ]
@@ -69,6 +71,7 @@ SourceType = Literal[
 class ResearchIntent(V2Schema):
     mode: Literal["authority_research", "mixed_analysis", "rule_first"]
     needs_normative_answer: bool = True
+    needs_primary_law: bool = True
     needs_interpretations: bool = True
     needs_case_law: bool = True
     needs_conflict_analysis: bool = True
@@ -112,9 +115,11 @@ QueryFamilyName = Literal[
     "known_provision_synonym",
     "citation_backreference",
     "issue_signature",
+    "fact_signature",
     "factual_contrast",
     "quoted_statutory_language",
     "cited_judgment_signature",
+    "judgment_signature",
     # Names used by the public retrieval contract.  Older aliases above are
     # retained so persisted plans from the first v2 iteration stay readable.
     "statutory_concept",
@@ -137,14 +142,19 @@ class LegalIssue(V2Schema):
     label: NonEmptyStr
     tax_domains: list[NonEmptyStr] = Field(default_factory=list)
     legal_mechanism: NonEmptyStr
+    material_fact_ids: list[str] = Field(default_factory=list)
     taxpayer_roles: list[str] = Field(default_factory=list)
     transactions: list[str] = Field(default_factory=list)
     payments: list[str] = Field(default_factory=list)
     jurisdictions: list[str] = Field(default_factory=list)
     relevant_dates: list[str] = Field(default_factory=list)
     possible_provision_concepts: list[str] = Field(default_factory=list)
+    possible_legal_concepts: list[str] = Field(default_factory=list)
+    possible_provision_hints: list[str] = Field(default_factory=list)
     positive_fact_constraints: list[str] = Field(default_factory=list)
     negative_fact_constraints: list[str] = Field(default_factory=list)
+    positive_constraints: list[str] = Field(default_factory=list)
+    negative_constraints: list[str] = Field(default_factory=list)
     requested_source_types: list[SourceType] = Field(
         default_factory=lambda: ["statute", "interpretation", "judgment"]
     )
@@ -177,6 +187,8 @@ class LegalResearchPlan(V2Schema):
     missing_facts: list[MissingFact] = Field(default_factory=list)
     issues: list[LegalIssue] = Field(min_length=1)
     clarification: Clarification = Field(default_factory=Clarification)
+    should_ask_clarification: bool = False
+    clarification_questions: list[str] = Field(default_factory=list, max_length=3)
     confidence: Confidence
 
     @model_validator(mode="after")
@@ -508,7 +520,7 @@ class ValidationRecord(V2Schema):
 class PipelineResult(V2Schema):
     request_id: NonEmptyStr
     run_id: NonEmptyStr
-    mode: Literal["legal_rag_v2", "shadow"] = "legal_rag_v2"
+    mode: Literal["model_rag_model", "legal_rag_v2", "shadow"] = "legal_rag_v2"
     legal_research_plan: LegalResearchPlan
     fallback_trace: FallbackTrace = Field(default_factory=FallbackTrace)
     provision_graph: ProvisionGraph = Field(default_factory=ProvisionGraph)

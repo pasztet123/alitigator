@@ -145,6 +145,11 @@ class ModelGatewayConfig:
         }
         return stage_models.get(normalized, self.model)
 
+    @property
+    def evidence_analyst_model(self) -> str:
+        """Public Model→RAG→Model name for the authority/evidence stage."""
+        return self.authority_extractor_model
+
 
 @dataclass(frozen=True)
 class ConfiguredModel:
@@ -243,7 +248,9 @@ def get_model_gateway_config(env: Optional[Mapping[str, str]] = None) -> ModelGa
         ).strip(),
         legal_planner_model=(source.get("LEGAL_PLANNER_MODEL") or stage_default).strip(),
         authority_extractor_model=(
-            source.get("AUTHORITY_EXTRACTOR_MODEL") or stage_default
+            source.get("EVIDENCE_ANALYST_MODEL")
+            or source.get("AUTHORITY_EXTRACTOR_MODEL")
+            or stage_default
         ).strip(),
         legal_synthesis_model=(source.get("LEGAL_SYNTHESIS_MODEL") or stage_default).strip(),
         answer_writer_model=(source.get("ANSWER_WRITER_MODEL") or stage_default).strip(),

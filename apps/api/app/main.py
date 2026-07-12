@@ -80,7 +80,7 @@ from app.hybrid_authority_rag import (
     to_jsonable,
     write_hybrid_trace_artifacts,
 )
-from app.legal_rag_v2.pipeline import create_default_pipeline
+from app.legal_research.pipeline import create_default_pipeline
 from app.rag import (
     RagChunk,
     add_primary_source_fallback_chunks,
@@ -121,7 +121,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "1.1.6"
+API_VERSION = "2.0.0"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -139,7 +139,7 @@ MODEL_CHAT_TIMEOUT_SECONDS = min(
     max(30.0, MODEL_GATEWAY_CONFIG.timeout_seconds),
 )
 
-_LEGAL_PIPELINE_MODES = {"legacy", "legal_rag_v2", "shadow"}
+_LEGAL_PIPELINE_MODES = {"legacy", "model_rag_model", "legal_rag_v2", "shadow"}
 _legal_rag_v2_pipeline = None
 _shadow_tasks: set[asyncio.Task] = set()
 _shadow_semaphore = asyncio.Semaphore(
@@ -152,7 +152,12 @@ def get_legal_pipeline_mode() -> str:
     # variable as a compatibility alias for existing environments and tests.
     raw = os.getenv("LEGAL_RAG_MODE") or os.getenv("LEGAL_PIPELINE_MODE", "legacy")
     mode = raw.strip().lower()
-    aliases = {"rag_v2": "legal_rag_v2", "legacy": "legacy", "shadow": "shadow"}
+    aliases = {
+        "rag_v2": "legal_rag_v2",
+        "legacy": "legacy",
+        "model_rag_model": "model_rag_model",
+        "shadow": "shadow",
+    }
     mode = aliases.get(mode, mode)
     return mode if mode in _LEGAL_PIPELINE_MODES else "legacy"
 
@@ -161,15 +166,15 @@ def legal_runtime_debug(*, controlled_pipeline_used: bool = False) -> dict[str, 
     """Stable runtime identity included in API/debug traces, never secrets."""
     mode = get_legal_pipeline_mode()
     return {
-        "pipeline_mode": "rag_v2" if mode == "legal_rag_v2" else mode,
-        "retrieval_mode": "issue_scoped_bidirectional" if mode == "legal_rag_v2" else get_legal_retrieval_mode(),
+        "pipeline_mode": mode,
+        "retrieval_mode": "issue_scoped_bidirectional" if mode in {"model_rag_model", "legal_rag_v2"} else get_legal_retrieval_mode(),
         "rag_backend": os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite"),
-        "planner_mode": "model_first" if mode == "legal_rag_v2" else "legacy_rules",
-        "authority_extractor_mode": "model_structured" if mode == "legal_rag_v2" else "heuristic_or_disabled",
+        "planner_mode": "model_first" if mode in {"model_rag_model", "legal_rag_v2"} else "legacy_rules",
+        "authority_extractor_mode": "model_structured" if mode in {"model_rag_model", "legal_rag_v2"} else "heuristic_or_disabled",
         "answer_provider": MODEL_GATEWAY_CONFIG.provider,
-        "answer_model": MODEL_GATEWAY_CONFIG.answer_writer_model if mode == "legal_rag_v2" else DEFAULT_MODEL,
+        "answer_model": MODEL_GATEWAY_CONFIG.answer_writer_model if mode in {"model_rag_model", "legal_rag_v2"} else DEFAULT_MODEL,
         "provider": MODEL_GATEWAY_CONFIG.provider,
-        "model": MODEL_GATEWAY_CONFIG.answer_writer_model if mode == "legal_rag_v2" else DEFAULT_MODEL,
+        "model": MODEL_GATEWAY_CONFIG.answer_writer_model if mode in {"model_rag_model", "legal_rag_v2"} else DEFAULT_MODEL,
         "git_commit": _git_commit(),
         "api_version": API_VERSION,
         "controlled_pipeline_used": controlled_pipeline_used,
@@ -3158,12 +3163,12 @@ async def chat(
     pipeline_mode = get_legal_pipeline_mode()
     if pipeline_mode == "shadow":
         schedule_legal_rag_v2_shadow(effective_user_prompt)
-    elif pipeline_mode == "legal_rag_v2":
+    elif pipeline_mode in {"model_rag_model", "legal_rag_v2"}:
         run_id = uuid4().hex
         try:
             v2_result = await get_legal_rag_v2_pipeline().run(
                 effective_user_prompt,
-                mode="legal_rag_v2",
+                mode=pipeline_mode,
                 request_id=str(uuid4()),
                 run_id=run_id,
             )
@@ -3220,7 +3225,7 @@ async def chat(
             model=MODEL_GATEWAY_CONFIG.answer_writer_model,
             redactions=sorted(set(redactions)),
             analysis_trace={
-                "pipeline": "legal_rag_v2",
+                "pipeline": pipeline_mode,
                 "runtime": legal_runtime_debug(),
                 "run_id": v2_result.run_id,
                 "fallback": v2_result.fallback_trace.model_dump(mode="json"),

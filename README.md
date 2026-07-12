@@ -206,14 +206,14 @@ Domyślny przepływ jest taki:
 - jeśli pliki źródłowe ustaw są nowsze niż lokalny SQLite, backend automatycznie odświeży indeks przy pierwszym zapytaniu.
 - chat używa retrievalu chunkowego do wyboru dokumentów, a następnie domyślnie odtwarza pełną treść do 6 wybranych dokumentów i przekazuje ją modelowi do wewnętrznej selekcji oraz syntezy.
 
-## Legal RAG v2
+## Model → RAG → Model
 
 Nowa architektura działa obok baseline'u i jest odwracalna jedną flagą:
 
 ```text
-LEGAL_PIPELINE_MODE=legacy       # dotychczasowa odpowiedź produkcyjna
-LEGAL_PIPELINE_MODE=legal_rag_v2 # jeden model-driven research pipeline
-LEGAL_PIPELINE_MODE=shadow       # odpowiedź legacy, v2 zapisuje osobny trace
+LEGAL_RAG_MODE=legacy            # dotychczasowa odpowiedź produkcyjna
+LEGAL_RAG_MODE=model_rag_model   # planner → RAG → evidence model → claims → writer
+LEGAL_RAG_MODE=shadow            # odpowiedź legacy, nowy pipeline zapisuje trace
 ```
 
 `legacy` pozostaje wartością domyślną do czasu przejścia benchmarków
@@ -224,6 +224,7 @@ LLM_PROVIDER=openai
 LLM_MODEL=gpt-5.6-terra
 LEGAL_PLANNER_MODEL=gpt-5.6-terra
 AUTHORITY_EXTRACTOR_MODEL=gpt-5.6-terra
+EVIDENCE_ANALYST_MODEL=gpt-5.6-terra
 LEGAL_SYNTHESIS_MODEL=gpt-5.6-terra
 ANSWER_WRITER_MODEL=gpt-5.6-terra
 ```
@@ -234,8 +235,8 @@ technicznym providera; nie jest retry uruchamianym przez wynik benchmarku.
 Statyczny planner jest oznaczonym fallbackiem i może dodać query hints lub
 kandydatów, ale nie może narzucić finalnej konkluzji.
 
-Każdy przebieg v2 zapisuje etapowe artefakty pod
-`artifacts/legal_rag_v2/<run_id>/`. Tryb `shadow` nie zmienia odpowiedzi
+Każdy przebieg zapisuje etapowe artefakty pod
+`artifacts/model_rag_model/<run_id>/`. Tryb `shadow` nie zmienia odpowiedzi
 użytkownika. Nie należy włączać v2 produkcyjnie bez gotowego indeksu
 `text-embedding-3-large`, pomiaru candidate recall i przeglądu trace'ów.
 
@@ -260,10 +261,10 @@ PYTHONPATH="$PWD" python -m app.legal_rag_v2.reindex_embeddings \
 Porównanie na jawnym zbiorze deweloperskim:
 
 ```bash
-PYTHONPATH="$PWD" python scripts/run_legal_rag_v2_ab.py \
+PYTHONPATH="$PWD" python scripts/run_model_rag_model_ab.py \
   --cases data/processed/rag_eval_cases.sample.json \
   --variants A,B,C \
-  --artifact-root artifacts/legal_rag_v2/ab
+  --artifact-root artifacts/model_rag_model/ab
 ```
 
 - A: zachowany retrieval legacy,

@@ -40,23 +40,23 @@ class HousingReliefPipelineTests(unittest.TestCase):
         self.assertTrue(result.render_validation.passed)
         self.assertEqual(
             result.claims["claim_formula"].result["exempt_income"],
-            0,
+            100000,
         )
         self.assertEqual(
             result.claims["claim_tax_result"].result["taxable_income"],
-            300000,
+            200000,
         )
-        self.assertEqual(result.claims["claim_tax_result"].result["tax"], 57000)
+        self.assertEqual(result.claims["claim_tax_result"].result["tax"], 38000)
         self.assertFalse(
             result.claims["claim_formula"].result["direct_expense_income_offset_used"]
         )
         self.assertEqual(
             result.claims["claim_expense_not_income"].result["qualified_housing_expenses"],
-            0,
+            300000,
         )
         self.assertEqual(
             result.claims["claim_expense_not_income"].result["exempt_income"],
-            0,
+            100000,
         )
         self.assertFalse(
             result.claims["claim_expense_not_income"].result["values_treated_as_identical"]
@@ -115,19 +115,19 @@ class HousingReliefPipelineTests(unittest.TestCase):
 
         self.assertEqual(result.claims["claim_sale_tax_regime"].result["income"], 300000)
         self.assertEqual(result.claims["claim_credit_scope"].result["credit_repayment"], 300000)
-        self.assertIsNone(result.claims["claim_credit_scope"].result["credit_repayment_qualifies"])
+        self.assertTrue(result.claims["claim_credit_scope"].result["credit_repayment_qualifies"])
         self.assertEqual(
             result.claims["claim_credit_scope"].result_code,
-            "",
+            "credit_on_sold_property_qualified",
         )
-        self.assertEqual(result.claims["claim_tax_result"].result["tax"], 57000)
+        self.assertEqual(result.claims["claim_tax_result"].result["tax"], 38000)
         self.assertIn("art. 21 ust. 30a ustawy PIT", result.answer)
 
     def test_reported_act_transferring_ownership_phrase_uses_controlled_pipeline(self) -> None:
         self.assertTrue(can_run_housing_relief_pipeline(USER_REPORTED_QUERY))
         result = run_housing_relief_pipeline(USER_REPORTED_QUERY)
         self.assertTrue(result.render_validation.passed)
-        self.assertEqual(result.claims["claim_tax_result"].result["tax"], 57_000)
+        self.assertEqual(result.claims["claim_tax_result"].result["tax"], 38_000)
 
     def test_housing_deadline_has_independent_statutory_provenance(self) -> None:
         facts = parse_housing_relief_facts(HOUSING_RELIEF_BENCHMARK_QUERY)
@@ -135,6 +135,7 @@ class HousingReliefPipelineTests(unittest.TestCase):
         deadline = calculations["calc_housing_relief_deadline"]
         self.assertEqual(facts.sale_year_end, "2025-12-31")
         self.assertEqual(facts.deadline, "2028-12-31")
+        self.assertEqual(facts.records["housing_relief_deadline"].value, "2028-12-31")
         self.assertEqual(deadline.result, "2028-12-31")
         self.assertEqual(deadline.inputs["deadline_period_source"], "pit_art_21_ust_1_pkt_131")
         self.assertEqual(deadline.inputs["ownership_condition_source"], "pit_art_21_ust_25a")
@@ -195,33 +196,37 @@ class HousingReliefPipelineTests(unittest.TestCase):
         self.assertIn("Źródła\n- art. 10 ust. 1 pkt 8 ustawy PIT.", result.answer)
         self.assertIn("0115-KDIT3.4011.123.2025.1.AK", result.answer)
         self.assertIn("zagadnienie: pit_housing_relief", result.answer)
-        self.assertIn("powiązane wnioski:", result.answer)
+        self.assertIn("Holding:", result.answer)
         self.assertNotIn("claim_sale_tax_regime", result.answer)
-        self.assertIn("Wniosek źródła:", result.answer)
+        self.assertIn("Wynik:", result.answer)
         self.assertIn("Podobieństwo:", result.answer)
-        self.assertIn("Różnice do sprawdzenia:", result.answer)
+        self.assertIn("Różnica:", result.answer)
         self.assertIn("Orzeczenia: wyszukiwanie wykonane; kandydaci: 0; wybrane: 0.", result.answer)
         self.assertIn("Powód braku wyboru: brak kandydatów w korpusie.", result.answer)
         authority_card = result.renderer_payload["authority_cards"][0]
         self.assertEqual(authority_card["issue_id"], "pit_housing_relief")
         self.assertIn("claim_sale_tax_regime", authority_card["claim_ids"])
+        self.assertEqual(len(authority_card["claim_bindings"]), 1)
         self.assertEqual(
             result.renderer_payload["judgment_lane_outcome"]["empty_result_reason"],
             "no_candidates_from_corpus",
         )
-        self.assertIn("Ryzyka i luki\n- Spłata 300 000 zł", result.answer)
-        self.assertIn("PIT 38 000 zł", result.answer)
+        self.assertIn("Ryzyka i luki\n- Do dokumentacyjnego potwierdzenia", result.answer)
+        self.assertIn("38 000 zł", result.answer)
         self.assertIn("Wzór D × W / P", result.answer)
         for forbidden in ("[claim_id:", "[provision_id:", "fact_", "calculation_id:"):
             self.assertNotIn(forbidden, result.answer)
         self.assertLess(result.render_validation.thesis_analysis_duplicate_ratio, 0.35)
 
-    def test_unconfirmed_credit_is_not_an_unconditional_calculation_input(self) -> None:
+    def test_explicit_credit_facts_drive_main_scenario_while_documents_remain_conditional(self) -> None:
         result = run_housing_relief_pipeline(HOUSING_RELIEF_BENCHMARK_QUERY)
-        self.assertEqual(result.claims["claim_tax_result"].result["tax"], 57_000)
-        conditional = result.claims["claim_credit_qualifying_tax_scenario"]
+        self.assertEqual(result.claims["claim_tax_result"].result["tax"], 38_000)
+        self.assertTrue(result.facts["credit_for_sold_property"].value)
+        self.assertTrue(result.facts["credit_taken_before_sale"].value)
+        self.assertEqual(result.facts["credit_not_previously_tax_preferenced"].status, "missing")
+        conditional = result.claims["claim_credit_fallback_tax_scenario"]
         self.assertEqual(conditional.status, "conditional_missing_fact")
-        self.assertEqual(conditional.result["tax"], 38_000)
+        self.assertEqual(conditional.result["tax"], 57_000)
         self.assertIn("57 000 zł", result.answer)
         self.assertIn("38 000 zł", result.answer)
 

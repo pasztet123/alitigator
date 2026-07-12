@@ -35,7 +35,7 @@ class RendererPayload:
     answer_plan: AnswerPlan
     provisions: tuple[dict[str, str], ...]
     calculations: tuple[dict[str, object], ...] = ()
-    authority_cards: tuple[dict[str, str], ...] = ()
+    authority_cards: tuple[dict[str, object], ...] = ()
     judgment_lane_outcome: dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
@@ -208,7 +208,7 @@ def build_renderer_payload(
     *,
     target_date: str,
     calculations: Optional[dict[str, CalculationRecord]] = None,
-    authority_cards: Iterable[dict[str, str]] = (),
+    authority_cards: Iterable[dict[str, object]] = (),
     judgment_lane_outcome: Optional[dict[str, object]] = None,
 ) -> RendererPayload:
     approved: list[LegalClaim] = []
@@ -293,30 +293,50 @@ def build_renderer_payload(
 
 
 def bind_authority_cards_to_claims(
-    authority_cards: Iterable[dict[str, str]],
+    authority_cards: Iterable[dict[str, object]],
     claims: dict[str, LegalClaim],
-) -> tuple[dict[str, str], ...]:
-    """Attach every authority to a concrete issue and its controlled claims."""
+) -> tuple[dict[str, object], ...]:
+    """Preserve only pairwise authority-to-claim bindings in the trace payload."""
     claim_ids_by_issue: dict[str, list[str]] = {}
     for claim in claims.values():
         claim_ids_by_issue.setdefault(claim.axis_id, []).append(claim.claim_id)
     default_issue = next(iter(claim_ids_by_issue), "general")
-    bound: list[dict[str, str]] = []
+    bound: list[dict[str, object]] = []
     for raw_card in authority_cards:
         card = dict(raw_card)
-        issue_id = card.get("issue_id") or default_issue
-        claim_ids = claim_ids_by_issue.get(issue_id) or claim_ids_by_issue.get(default_issue, [])
+        issue_id = str(card.get("issue_id") or default_issue)
+        raw_bindings = card.get("claim_bindings")
+        bindings: list[dict[str, object]] = []
+        if isinstance(raw_bindings, (list, tuple)):
+            for item in raw_bindings:
+                if not isinstance(item, dict):
+                    continue
+                claim_id = str(item.get("claim_id") or "")
+                try:
+                    score = float(item.get("score") or 0)
+                except (TypeError, ValueError):
+                    score = 0.0
+                reason = str(item.get("reason") or "").strip()
+                if claim_id in claims and score > 0 and reason:
+                    bindings.append({"claim_id": claim_id, "score": score, "reason": reason})
+        if not bindings:
+            # Compatibility path for manually supplied cards.  Deliberately bind
+            # one claim only: never recreate the old all-claims authority pool.
+            fallback_claims = claim_ids_by_issue.get(issue_id) or [next(iter(claims), "")]
+            if fallback_claims and fallback_claims[0]:
+                bindings.append(
+                    {
+                        "claim_id": fallback_claims[0],
+                        "score": 0.5,
+                        "reason": "Ręcznie przekazane źródło przypisano do jednego kontrolowanego wniosku.",
+                    }
+                )
+        claim_ids = [str(item["claim_id"]) for item in bindings]
         card["issue_id"] = issue_id
         card["claim_ids"] = ", ".join(claim_ids)
-        # Keep technical claim IDs in the trace payload, but never expose them in
-        # the customer-facing answer.  Their short conclusions are the readable
-        # explanation of what the authority supports.
-        claim_labels = [
-            claims[claim_id].text.split(".", 1)[0].strip()
-            for claim_id in claim_ids
-            if claim_id in claims
-        ]
-        card["claim_labels"] = "; ".join(label for label in claim_labels if label)
+        card["claim_bindings"] = bindings
+        card["binding_score"] = max((float(item["score"]) for item in bindings), default=0.0)
+        card["binding_reason"] = "; ".join(str(item["reason"]) for item in bindings)
         card.setdefault("holding", "Brak wystarczającego fragmentu do odtworzenia tezy rozstrzygnięcia.")
         card.setdefault("similarity_reason", "Zwrócono ją dla tego samego zagadnienia podatkowego.")
         card.setdefault("distinguishing_facts", "Porównaj fakty wskazane w pytaniu ze stanem faktycznym źródła.")
@@ -402,6 +422,29 @@ def _analysis_explanation(claim: LegalClaim) -> str:
     )
 
 
+def _authority_summary(item: dict[str, object]) -> str:
+    def words(value: object, limit: int) -> str:
+        items = str(value or "").split()
+        return " ".join(items[:limit]) + ("…" if len(items) > limit else "")
+
+    source_type = str(item.get("source_type") or "authority")
+    label = str(item.get("label") or "brak oznaczenia")
+    date = str(item.get("date") or "")
+    issue = str(item.get("issue_label") or item.get("issue_id") or "brak")
+    holding = words(item.get("holding"), 42)
+    outcome = str(item.get("outcome") or "brak jednoznacznego wyniku")
+    similarity = words(item.get("similarity_reason"), 14)
+    distinction = words(item.get("distinguishing_facts"), 10)
+    summary = (
+        f"- [{source_type}] {label}"
+        + (f" ({date})" if date else "")
+        + f"; zagadnienie: {issue}. Holding: {holding}. Wynik: {outcome}. "
+        + f"Podobieństwo: {similarity}. Różnica: {distinction}."
+    )
+    source_url = str(item.get("source_url") or "")
+    return summary + (f" Link: {source_url}" if source_url else "")
+
+
 def render_answer(payload: RendererPayload, *, compact: bool = False) -> str:
     provision_map = {item["provision_id"]: item["display_reference"] for item in payload.provisions}
     calculation_map = {
@@ -431,15 +474,7 @@ def render_answer(payload: RendererPayload, *, compact: bool = False) -> str:
         else:
             analysis_parts.extend(lines)
     sources = [f"- {item['display_reference']}." for item in payload.provisions]
-    sources.extend(
-        f"- [{item.get('source_type') or 'authority'}] {item.get('label') or 'brak oznaczenia'}; "
-        f"zagadnienie: {item.get('issue_id') or 'brak'}; powiązane wnioski: {item.get('claim_labels') or 'brak'}. "
-        f"Wniosek źródła: {item.get('holding') or 'brak'}. "
-        f"Podobieństwo: {item.get('similarity_reason') or 'brak'}. "
-        f"Różnice do sprawdzenia: {item.get('distinguishing_facts') or 'brak'}."
-        + (f" Link: {item.get('source_url')}" if item.get("source_url") else "")
-        for item in payload.authority_cards
-    )
+    sources.extend(_authority_summary(item) for item in payload.authority_cards)
     if payload.judgment_lane_outcome:
         candidate_count = int(payload.judgment_lane_outcome.get("candidate_count") or 0)
         selected_count = int(payload.judgment_lane_outcome.get("selected_count") or 0)
@@ -454,6 +489,23 @@ def render_answer(payload: RendererPayload, *, compact: bool = False) -> str:
             f"kandydaci: {candidate_count}; wybrane: {selected_count}."
             + (f" Powód braku wyboru: {reason_text}." if reason_text else "")
         )
+        if "corpus_count" in payload.judgment_lane_outcome:
+            corpus_count = int(payload.judgment_lane_outcome.get("corpus_count") or 0)
+            indexed_count = int(payload.judgment_lane_outcome.get("indexed_count") or 0)
+            filtered_count = int(payload.judgment_lane_outcome.get("filtered_count") or 0)
+            root_cause = str(payload.judgment_lane_outcome.get("zero_candidates_root_cause") or "")
+            root_cause_text = {
+                "judgment_corpus_not_indexed_in_active_backend": "plik korpusu nie został zindeksowany w aktywnym backendzie",
+                "active_backend_has_no_judgment_corpus": "aktywny backend nie zawiera korpusu orzeczeń",
+                "no_issue_matching_judgment_candidates": "brak kandydatów odpowiadających temu zagadnieniu",
+                "judgment_candidates_failed_quality_filters": "kandydaci nie przeszli filtrów jakości",
+                "judgment_retrieval_error": "błąd wyszukiwania orzeczeń",
+            }.get(root_cause, root_cause)
+            sources.append(
+                "- Audit orzeczeń: "
+                f"korpus: {corpus_count}; zindeksowane: {indexed_count}; odrzucone przez filtry: {filtered_count}."
+                + (f" Diagnoza: {root_cause_text}." if root_cause_text else "")
+            )
     risks = [f"- {claim.text}" for claim in payload.conditional_claims] or [
         "- Brak warunkowych twierdzeń wymagających dodatkowego faktu."
     ]
@@ -610,13 +662,35 @@ def validate_rendered_answer(
             for item in str(authority.get("claim_ids") or "").split(",")
             if item.strip()
         ]
+        bindings = authority.get("claim_bindings")
+        bindings_are_pairwise = isinstance(bindings, list) and all(
+            isinstance(item, dict)
+            and str(item.get("claim_id") or "") in allowed_claim_ids
+            and float(item.get("score") or 0) > 0
+            and bool(str(item.get("reason") or "").strip())
+            for item in bindings
+        )
+        strict_card = "authority_score" in authority
+        holding_span = authority.get("holding_source_span")
         if (
             not authority.get("issue_id")
             or not claim_ids
             or any(claim_id not in allowed_claim_ids for claim_id in claim_ids)
+            or not bindings_are_pairwise
             or not authority.get("holding")
             or not authority.get("similarity_reason")
             or not authority.get("distinguishing_facts")
+            or (
+                strict_card
+                and (
+                    authority.get("holding_complete_sentence") is not True
+                    or not authority.get("holding_section")
+                    or not isinstance(holding_span, dict)
+                    or not holding_span.get("chunk_id")
+                    or not isinstance(holding_span.get("start"), int)
+                    or not isinstance(holding_span.get("end"), int)
+                )
+            )
         ):
             unbound_authorities.append(str(authority.get("label") or "unknown"))
     exposed_internal_ids = tuple(
@@ -695,7 +769,7 @@ def run_legal_pipeline(
     query: str,
     *,
     target_date: str = "2026-06-30",
-    authority_cards: Iterable[dict[str, str]] = (),
+    authority_cards: Iterable[dict[str, object]] = (),
     judgment_lane_outcome: Optional[dict[str, object]] = None,
 ) -> LegalPipelineResult:
     if not is_mixed_invoice_query(query):

@@ -59,6 +59,7 @@ from app.bad_debt_pipeline import (
     run_bad_debt_pipeline,
 )
 from app.controlled_legal_pipeline import is_mixed_invoice_query, run_legal_pipeline
+from app.controlled_authority_retrieval import retrieve_housing_authorities
 from app.housing_relief_pipeline import (
     can_run_housing_relief_pipeline,
     run_housing_relief_pipeline,
@@ -120,7 +121,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "1.1.4"
+API_VERSION = "1.1.5"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -3444,7 +3445,7 @@ async def chat(
         )
 
     if can_run_housing_relief_pipeline(effective_user_prompt):
-        authority_cards, authority_outcome = retrieve_controlled_authority_lane(effective_user_prompt)
+        authority_cards, authority_outcome = retrieve_housing_authorities(effective_user_prompt)
         try:
             controlled_result = run_housing_relief_pipeline(
                 effective_user_prompt,

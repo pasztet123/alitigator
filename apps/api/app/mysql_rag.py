@@ -26,6 +26,7 @@ from app.rag import (
     build_chunk_payload,
     build_context_block,
     build_match_query,
+    build_provision_id,
     annotate_chunk_evidence_role,
     build_ksef_current_law_statute_targets,
     chunk_canonical_source_id,
@@ -43,14 +44,17 @@ from app.rag import (
     diversify_top_document_window,
     expand_search_query,
     extract_judgment_signatures,
+    extract_normalized_provision_references,
     extract_primary_article_key,
     extract_statute_target_from_text,
     filter_index_chunks,
     get_query_expansion_terms,
     get_rag_config,
     json_dump,
+    index_content_fingerprint,
     join_search_text,
     normalize_source_type,
+    normalize_provision_reference,
     query_targets_interpretation_procedure,
     query_targets_ksef_current_law,
     query_targets_ksef_foreign_sale,
@@ -149,6 +153,7 @@ def mysql_connection() -> Iterable[pymysql.connections.Connection]:
 
 def ensure_schema(connection: pymysql.connections.Connection) -> None:
     documents_table, chunks_table = get_mysql_target()
+    citations_table = f"{chunks_table}_citations"
     with connection.cursor() as cursor:
         cursor.execute(
             f"""
@@ -194,6 +199,8 @@ def ensure_schema(connection: pymysql.connections.Connection) -> None:
                 chunk_index int NOT NULL,
                 chunk_text MEDIUMTEXT NOT NULL,
                 chunk_chars int NOT NULL,
+                provision_id varchar(255) NOT NULL DEFAULT '',
+                display_reference varchar(191) NOT NULL DEFAULT '',
                 search_text MEDIUMTEXT NOT NULL,
                 question_text MEDIUMTEXT NOT NULL,
                 facts_text MEDIUMTEXT NOT NULL,
@@ -201,8 +208,31 @@ def ensure_schema(connection: pymysql.connections.Connection) -> None:
                 FULLTEXT KEY ft_search (search_text, question_text, facts_text, tax_domain),
                 KEY idx_document_id (document_id),
                 KEY idx_document_chunk (document_id, chunk_index),
+                KEY idx_display_reference (display_reference),
                 CONSTRAINT fk_rag_chunks_document FOREIGN KEY (document_id)
                     REFERENCES `{documents_table}`(document_id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+        )
+        for column in (
+            "provision_id varchar(255) NOT NULL DEFAULT ''",
+            "display_reference varchar(191) NOT NULL DEFAULT ''",
+        ):
+            cursor.execute(
+                f"ALTER TABLE `{chunks_table}` ADD COLUMN IF NOT EXISTS {column}"
+            )
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_display_reference ON `{chunks_table}` (display_reference)"
+        )
+        cursor.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS `{citations_table}` (
+                chunk_id varchar(191) NOT NULL,
+                citation varchar(191) NOT NULL,
+                PRIMARY KEY (chunk_id, citation),
+                KEY idx_citation (citation, chunk_id),
+                CONSTRAINT fk_rag_chunk_citations_chunk FOREIGN KEY (chunk_id)
+                    REFERENCES `{chunks_table}`(chunk_id) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """
         )
@@ -285,7 +315,7 @@ def local_record_to_mysql_document(record: dict[str, Any]) -> dict[str, Any]:
     source_pages = [int(page) for page in record.get("source_pages") or [] if str(page).isdigit()]
     return {
         "document_id": str(record.get("document_id") or "").strip(),
-        "content_sha256": record.get("content_sha256"),
+        "content_sha256": index_content_fingerprint(record),
         "source": (str(record.get("source") or "eureka")).strip() or "eureka",
         "source_type": normalize_source_type(record),
         "source_subtype": derive_source_subtype(record),
@@ -318,7 +348,7 @@ def build_mysql_chunk_rows(
     *,
     config: Any,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    from app.rag import clean_document_text
+    from app.rag import build_record_index_chunks, clean_document_text
 
     document_id = str(record.get("document_id") or "").strip()
     if not document_id:
@@ -328,12 +358,12 @@ def build_mysql_chunk_rows(
     if not document_text:
         return {}, []
 
-    chunks = [document_text] if record.get("pre_chunked") else split_into_chunks(
+    chunks = build_record_index_chunks(
+        record,
         document_text,
         target_chars=config.chunk_target_chars,
         overlap_chars=config.chunk_overlap_chars,
     )
-    chunks = filter_index_chunks(record, chunks)
     if not chunks:
         return {}, []
 
@@ -344,6 +374,25 @@ def build_mysql_chunk_rows(
     search_law_tags = json.loads(document_row["law_tags_json"])
     chunk_rows: list[dict[str, Any]] = []
     for chunk_index, chunk_text in enumerate(chunks):
+        first_line = next((line.strip() for line in chunk_text.splitlines() if line.strip()), "")
+        display_reference = (
+            normalize_provision_reference(first_line)
+            if re.fullmatch(
+                r"art\.\s*\d+[a-z]?(?:\s+(?:ust\.\s*\d+[a-z]?|§\s*\d+[a-z]?))?"
+                r"(?:\s+pkt\s*\d+[a-z]?)?(?:\s+lit\.\s*[a-z])?",
+                first_line,
+                re.IGNORECASE,
+            )
+            else ""
+        )
+        article_document_id = str(record.get("article_document_id") or "").strip() or re.sub(
+            r"-part-\d+(?:-occurrence-\d+)?$", "", document_id
+        )
+        provision_id = (
+            build_provision_id(article_document_id, display_reference)
+            if display_reference
+            else ""
+        )
         chunk_payload = build_chunk_payload(
             document_id=document_id,
             chunk_index=chunk_index,
@@ -380,6 +429,8 @@ def build_mysql_chunk_rows(
                 "chunk_index": chunk_index,
                 "chunk_text": chunk_text,
                 "chunk_chars": len(chunk_text),
+                "provision_id": provision_id,
+                "display_reference": display_reference,
                 "search_text": search_text,
                 "question_text": document_row["question_text"],
                 "facts_text": document_row["facts_text"],
@@ -429,6 +480,7 @@ def insert_chunks_mysql(connection: pymysql.connections.Connection, rows: list[d
     if not rows:
         return
     _, chunks_table = get_mysql_target()
+    citations_table = f"{chunks_table}_citations"
     columns = list(rows[0].keys())
     placeholders = ", ".join(["%s"] * len(columns))
     column_sql = ", ".join(f"`{column}`" for column in columns)
@@ -441,6 +493,18 @@ def insert_chunks_mysql(connection: pymysql.connections.Connection, rows: list[d
             """,
             values,
         )
+        citation_rows = [
+            (row["chunk_id"], citation)
+            for row in rows
+            for citation in extract_normalized_provision_references(
+                str(row.get("chunk_text") or "")
+            )
+        ]
+        if citation_rows:
+            cursor.executemany(
+                f"INSERT IGNORE INTO `{citations_table}` (chunk_id, citation) VALUES (%s, %s)",
+                citation_rows,
+            )
 
 
 def reindex_corpus_mysql(*, limit: Optional[int] = None, force: bool = False) -> dict[str, Any]:
@@ -475,7 +539,7 @@ def reindex_corpus_mysql(*, limit: Optional[int] = None, force: bool = False) ->
                     skipped += 1
                     continue
 
-                current_sha = str(record.get("content_sha256") or "")
+                current_sha = index_content_fingerprint(record)
                 stored_sha = fetch_document_state_mysql(connection, document_id)
                 if not force and stored_sha and stored_sha == current_sha:
                     skipped += 1

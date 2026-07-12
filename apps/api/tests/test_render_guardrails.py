@@ -8,6 +8,7 @@ from app.main import (
     RENDER_COMPLETION_MARKER,
     build_chat_system_prompt,
     build_render_diagnostics,
+    build_missing_primary_law_reply,
     complete_empty_sources_section,
     enforce_reply_guardrails,
     repair_empty_legal_reference_slots,
@@ -16,6 +17,32 @@ from app.main import (
 
 
 class ConditionalAnswerGuardrailTests(unittest.TestCase):
+    def test_missing_primary_law_reply_contains_no_material_conclusion(self) -> None:
+        reply = build_missing_primary_law_reply()
+        validation = validate_final_output(
+            reply,
+            axis_coverage=[],
+            expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
+            verified_source_count=0,
+        )
+        self.assertFalse(validation["source_section_contradiction"])
+        self.assertIn("nie można zatwierdzić", reply.casefold())
+
+    def test_validator_rejects_reference_not_in_registry_without_rewriting_text(self) -> None:
+        reply = (
+            "Teza\nWniosek.\n\nAnaliza\nAnaliza.\n\n"
+            "Źródła\nart. 21 ust. 30a ustawy PIT.\n\nRyzyka i luki\nBrak.\n\n"
+            f"{RENDER_COMPLETION_MARKER}"
+        )
+        with self.assertRaises(Exception):
+            validate_final_output(
+                reply,
+                axis_coverage=[],
+                expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
+                allowed_provision_references={"art. 21 ust. 25"},
+                verified_source_count=1,
+            )
+
     def test_model_timeout_allows_complex_answers_but_is_bounded(self) -> None:
         self.assertGreaterEqual(MODEL_CHAT_TIMEOUT_SECONDS, 90.0)
         self.assertLessEqual(MODEL_CHAT_TIMEOUT_SECONDS, 180.0)

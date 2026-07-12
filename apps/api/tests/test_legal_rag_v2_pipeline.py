@@ -212,6 +212,40 @@ class FakeAuthorityExtractor:
 
 
 class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_special_rule_is_controlling_and_general_rule_is_dependency_across_chunks(self) -> None:
+        shared = {
+            "legal_provisions": ["art. 21"],
+            "act_title": "Ustawa PIT",
+            "publication": "Dz.U. test",
+        }
+        retrieval = LegalRetrievalResult(
+            primary_law=(
+                LaneResult(
+                    issue_id="pit_sale",
+                    lane="primary_law",
+                    query_families=(),
+                    candidates=(
+                        RetrievalCandidate(
+                            "special", "Art. 21.\n30a. Wydatki, o których mowa w ust. 25, obejmują także spłatę kredytu.",
+                            "statute", document_id="pit-art21-part9", chunk_id="special", metadata=shared,
+                        ),
+                        RetrievalCandidate(
+                            "general", "Art. 21.\n25. Reguła wydatków mieszkaniowych.",
+                            "statute", document_id="pit-art21-part8", chunk_id="general", metadata=shared,
+                        ),
+                    ),
+                    candidate_count_before_rerank=2,
+                ),
+            ),
+            authorities=(),
+            trace=(),
+        )
+        graph, _, references = _build_provision_graph(retrieval)
+        bundles = _build_evidence_bundles(research_plan(), retrieval, {}, graph, references)
+
+        self.assertIn("art. 21 ust. 30a", [item.citation for item in bundles[0].controlling_provisions])
+        self.assertIn("art. 21 ust. 25", [item.citation for item in bundles[0].dependency_provisions])
+
     async def test_future_provision_is_not_controlling_for_historical_target_date(self) -> None:
         plan = research_plan().model_copy(update={"target_date": "2020-01-01"})
         candidate = RetrievalCandidate(

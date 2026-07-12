@@ -6,10 +6,39 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import law_chunk
+from app.rag import build_record_index_chunks
 from app.treaty_chunk import TreatySource, build_record as build_treaty_record
 
 
 class ProvisionLevelChunkingTests(unittest.TestCase):
+    def test_statute_index_uses_exact_editorial_units_instead_of_article_parts(self) -> None:
+        records = self.build_law_records(
+            "Art. 21.\n25. Reguła ogólna.\n30. Wyłączenie.\n30a. Szczególna reguła obejmuje także spłatę kredytu.",
+            target_chars=10_000,
+        )
+        record = records[0]
+        chunks = build_record_index_chunks(
+            record,
+            record["content_text"],
+            target_chars=2800,
+            overlap_chars=300,
+        )
+
+        exact = next(chunk for chunk in chunks if "art. 21 ust. 30a" in chunk.casefold())
+        self.assertIn("spłatę kredytu", exact)
+        self.assertLess(len(exact), len(record["content_text"]))
+
+        legacy_record = dict(record)
+        legacy_record.pop("provision_units")
+        legacy_record.pop("article_document_id")
+        upgraded = build_record_index_chunks(
+            legacy_record,
+            legacy_record["content_text"],
+            target_chars=2800,
+            overlap_chars=300,
+        )
+        self.assertTrue(any("art. 21 ust. 30a" in chunk.casefold() for chunk in upgraded))
+
     def build_law_records(self, text: str, *, target_chars: int) -> list[dict]:
         pages = [law_chunk.PageText(number=7, text=text)]
         with patch.object(law_chunk, "extract_act_pages", return_value=pages):

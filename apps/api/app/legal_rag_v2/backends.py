@@ -21,13 +21,23 @@ from .retrieval import RetrievalCandidate
 
 _TOKEN_RE = re.compile(r"[0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", re.UNICODE)
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_EXPLICIT_REFERENCE_RE = re.compile(
+    r"\bart\.\s*\d+[a-z]?"
+    r"(?:\s*(?:ust\.\s*\d+[a-z]?|§\s*\d+[a-z]?))?"
+    r"(?:\s*pkt\s*\d+[a-z]?)?"
+    r"(?:\s*lit\.\s*[a-z])?",
+    re.IGNORECASE,
+)
+_QUERY_STOP_WORDS = frozenset(
+    {"ale", "czy", "dla", "jak", "jest", "która", "które", "nie", "oraz", "się", "ten", "tego", "tym", "ust", "art", "pkt"}
+)
 
 
 def _query_tokens(query: str, *, limit: int = 24) -> list[str]:
     tokens: list[str] = []
     for match in _TOKEN_RE.finditer(query):
         token = match.group(0).casefold()
-        if len(token) < 2 or token in tokens:
+        if len(token) < 3 or token in _QUERY_STOP_WORDS or token in tokens:
             continue
         tokens.append(token)
         if len(tokens) >= limit:
@@ -43,6 +53,15 @@ def _sqlite_match_query(query: str) -> str:
 
 def _mysql_match_query(query: str) -> str:
     return " ".join(f"{token}*" if len(token) >= 4 else token for token in _query_tokens(query))
+
+
+def _normalize_reference(value: str) -> str:
+    return " ".join(value.casefold().replace("artykuł", "art.").split()).strip(" .;:,")
+
+
+def _explicit_reference(query: str) -> str:
+    match = _EXPLICIT_REFERENCE_RE.search(query)
+    return _normalize_reference(match.group(0)) if match else ""
 
 
 def _json_list(value: Any) -> list[Any]:
@@ -69,6 +88,7 @@ def _candidate_from_row(row: Mapping[str, Any], *, backend: str, rank: int) -> R
     chunk_id = str(row.get("chunk_id") or "")
     document_id = str(row.get("document_id") or "")
     lexical_score = float(row.get("lexical_score") or 0.0)
+    display_reference = str(row.get("display_reference") or "").strip()
     # SQLite BM25 is lower-is-better and commonly negative; MySQL MATCH is
     # higher-is-better. RRF ultimately uses rank, while this normalized value is
     # retained only as an auditable component.
@@ -90,11 +110,18 @@ def _candidate_from_row(row: Mapping[str, Any], *, backend: str, rank: int) -> R
             "source_subtype": str(row.get("source_subtype") or ""),
             "authority": str(row.get("authority") or ""),
             "publication": str(row.get("publication") or ""),
+            "act_title": str(row.get("act_title") or ""),
             "legal_state_date": str(row.get("legal_state_date") or ""),
             "tax_domains": [str(row.get("tax_domain") or "").upper()]
             if row.get("tax_domain")
             else [],
-            "legal_provisions": [str(value) for value in _json_list(row.get("legal_provisions_json"))],
+            "legal_provisions": (
+                [display_reference]
+                if display_reference
+                else [str(value) for value in _json_list(row.get("legal_provisions_json"))]
+            ),
+            "display_reference": display_reference,
+            "provision_id": str(row.get("provision_id") or ""),
             "source_pages": _json_list(row.get("source_pages_json")),
             "lexical_score_raw": lexical_score,
         },
@@ -173,6 +200,7 @@ class CorpusFtsBackend:
         source_types: frozenset[str],
         metadata_filters: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
+        explicit_reference = _explicit_reference(query)
         match_query = _sqlite_match_query(query)
         if not match_query:
             return []
@@ -200,12 +228,43 @@ class CorpusFtsBackend:
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
         try:
+            if explicit_reference:
+                exact_clauses = [
+                    "(c.display_reference = ? OR EXISTS ("
+                    "SELECT 1 FROM chunk_citations cc "
+                    "WHERE cc.chunk_id = c.chunk_id AND cc.citation = ?))"
+                ]
+                exact_values: list[Any] = [explicit_reference, explicit_reference]
+                if types:
+                    exact_clauses.append("d.source_type IN (" + ",".join("?" for _ in types) + ")")
+                    exact_values.extend(types)
+                if domains:
+                    exact_clauses.append("UPPER(d.tax_domain) IN (" + ",".join("?" for _ in domains) + ")")
+                    exact_values.extend(domains)
+                exact_values.append(limit)
+                exact_rows = connection.execute(
+                    """
+                    SELECT c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                           c.display_reference, c.provision_id,
+                           d.subject, d.signature, d.published_date, d.source_url,
+                           d.category, d.tax_domain, d.source, d.source_type,
+                           d.source_subtype, d.authority, d.act_title, d.publication,
+                           d.legal_state_date, d.legal_provisions_json,
+                           d.source_pages_json, 1000.0 AS lexical_score
+                    FROM chunks c JOIN documents d ON d.document_id = c.document_id
+                    WHERE """ + " AND ".join(exact_clauses)
+                    + " ORDER BY d.legal_state_date DESC, c.chunk_id ASC LIMIT ?",
+                    tuple(exact_values),
+                ).fetchall()
+                if exact_rows:
+                    return [dict(row) for row in exact_rows]
             rows = connection.execute(
                 """
                 SELECT c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                       c.display_reference, c.provision_id,
                        d.subject, d.signature, d.published_date, d.source_url,
                        d.category, d.tax_domain, d.source, d.source_type,
-                       d.source_subtype, d.authority, d.publication,
+                       d.source_subtype, d.authority, d.act_title, d.publication,
                        d.legal_state_date, d.legal_provisions_json,
                        d.source_pages_json,
                        bm25(chunks_fts, 1.0, 2.5, 4.0, 1.5, 2.5, 2.5,
@@ -229,17 +288,51 @@ class CorpusFtsBackend:
         source_types: frozenset[str],
         metadata_filters: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
+        explicit_reference = _explicit_reference(query)
         match_query = _mysql_match_query(query)
         if not match_query:
             return []
         from app.mysql_rag import get_mysql_target, mysql_connection
 
         documents_table, chunks_table = get_mysql_target()
-        for identifier in (documents_table, chunks_table):
+        citations_table = f"{chunks_table}_citations"
+        for identifier in (documents_table, chunks_table, citations_table):
             if not _SAFE_IDENTIFIER_RE.fullmatch(identifier):
                 raise ValueError("Unsafe MySQL RAG table identifier")
         types = self._storage_source_types(source_types)
         domains = self._tax_domains(metadata_filters)
+        if explicit_reference:
+            exact_clauses = [
+                f"(c.display_reference = %s OR EXISTS ("
+                f"SELECT 1 FROM `{citations_table}` cc "
+                f"WHERE cc.chunk_id = c.chunk_id AND cc.citation = %s))"
+            ]
+            exact_values: list[Any] = [explicit_reference, explicit_reference]
+            if types:
+                exact_clauses.append("d.source_type IN (" + ",".join("%s" for _ in types) + ")")
+                exact_values.extend(types)
+            if domains:
+                exact_clauses.append("UPPER(d.tax_domain) IN (" + ",".join("%s" for _ in domains) + ")")
+                exact_values.extend(domains)
+            exact_sql = f"""
+                SELECT c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                       c.display_reference, c.provision_id,
+                       d.subject, d.signature, d.published_date, d.source_url,
+                       d.category, d.tax_domain, d.source, d.source_type,
+                       d.source_subtype, d.authority, d.act_title, d.publication,
+                       d.legal_state_date, d.legal_provisions_json,
+                       d.source_pages_json, 1000.0 AS lexical_score
+                FROM `{chunks_table}` c
+                JOIN `{documents_table}` d ON d.document_id = c.document_id
+                WHERE {' AND '.join(exact_clauses)}
+                ORDER BY d.legal_state_date DESC, c.chunk_id ASC LIMIT %s
+            """
+            with mysql_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(exact_sql, (*exact_values, limit))
+                    rows = [dict(row) for row in cursor.fetchall()]
+                    if rows:
+                        return rows
         clauses = [
             "MATCH(c.search_text, c.question_text, c.facts_text, c.tax_domain) "
             "AGAINST (%s IN BOOLEAN MODE)"
@@ -253,9 +346,10 @@ class CorpusFtsBackend:
             values.extend(domains)
         sql = f"""
             SELECT c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                   c.display_reference, c.provision_id,
                    d.subject, d.signature, d.published_date, d.source_url,
                    d.category, d.tax_domain, d.source, d.source_type,
-                   d.source_subtype, d.authority, d.publication,
+                   d.source_subtype, d.authority, d.act_title, d.publication,
                    d.legal_state_date, d.legal_provisions_json,
                    d.source_pages_json,
                    MATCH(c.search_text, c.question_text, c.facts_text, c.tax_domain)

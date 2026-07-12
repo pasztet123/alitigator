@@ -37,6 +37,8 @@ create table if not exists rag_chunks (
     chunk_index int not null,
     chunk_text mediumtext not null,
     chunk_chars int not null,
+    provision_id varchar(255) not null default '',
+    display_reference varchar(191) not null default '',
     search_text mediumtext not null,
     question_text mediumtext not null,
     facts_text mediumtext not null,
@@ -44,8 +46,19 @@ create table if not exists rag_chunks (
     fulltext key ft_rag_chunks_search (search_text, question_text, facts_text, tax_domain),
     key idx_rag_chunks_document_id (document_id),
     key idx_rag_chunks_document_chunk (document_id, chunk_index),
+    key idx_rag_chunks_display_reference (display_reference),
     constraint fk_rag_chunks_document
         foreign key (document_id) references rag_documents(document_id)
+        on delete cascade
+) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;
+
+create table if not exists rag_chunks_citations (
+    chunk_id varchar(191) not null,
+    citation varchar(191) not null,
+    primary key (chunk_id, citation),
+    key idx_rag_chunk_citations_exact (citation, chunk_id),
+    constraint fk_rag_chunk_citations_chunk
+        foreign key (chunk_id) references rag_chunks(chunk_id)
         on delete cascade
 ) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;
 

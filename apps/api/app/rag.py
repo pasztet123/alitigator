@@ -23,6 +23,7 @@ DEFAULT_LAW_SOURCE_PATHS = (
     API_DIR / "data" / "laws" / "processed" / "vat_act_DU_2025_775_codified_2026-05-05.jsonl",
     API_DIR / "data" / "laws" / "processed" / "vat_act_DU_2025_775.jsonl",
     API_DIR / "data" / "laws" / "processed" / "cit_act_DU_2026_554.jsonl",
+    API_DIR / "data" / "laws" / "processed" / "pit_act_DU_2025_163.jsonl",
     API_DIR / "data" / "laws" / "processed" / "pit_act_DU_2026_592.jsonl",
     API_DIR / "data" / "laws" / "processed" / "pcc_act_DU_2026_191.jsonl",
     API_DIR / "data" / "laws" / "processed" / "inheritance_gift_tax_act_DU_2026_478.jsonl",
@@ -39,6 +40,13 @@ DEFAULT_CROSS_ENCODER_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
 WHITESPACE_RE = re.compile(r"\s+")
 QUERY_TOKEN_RE = re.compile(r"[0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]{3,}")
 EMBEDDING_TOKEN_RE = re.compile(r"[0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]{2,}")
+EXACT_PROVISION_REFERENCE_RE = re.compile(
+    r"\bart\.\s*\d+[a-z]?"
+    r"(?:\s*(?:ust\.\s*\d+[a-z]?|§\s*\d+[a-z]?))?"
+    r"(?:\s*pkt\s*\d+[a-z]?)?"
+    r"(?:\s*lit\.\s*[a-z])?",
+    re.IGNORECASE,
+)
 SECTION_BREAK_RE = re.compile(r"\n{2,}")
 BOILERPLATE_SECTION_RE = re.compile(
     r"\n(?=(?:Pouczenie o funkcji ochronnej interpretacji|Funkcja ochronna interpretacji|"
@@ -1845,6 +1853,8 @@ _cross_encoder_load_failed = False
 _cross_encoder_lock = threading.Lock()
 _index_refresh_lock = threading.Lock()
 
+INDEX_BUILD_VERSION = "provision_units_v2"
+
 
 @dataclass(frozen=True)
 class RagConfig:
@@ -1881,6 +1891,31 @@ class RagConfig:
     mechanism_lexicon_path: Path
     facts_rerank_weight: float
     judgment_match_weight: float
+
+
+def index_content_fingerprint(record: dict[str, Any]) -> str:
+    """Invalidate persisted chunks when parser/chunker semantics change."""
+    source_hash = str(record.get("content_sha256") or "")
+    return hashlib.sha256(
+        f"{source_hash}\0{INDEX_BUILD_VERSION}".encode("utf-8")
+    ).hexdigest()
+
+
+def extract_normalized_provision_references(
+    text: str,
+    declared: Iterable[str] = (),
+) -> list[str]:
+    values = [str(value) for value in declared]
+    values.extend(match.group(0) for match in EXACT_PROVISION_REFERENCE_RE.finditer(text))
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        normalized = normalize_provision_reference(value)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
 
 
 @dataclass(frozen=True)
@@ -4155,10 +4190,22 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
             chunk_index INTEGER NOT NULL,
             chunk_text TEXT NOT NULL,
             chunk_chars INTEGER NOT NULL,
+            provision_id TEXT NOT NULL DEFAULT '',
+            display_reference TEXT NOT NULL DEFAULT '',
             FOREIGN KEY (document_id) REFERENCES documents(document_id) ON DELETE CASCADE
         );
 
         CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id);
+
+        CREATE TABLE IF NOT EXISTS chunk_citations (
+            chunk_id TEXT NOT NULL,
+            citation TEXT NOT NULL,
+            PRIMARY KEY (chunk_id, citation),
+            FOREIGN KEY (chunk_id) REFERENCES chunks(chunk_id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_chunk_citations_exact
+            ON chunk_citations(citation, chunk_id);
 
         CREATE TABLE IF NOT EXISTS legal_document_versions (
             document_id TEXT NOT NULL,
@@ -4222,6 +4269,18 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
                 connection.execute(f"ALTER TABLE documents ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
         except sqlite3.OperationalError:
             pass
+
+    for column in (
+        "provision_id TEXT NOT NULL DEFAULT ''",
+        "display_reference TEXT NOT NULL DEFAULT ''",
+    ):
+        try:
+            connection.execute(f"ALTER TABLE chunks ADD COLUMN {column}")
+        except sqlite3.OperationalError:
+            pass
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chunks_display_reference ON chunks(display_reference)"
+    )
 
     for column in (
         "tax_domain TEXT NOT NULL DEFAULT ''",
@@ -4375,6 +4434,110 @@ def normalize_source_type(record: dict[str, Any]) -> str:
     return value if value in allowed else "interpretation"
 
 
+def build_record_index_chunks(
+    record: dict[str, Any],
+    document_text: str,
+    *,
+    target_chars: int,
+    overlap_chars: int,
+) -> list[str]:
+    """Return retrieval chunks, preferring exact editorial units for statutes.
+
+    Law ingestion already exposes stable ``provision_units`` with article,
+    section, point and letter ancestry.  Indexing the enclosing article part
+    discards that structure and makes a short special rule compete as a few
+    words inside tens of pages.  Each unit is therefore indexed with a small
+    synthetic ancestry envelope.  The envelope is derived only from verified
+    source metadata and lets both legacy ``LegalRule`` extraction and the v2
+    ``ProvisionParser`` recover the exact display reference.
+    """
+
+    if normalize_source_type(record) == "statute":
+        expected_article = next(
+            (
+                match.group(1).casefold()
+                for value in record.get("legal_provisions") or []
+                for match in [re.fullmatch(r"art\.\s*(\d+[a-z]?)", str(value).strip(), re.IGNORECASE)]
+                if match
+            ),
+            "",
+        )
+        raw_units = record.get("provision_units") or []
+        if not raw_units:
+            # Older processed corpora predate provision_units_v1.  Upgrade
+            # them deterministically during reindex instead of requiring a
+            # topic-specific data patch.
+            from app.law_chunk import build_provision_units
+
+            article_hint = next(
+                (
+                    str(value).strip()
+                    for value in record.get("legal_provisions") or []
+                    if re.fullmatch(r"art\.\s*\d+[a-z]?", str(value).strip(), re.IGNORECASE)
+                ),
+                None,
+            )
+            record_document_id = str(record.get("document_id") or "").strip()
+            article_document_id = str(record.get("article_document_id") or "").strip()
+            if not article_document_id:
+                article_document_id = re.sub(
+                    r"-part-\d+(?:-occurrence-\d+)?$", "", record_document_id
+                )
+            if article_hint and article_document_id and record_document_id:
+                raw_units = build_provision_units(
+                    document_text,
+                    article_document_id=article_document_id,
+                    record_document_id=record_document_id,
+                    article_hint=article_hint,
+                )
+
+        unit_chunks: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for raw_unit in raw_units:
+            if not isinstance(raw_unit, dict):
+                continue
+            citation = normalize_whitespace(str(raw_unit.get("citation") or ""))
+            unit_text = str(raw_unit.get("text") or "").strip()
+            article = normalize_whitespace(str(raw_unit.get("article") or ""))
+            if not citation or not unit_text or not article:
+                continue
+            if expected_article and article.casefold() != expected_article:
+                continue
+            key = (citation.casefold(), hashlib.sha256(unit_text.encode("utf-8")).hexdigest())
+            if key in seen:
+                continue
+            seen.add(key)
+
+            unit_type = str(raw_unit.get("unit_type") or "")
+            ancestors = [f"Art. {article}."]
+            paragraph = normalize_whitespace(str(raw_unit.get("paragraph") or ""))
+            section = normalize_whitespace(str(raw_unit.get("section") or ""))
+            point = normalize_whitespace(str(raw_unit.get("point") or ""))
+            if unit_type not in {"article", "paragraph"} and paragraph:
+                ancestors.append(f"§ {paragraph}.")
+            if unit_type in {"point", "letter"} and section:
+                ancestors.append(f"{section}.")
+            if unit_type == "letter" and point:
+                ancestors.append(f"{point})")
+
+            if unit_type == "article":
+                rendered = unit_text
+            else:
+                rendered = "\n".join((*ancestors, unit_text))
+            # The exact citation is searchable even when OCR separated the
+            # marker from its body.  It is a registry value, not a query rule.
+            unit_chunks.append(f"{citation}\n{rendered}")
+        if unit_chunks:
+            return unit_chunks
+
+    chunks = [document_text] if record.get("pre_chunked") else split_into_chunks(
+        document_text,
+        target_chars=target_chars,
+        overlap_chars=overlap_chars,
+    )
+    return filter_index_chunks(record, chunks)
+
+
 def index_record(connection: sqlite3.Connection, record: dict[str, Any], config: RagConfig) -> int:
     document_id = str(record.get("document_id") or "").strip()
     if not document_id:
@@ -4386,12 +4549,12 @@ def index_record(connection: sqlite3.Connection, record: dict[str, Any], config:
     if not document_text:
         return 0
 
-    chunks = [document_text] if record.get("pre_chunked") else split_into_chunks(
+    chunks = build_record_index_chunks(
+        record,
         document_text,
         target_chars=config.chunk_target_chars,
         overlap_chars=config.chunk_overlap_chars,
     )
-    chunks = filter_index_chunks(record, chunks)
 
     subject = normalize_whitespace(str(record.get("subject") or "Bez tytułu")) or "Bez tytułu"
     signature = normalize_whitespace(str(record.get("signature") or "")) or None
@@ -4434,7 +4597,7 @@ def index_record(connection: sqlite3.Connection, record: dict[str, Any], config:
         """,
         (
             document_id,
-            record.get("content_sha256"),
+            index_content_fingerprint(record),
             normalize_whitespace(str(record.get("source") or "eureka")) or "eureka",
             source_type,
             source_subtype,
@@ -4461,12 +4624,37 @@ def index_record(connection: sqlite3.Connection, record: dict[str, Any], config:
     inserted = 0
     for chunk_index, chunk_text in enumerate(chunks):
         chunk_id = make_chunk_id(document_id, chunk_index, chunk_text)
+        first_line = next((line.strip() for line in chunk_text.splitlines() if line.strip()), "")
+        display_reference = (
+            normalize_provision_reference(first_line)
+            if re.fullmatch(
+                r"art\.\s*\d+[a-z]?(?:\s+(?:ust\.\s*\d+[a-z]?|§\s*\d+[a-z]?))?"
+                r"(?:\s+pkt\s*\d+[a-z]?)?(?:\s+lit\.\s*[a-z])?",
+                first_line,
+                re.IGNORECASE,
+            )
+            else ""
+        )
+        article_document_id = str(record.get("article_document_id") or "").strip() or re.sub(
+            r"-part-\d+(?:-occurrence-\d+)?$", "", document_id
+        )
+        provision_id = (
+            build_provision_id(article_document_id, display_reference)
+            if display_reference
+            else ""
+        )
         cursor = connection.execute(
             """
-            INSERT INTO chunks (document_id, chunk_id, chunk_index, chunk_text, chunk_chars)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO chunks (
+                document_id, chunk_id, chunk_index, chunk_text, chunk_chars,
+                provision_id, display_reference
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (document_id, chunk_id, chunk_index, chunk_text, len(chunk_text)),
+            (
+                document_id, chunk_id, chunk_index, chunk_text, len(chunk_text),
+                provision_id, display_reference,
+            ),
         )
         rowid = cursor.lastrowid
         connection.execute(
@@ -4487,6 +4675,15 @@ def index_record(connection: sqlite3.Connection, record: dict[str, Any], config:
                 profile["tax_domain"],
             ),
         )
+        citations = extract_normalized_provision_references(
+            chunk_text,
+            legal_provisions,
+        )
+        if citations:
+            connection.executemany(
+                "INSERT OR IGNORE INTO chunk_citations (chunk_id, citation) VALUES (?, ?)",
+                [(chunk_id, citation) for citation in citations],
+            )
         inserted += 1
 
     return inserted
@@ -4524,7 +4721,7 @@ def reindex_corpus(*, limit: Optional[int] = None, force: bool = False) -> dict[
                     skipped += 1
                     continue
 
-                current_sha = str(record.get("content_sha256") or "")
+                current_sha = index_content_fingerprint(record)
                 stored_sha = fetch_document_state(connection, document_id)
                 if not force and stored_sha and stored_sha == current_sha:
                     skipped += 1

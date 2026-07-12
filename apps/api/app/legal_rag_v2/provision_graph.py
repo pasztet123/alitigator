@@ -700,7 +700,11 @@ def _infer_relationship(
         return "transitional_rule_for"
     if re.search(r"\b(z wyjątkiem|nie stosuje się|wyłącza się|chyba że)\b", context):
         return "exception_to"
-    if re.search(r"\b(z zastrzeżeniem|przepis szczególny|na zasadach określonych)\b", context):
+    if re.search(
+        r"\b(z zastrzeżeniem|przepis szczególny|na zasadach określonych|"
+        r"obejmuj\w* także|stosuje się również|stosuje się odpowiednio|także gdy)\b",
+        context,
+    ):
         return "special_rule_for"
     if re.search(r"\b(stosuje się zamiast|ma pierwszeństwo|bez względu na)\b", context):
         return "overrides"

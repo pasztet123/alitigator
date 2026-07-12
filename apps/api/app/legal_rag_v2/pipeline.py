@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import date
@@ -91,6 +93,20 @@ paraphrase only the supplied validated claims. Do not change claim status,
 perform a calculation, create a citation or infer a missing fact. Put material
 uncertainty in risks_and_gaps and list every claim ID you actually use.
 """
+
+
+def _git_commit() -> str:
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[4],
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return os.getenv("K_REVISION", "unknown")
 
 
 class ClaimSet(V2Schema):
@@ -242,6 +258,10 @@ class LegalRagV2Pipeline:
                 "authority_extractor_mode": type(self.authority_extractor).__name__ if self.authority_extractor else "unavailable",
                 "answer_provider": type(self.gateway).__name__,
                 "answer_model": self.config.answer_writer_model,
+                "provider": get_model_gateway_config().provider,
+                "model": self.config.answer_writer_model,
+                "git_commit": _git_commit(),
+                "api_version": os.getenv("ALITIGATOR_API_VERSION", "1.1.0"),
                 "controlled_pipeline_used": False,
                 "fallbacks_used": [],
             },
@@ -287,6 +307,10 @@ class LegalRagV2Pipeline:
                 "authority_extractor_mode": type(self.authority_extractor).__name__ if self.authority_extractor else "unavailable",
                 "answer_provider": type(self.gateway).__name__,
                 "answer_model": self.config.answer_writer_model,
+                "provider": get_model_gateway_config().provider,
+                "model": self.config.answer_writer_model,
+                "git_commit": _git_commit(),
+                "api_version": os.getenv("ALITIGATOR_API_VERSION", "1.1.0"),
                 "controlled_pipeline_used": False,
                 "fallbacks_used": ([planner_outcome.fallback_trace.fallback_reason] if planner_outcome.fallback_trace.fallback_used else []),
             },
@@ -318,6 +342,10 @@ class LegalRagV2Pipeline:
                         "authority_extractor_mode": type(self.authority_extractor).__name__ if self.authority_extractor else "unavailable",
                         "answer_provider": type(self.gateway).__name__,
                         "answer_model": self.config.answer_writer_model,
+                        "provider": get_model_gateway_config().provider,
+                        "model": self.config.answer_writer_model,
+                        "git_commit": _git_commit(),
+                        "api_version": os.getenv("ALITIGATOR_API_VERSION", "1.1.0"),
                         "controlled_pipeline_used": False,
                         "fallbacks_used": [augmented.fallback_trace.fallback_reason],
                     },
@@ -413,6 +441,16 @@ class LegalRagV2Pipeline:
         )
         validations.append(render_validation)
         trace.write_text("final_answer.txt", final_answer)
+        trace.write_json(
+            "provision_lineage.json",
+            _provision_lineage(
+                retrieval,
+                bundles,
+                claims=claims,
+                writer_output=writer_output,
+                final_answer=final_answer,
+            ),
+        )
         trace.write_json("validation.json", validations)
         timings["total"] = _elapsed_ms(started_total)
         trace.write_json("timings.json", timings)
@@ -754,7 +792,7 @@ def _build_provision_graph(
             version_id = str(candidate.metadata.get("version_id") or "current")
             units = parser.parse(
                 candidate.text,
-                document_id=candidate.document_id or candidate.candidate_id,
+                document_id=_graph_document_id(candidate),
                 version_id=version_id,
                 effective_from=str(candidate.metadata.get("effective_from") or "") or None,
                 effective_to=str(candidate.metadata.get("effective_to") or "") or None,
@@ -804,7 +842,7 @@ def _synthetic_provision_unit(
     )
     return ProvisionUnit(
         provision_id=str(candidate.metadata.get("provision_id") or candidate.candidate_id),
-        document_id=candidate.document_id or candidate.candidate_id,
+        document_id=_graph_document_id(candidate),
         version_id=version_id,
         citation=citation,
         text=candidate.text,
@@ -828,7 +866,7 @@ def _provision_reference(
 ) -> ProvisionReference:
     return ProvisionReference(
         provision_id=unit.provision_id,
-        document_id=unit.document_id,
+        document_id=candidate.document_id or unit.document_id,
         version_id=unit.version_id,
         citation=unit.citation,
         article=unit.article,
@@ -857,6 +895,35 @@ def _provision_reference(
     )
 
 
+def _graph_document_id(candidate: RetrievalCandidate) -> str:
+    """Use one graph identity for editorial units split across source records."""
+    citations = candidate.metadata.get("legal_provisions") or []
+    if isinstance(citations, str):
+        citations = [citations]
+    article = next(
+        (
+            match.group(1).casefold()
+            for value in citations
+            for match in [re.search(r"\bart\.\s*(\d+[a-z]?)", str(value), re.IGNORECASE)]
+            if match
+        ),
+        "",
+    )
+    identity = "|".join(
+        part
+        for part in (
+            str(candidate.metadata.get("act_title") or "").strip().casefold(),
+            str(candidate.metadata.get("publication") or "").strip().casefold(),
+            article,
+        )
+        if part
+    )
+    if not identity:
+        return candidate.document_id or candidate.candidate_id
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+    return f"act-article:{digest}"
+
+
 def _build_evidence_bundles(
     plan: LegalResearchPlan,
     retrieval: LegalRetrievalResult,
@@ -878,32 +945,59 @@ def _build_evidence_bundles(
         controlling: list[ProvisionReference] = []
         dependencies: list[ProvisionReference] = []
         exceptions: list[ProvisionReference] = []
+        issue_provision_ids: set[str] = set()
         if lane:
             for candidate in lane.candidates:
-                units = [
+                units = sorted(
+                    [
                     unit
                     for unit in candidate_units.get(candidate.chunk_id, [])
                     if unit.status == "active"
-                ]
+                    ],
+                    key=_reference_specificity,
+                    reverse=True,
+                )
                 if units:
-                    controlling.append(units[0])
+                    issue_provision_ids.update(unit.provision_id for unit in units)
+                    if not controlling:
+                        controlling.append(units[0])
+                    else:
+                        dependencies.append(units[0])
                     dependencies.extend(units[1:])
-        controlling_ids = {item.provision_id for item in controlling}
+
+        # A relation determines legal role.  The most relevant retrieved unit
+        # starts as controlling, but a special/overriding unit is promoted and
+        # the general referenced rule remains visible as its dependency.
         for edge in graph.edges:
-            if edge.source_id not in controlling_ids and edge.target_id not in controlling_ids:
+            if edge.source_id not in issue_provision_ids and edge.target_id not in issue_provision_ids:
                 continue
-            related_id = edge.target_id if edge.source_id in controlling_ids else edge.source_id
-            related = references.get(related_id)
-            if (
-                related is None
-                or related.status != "active"
-                or related.provision_id in controlling_ids
-            ):
-                continue
-            if edge.relationship == "exception_to":
-                exceptions.append(related)
+            source = references.get(edge.source_id)
+            target = references.get(edge.target_id)
+            if edge.relationship in {"special_rule_for", "overrides"}:
+                if source and source.status == "active":
+                    controlling.append(source)
+                if target and target.status == "active":
+                    dependencies.append(target)
+            elif edge.relationship == "exception_to":
+                if source and source.status == "active":
+                    exceptions.append(source)
+                if target and target.status == "active":
+                    dependencies.append(target)
             else:
-                dependencies.append(related)
+                for related in (source, target):
+                    if related and related.status == "active":
+                        dependencies.append(related)
+
+        controlling = _dedupe_provisions(controlling)
+        controlling_ids = {item.provision_id for item in controlling}
+        dependencies = [
+            item for item in _dedupe_provisions(dependencies)
+            if item.provision_id not in controlling_ids
+        ]
+        exceptions = [
+            item for item in _dedupe_provisions(exceptions)
+            if item.provision_id not in controlling_ids
+        ]
 
         cards = authority_cards.get(issue.issue_id, [])
         current_cards: list[AuthorityCard] = []
@@ -935,9 +1029,9 @@ def _build_evidence_bundles(
         bundles.append(
             EvidenceBundle(
                 issue_id=issue.issue_id,
-                controlling_provisions=_dedupe_provisions(controlling),
-                dependency_provisions=_dedupe_provisions(dependencies),
-                exception_provisions=_dedupe_provisions(exceptions),
+                controlling_provisions=controlling,
+                dependency_provisions=dependencies,
+                exception_provisions=exceptions,
                 supporting_authorities=current_cards,
                 contrary_authorities=[],
                 historical_authorities=historical_cards,
@@ -957,6 +1051,18 @@ def _build_evidence_bundles(
     return bundles
 
 
+def _reference_specificity(reference: ProvisionReference) -> int:
+    return sum(
+        bool(value)
+        for value in (
+            reference.article,
+            reference.paragraph,
+            reference.point,
+            reference.letter,
+        )
+    )
+
+
 def _all_active(provisions: Iterable[ProvisionReference]) -> bool:
     return all(item.status == "active" for item in provisions)
 
@@ -964,6 +1070,10 @@ def _all_active(provisions: Iterable[ProvisionReference]) -> bool:
 def _provision_lineage(
     retrieval: LegalRetrievalResult,
     bundles: list[EvidenceBundle],
+    *,
+    claims: Optional[list[LegalClaim]] = None,
+    writer_output: Optional[WriterOutput] = None,
+    final_answer: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """Record exact-reference transport without relying on article text parsing."""
     selected_ids = {
@@ -976,16 +1086,28 @@ def _provision_lineage(
         for lane in retrieval.primary_law
         for candidate in lane.candidates
     }
+    claim_ids = {
+        provision_id
+        for claim in claims or []
+        for provision_id in claim.controlling_provision_ids
+    }
+    writer_ids = {
+        source.source_id for source in (writer_output.sources if writer_output else [])
+    }
     return [
         {
             "provision_id": provision_id,
             "candidate_stage": True,
             "selected_stage": provision_id in selected_ids,
             "evidence_bundle_stage": provision_id in selected_ids,
-            "claim_stage": None,
-            "writer_payload_stage": None,
-            "final_answer_stage": None,
-            "drop_reason": None if provision_id in selected_ids else "not_selected_after_reranking",
+            "claim_stage": provision_id in claim_ids if claims is not None else None,
+            "writer_payload_stage": provision_id in claim_ids if claims is not None else None,
+            "final_answer_stage": (provision_id in writer_ids and bool(final_answer)) if writer_output is not None else None,
+            "drop_reason": (
+                None if provision_id in selected_ids and (claims is None or provision_id in claim_ids)
+                else "not_selected_after_reranking" if provision_id not in selected_ids
+                else "not_used_by_claim_synthesis"
+            ),
         }
         for provision_id in sorted(candidate_ids)
     ]

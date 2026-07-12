@@ -7,6 +7,7 @@ import os
 import re
 import time
 import asyncio
+import subprocess
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Literal, Optional, Union
@@ -119,7 +120,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "10.0.5"
+API_VERSION = "1.1.0"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -166,9 +167,28 @@ def legal_runtime_debug(*, controlled_pipeline_used: bool = False) -> dict[str, 
         "authority_extractor_mode": "model_structured" if mode == "legal_rag_v2" else "heuristic_or_disabled",
         "answer_provider": MODEL_GATEWAY_CONFIG.provider,
         "answer_model": MODEL_GATEWAY_CONFIG.answer_writer_model if mode == "legal_rag_v2" else DEFAULT_MODEL,
+        "provider": MODEL_GATEWAY_CONFIG.provider,
+        "model": MODEL_GATEWAY_CONFIG.answer_writer_model if mode == "legal_rag_v2" else DEFAULT_MODEL,
+        "git_commit": _git_commit(),
+        "api_version": API_VERSION,
         "controlled_pipeline_used": controlled_pipeline_used,
         "fallbacks_used": [],
     }
+
+
+def _git_commit() -> str:
+    """Expose a revision in diagnostics without making a failed lookup fatal."""
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return os.getenv("K_REVISION", "unknown")
 
 
 def get_legal_rag_v2_pipeline():
@@ -1402,12 +1422,25 @@ def build_render_diagnostics(
             result["full_rendered_output"] = reply
         return result
 
+    raw_references = [match.group(0) for match in PROVISION_REFERENCE_RENDER_RE.finditer(raw_candidate)]
+    guarded_references = [match.group(0) for match in PROVISION_REFERENCE_RENDER_RE.finditer(guarded_candidate)]
+    removed_references = sorted(
+        set(raw_references) - set(guarded_references), key=str.casefold
+    )
     return {
+        # Request traces are access-controlled alongside the chat.  Keeping
+        # the exact strings makes a lost provision diagnosable, rather than
+        # merely showing a hash after a destructive sanitizer ran.
+        "raw_model_output_text": raw_candidate,
+        "sanitized_output_text": guarded_candidate,
+        "postprocessed_output_text": completed_candidate,
         "raw_model_output": summarize(raw_candidate),
         "after_guardrails": summarize(guarded_candidate),
         "after_sources_repair": summarize(completed_candidate),
         "guardrails_changed_output": raw_candidate != guarded_candidate,
         "sources_repair_changed_output": guarded_candidate != completed_candidate,
+        "removed_provision_references": removed_references,
+        "output_changed": raw_candidate != completed_candidate,
         "retrieval": {
             "chunk_count": len(retrieved_chunks),
             "documents": [
@@ -1429,6 +1462,8 @@ def validate_final_output(
     *,
     axis_coverage: list[dict[str, object]],
     expected_sections: list[str],
+    allowed_provision_references: Optional[set[str]] = None,
+    verified_source_count: Optional[int] = None,
 ) -> dict[str, object]:
     has_completion_marker = RENDER_COMPLETION_MARKER in reply
     stripped_reply = strip_render_completion_marker(reply)
@@ -1453,10 +1488,26 @@ def validate_final_output(
             re.IGNORECASE,
         )
         and not re.search(
-            r"nie znaleziono zweryfikowanych źródeł w retrievalu",
+            r"nie znaleziono zweryfikowanych źródeł(?:\s+\w+){0,4}\s+w retrievalu",
             sources_content,
             re.IGNORECASE,
         )
+    )
+    rendered_references = [
+        normalize_provision_reference(match.group(0))
+        for match in PROVISION_REFERENCE_RENDER_RE.finditer(stripped_reply)
+    ]
+    unverified_references = (
+        sorted({reference for reference in rendered_references if reference not in allowed_provision_references})
+        if allowed_provision_references is not None
+        else []
+    )
+    claims_verified_sources = bool(re.search(r"(?:ustawa|przepis|art\.)", stripped_reply, re.IGNORECASE))
+    source_section_denies_sources = bool(re.search(
+        r"nie znaleziono zweryfikowanych źródeł", sources_content, re.IGNORECASE
+    ))
+    source_section_contradiction = bool(
+        verified_source_count == 0 and claims_verified_sources and not source_section_denies_sources
     )
 
     expected_domains = sorted(
@@ -1490,6 +1541,9 @@ def validate_final_output(
         "rendered_sections": rendered_section_titles,
         "empty_required_sections": empty_required_sections,
         "sources_without_sources": sources_without_sources,
+        "verified_source_count": verified_source_count,
+        "unverified_references": unverified_references,
+        "source_section_contradiction": source_section_contradiction,
         "no_placeholder_tokens": not bool(GENERIC_PRIMARY_LAW_PLACEHOLDER_RE.search(stripped_reply)),
         "no_empty_legal_reference_slots": not bool(EMPTY_LEGAL_REFERENCE_SLOT_RE.search(stripped_reply)),
         "no_uncertain_provision_phrases": not bool(
@@ -1512,6 +1566,8 @@ def validate_final_output(
         or missing_sections
         or empty_required_sections
         or sources_without_sources
+        or unverified_references
+        or source_section_contradiction
         or unfinished_sentence
         or (expected_domains and len(rendered_domains) < len(expected_domains))
         or not validation["no_placeholder_tokens"]
@@ -1529,6 +1585,10 @@ def validate_final_output(
             failed_checks.append(f"pusta sekcja: {', '.join(empty_required_sections)}")
         if sources_without_sources:
             failed_checks.append("sekcja Źródła bez źródeł")
+        if unverified_references:
+            failed_checks.append("niezweryfikowane referencje: " + ", ".join(unverified_references))
+        if source_section_contradiction:
+            failed_checks.append("sprzeczność między twierdzeniem o źródłach a liczbą zweryfikowanych źródeł")
         if unfinished_sentence:
             failed_checks.append("urwane ostatnie zdanie")
         if expected_domains and len(rendered_domains) < len(expected_domains):
@@ -1641,6 +1701,29 @@ def build_demo_reply(user_prompt: str, retrieved_chunks: list, *, retrieval_prom
         f"{citations or 'Nie znaleziono trafnych fragmentów w lokalnym indeksie.'}\n\n"
         "Ryzyka i luki\n"
         "Do odpowiedzi merytorycznej potrzebny jest skonfigurowany model językowy; powyższe źródła są jednak dostępne w RAG.\n\n"
+        f"{RENDER_COMPLETION_MARKER}"
+    )
+
+
+def build_missing_primary_law_reply() -> str:
+    """The only permitted general-answer output without controlling primary law.
+
+    This deliberately contains no substantive tax conclusion.  It is shared
+    by demo and live legacy paths so provider availability can never turn an
+    empty retrieval into an answer from model memory.
+    """
+    return (
+        "Teza\n"
+        "Nie można zatwierdzić materialnej odpowiedzi prawnej, ponieważ retrieval "
+        "nie dostarczył zweryfikowanego przepisu kontrolującego.\n\n"
+        "Analiza\n"
+        "Nie uruchomiono syntezy ani kalkulacji opartej na pamięci modelu. "
+        "Najpierw trzeba odnaleźć aktualną jednostkę redakcyjną właściwej ustawy.\n\n"
+        "Źródła\n"
+        "Nie znaleziono zweryfikowanych źródeł primary law w retrievalu.\n\n"
+        "Ryzyka i luki\n"
+        "Każda kategoryczna ocena lub rekomendacja wymaga ponownego researchu "
+        "z controlling provision.\n\n"
         f"{RENDER_COMPLETION_MARKER}"
     )
 
@@ -3479,6 +3562,8 @@ async def chat(
         ),
     )
     analysis_trace["request_trace_id"] = request_trace_id
+    analysis_trace["verified_primary_source_count"] = len(legal_rules)
+    analysis_trace["allowed_provision_references"] = sorted(allowed_provision_references)
     if hybrid_result:
         analysis_trace["hybrid_authority_rag"] = {
             "run_id": hybrid_result.run_id,
@@ -3491,6 +3576,46 @@ async def chat(
             "selected_chunk_ids": [chunk.chunk_id for chunk in hybrid_result.selected_chunks],
             "timings": hybrid_result.timings,
         }
+    # Fail closed before either the demo renderer or a provider sees the
+    # question.  A generic writer has no authority to supply a tax conclusion
+    # when no current, extracted primary-law rule controls it.
+    if not legal_rules:
+        blocked_reply = build_missing_primary_law_reply()
+        validation = validate_final_output(
+            blocked_reply,
+            axis_coverage=[],
+            expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
+        )
+        analysis_trace["claim_gate"] = {
+            "approved_claims_without_primary_source": 0,
+            "categorical_answer_with_no_sources": False,
+            "blocked_reason": "missing_controlling_primary_law",
+        }
+        analysis_trace["render_attempts"] = [{
+            "raw_model_output": None,
+            "sanitized_output": None,
+            "postprocessing_applied": False,
+            "validation": validation,
+        }]
+        analysis_trace["render_validation"] = validation
+        persisted_assistant_message = None
+        if chat_storage_available:
+            persisted_assistant_message = persist_chat_exchange(
+                chat_id,
+                user_id=current_user.id,
+                messages=sanitized_messages,
+                reply=strip_render_completion_marker(blocked_reply),
+            )
+        return ChatResponse(
+            reply=strip_render_completion_marker(blocked_reply),
+            mode="live" if model_configured else "demo",
+            model=model,
+            redactions=sorted(set(redactions)),
+            analysis_trace=analysis_trace,
+            chat_id=chat_id if chat_storage_available else None,
+            assistant_message_id=(persisted_assistant_message or {}).get("id"),
+            structured_reply=parse_structured_reply(blocked_reply),
+        )
     if not model_configured:
         demo_reply = build_demo_reply(latest_user_message, retrieved_chunks, retrieval_prompt=effective_user_prompt)
         demo_reply = enforce_reply_guardrails(
@@ -3648,17 +3773,11 @@ async def chat(
                 ),
                 timeout=model_timeout,
             )
-            guarded_candidate = enforce_reply_guardrails(
-                raw_candidate,
-                allowed_provision_references=allowed_provision_references,
-                missing_required_facts=missing_required_facts,
-                timeline_issues=timeline_issues,
-                claim_source_traces=list(analysis_trace.get("claim_source_traces") or []),
-            )
-            candidate = complete_empty_sources_section(
-                guarded_candidate,
-                retrieval_citations=render_verified_retrieval_sources(retrieved_chunks),
-            )
+            # A writer error is rejected, never "repaired" by regexes.  In
+            # particular, do not substitute an unverified article with "ten
+            # przepis": that loses the lineage needed to find the real fault.
+            guarded_candidate = raw_candidate
+            candidate = raw_candidate
             attempt_diagnostics = build_render_diagnostics(
                 raw_candidate=raw_candidate,
                 guarded_candidate=guarded_candidate,
@@ -3671,6 +3790,8 @@ async def chat(
                     candidate,
                     axis_coverage=axis_coverage,
                     expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
+                    allowed_provision_references=allowed_provision_references,
+                    verified_source_count=len(legal_rules),
                 )
             except HTTPException as exc:
                 last_render_error = exc

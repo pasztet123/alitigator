@@ -153,6 +153,17 @@ class EmbeddingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ProvisionGraphTests(unittest.TestCase):
+    def test_graph_marks_extension_of_referenced_rule_as_special_rule(self) -> None:
+        graph = ProvisionParser().build_graph(
+            "Art. 21.\n25. Reguła wydatków.\n30a. Wydatki, o których mowa w ust. 25, obejmują także spłatę kredytu.",
+            document_id="pit",
+            version_id="current",
+        )
+
+        edge = next(edge for edge in graph.edges if edge.relationship == "special_rule_for")
+        self.assertEqual(graph.get(edge.source_id).citation, "art. 21 ust. 30a")
+        self.assertEqual(graph.get(edge.target_id).citation, "art. 21 ust. 25")
+
     def test_parser_preserves_editorial_granularity_and_infers_explicit_exception(self) -> None:
         text = (
             "Art. 21. Zwolnienia.\n"

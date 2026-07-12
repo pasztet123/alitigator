@@ -31,6 +31,13 @@ _PROVISION_REFERENCE_RE = re.compile(
     r"(?:\s*lit\.\s*[a-zA-Z])?",
     re.IGNORECASE,
 )
+_RELATIVE_PROVISION_REFERENCE_RE = re.compile(
+    r"\bust\.\s*\d+[a-zA-Z]?"
+    r"(?:\s*pkt\s*\d+[a-zA-Z]?)?"
+    r"(?:\s*lit\.\s*[a-zA-Z])?",
+    re.IGNORECASE,
+)
+_ARTICLE_ONLY_RE = re.compile(r"\bart\.\s*(\d+[a-zA-Z]?)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -588,8 +595,11 @@ class LegalRetriever:
                 if original is not None:
                     retried.append(original)
                 continue
-            families = list(issue.query_families)
-            families.extend(
+            # Initial candidates are merged below, so a retry must execute
+            # only newly discovered citations. Re-running every natural query
+            # multiplies latency and can let the same broad candidates crowd
+            # out the backreference lane again.
+            families = list(
                 QueryFamily(
                     family="authority_backreference",
                     query=citation,
@@ -631,6 +641,13 @@ def _cited_provisions_by_issue(
                 raw = [raw]
             values.extend(str(item).strip() for item in raw if str(item).strip())
             values.extend(match.group(0).strip() for match in _PROVISION_REFERENCE_RE.finditer(candidate.text))
+            article_match = _ARTICLE_ONLY_RE.search(candidate.text)
+            if article_match:
+                article = article_match.group(1)
+                values.extend(
+                    f"art. {article} {match.group(0).strip()}"
+                    for match in _RELATIVE_PROVISION_REFERENCE_RE.finditer(candidate.text)
+                )
         # Case-insensitive stable de-duplication makes retries reproducible.
         seen: set[str] = set()
         result[lane.issue_id] = [

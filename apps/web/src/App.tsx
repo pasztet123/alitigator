@@ -82,6 +82,7 @@ type ModelsResponse = {
 
 type HealthResponse = {
   status: string
+  version: string
   llm_configured: boolean
   llm_provider: string
   supabase_configured: boolean
@@ -201,7 +202,7 @@ const HINT_DEBOUNCE_MS = 900
 const MIN_DRAFT_LENGTH_FOR_HINTS = 24
 const ACTIVE_HINT_COUNT = 3
 const MAX_HINT_QUESTION_COUNT = 5
-const APP_VERSION = '10.0.3'
+const APP_VERSION = '10.0.4'
 const ASSISTANT_SECTION_TITLES = [
   'Teza',
   'Analiza',
@@ -667,6 +668,7 @@ function App() {
   const [selectedModel, setSelectedModel] = useState('gpt-5.6-terra')
   const [lastRedactions, setLastRedactions] = useState<string[]>([])
   const [chatStorageAvailable, setChatStorageAvailable] = useState(false)
+  const [backendVersion, setBackendVersion] = useState<string | null>(null)
   const [promptHints, setPromptHints] = useState<PromptHint[]>([])
   const [intentHintAnswers, setIntentHintAnswers] = useState<Record<string, IntentHintAnswer>>({})
   const [isHintsLoading, setIsHintsLoading] = useState(false)
@@ -892,6 +894,7 @@ async function fetchPromptHints({
 
         if (!isCancelled) {
           setChatStorageAvailable(Boolean(healthPayload?.chat_storage_available))
+          setBackendVersion(healthPayload?.version ?? null)
         }
 
         if (!modelsResponse.ok) {
@@ -2091,7 +2094,9 @@ async function fetchPromptHints({
               </button>
             </div>
           </form>
-          <p className="helper-text small-text app-version-footer">Wersja {APP_VERSION}</p>
+          <p className="helper-text small-text app-version-footer">
+            Wersja {APP_VERSION} · API {backendVersion ?? 'niedostępne'}
+          </p>
         </footer>
       </section>
 

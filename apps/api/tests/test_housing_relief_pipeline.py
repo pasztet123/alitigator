@@ -128,6 +128,12 @@ class HousingReliefPipelineTests(unittest.TestCase):
         result = run_housing_relief_pipeline(USER_REPORTED_QUERY)
         self.assertTrue(result.render_validation.passed)
         self.assertEqual(result.claims["claim_tax_result"].result["tax"], 38_000)
+        self.assertEqual(
+            result.claims["claim_developer_deadline"].result["housing_relief_deadline"],
+            "2028-12-31",
+        )
+        self.assertIn("Upływa 2028-12-31.", result.answer)
+        self.assertNotIn("Upływa 2025-12-31.", result.answer)
 
     def test_housing_deadline_has_independent_statutory_provenance(self) -> None:
         facts = parse_housing_relief_facts(HOUSING_RELIEF_BENCHMARK_QUERY)
@@ -147,6 +153,16 @@ class HousingReliefPipelineTests(unittest.TestCase):
             "deadline_calculation_result_invalid",
             validate_housing_deadline_invariants(facts, corrupted),
         )
+
+    def test_sale_year_is_not_replaced_by_later_purchase_year(self) -> None:
+        facts = parse_housing_relief_facts(USER_REPORTED_QUERY)
+        calculations = calculate_housing_relief(facts)
+
+        self.assertEqual(facts.sale_year, 2025)
+        self.assertEqual(facts.purchase_year, 2022)
+        self.assertEqual(facts.sale_year_end, "2025-12-31")
+        self.assertEqual(facts.deadline, "2028-12-31")
+        self.assertEqual(calculations["calc_housing_relief_deadline"].result, "2028-12-31")
 
     def test_housing_transfer_date_boundaries(self) -> None:
         for transfer_date, expected in (

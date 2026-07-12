@@ -133,6 +133,26 @@ def _extract_year(query: str, pattern: str) -> int:
     return int(match.group(1))
 
 
+def _extract_sale_year(query: str) -> int:
+    """Read the year attached to the sale, never a later purchase year.
+
+    A generic ``sale ... year`` expression is unsafe in Polish prose such as
+    ``w 2025 sprzedałem ... które kupiłem w 2022``: the first year *after* the
+    sale verb belongs to the acquisition.  Prefer the year immediately before
+    the sale verb, then narrowly scoped sale-date formulations.
+    """
+    patterns = (
+        r"\b(20\d{2})\s*r?\.?\s*(?:roku\s+)?(?:sprzeda\w*|zby\w*)",
+        r"(?:sprzeda\w*|zby\w*)\s+(?:w\s+)?\b(20\d{2})\b",
+        r"(?:sprzeda\w*|zby\w*)[^.!?;,]{0,36}?\bw\s+(20\d{2})\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, query, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    raise ValueError("Missing year for sale")
+
+
 def housing_expense_deadline_for_sale_year(sale_year: int) -> str:
     """Article 21(1)(131): three years counted from the end of sale year."""
     return date(sale_year + HOUSING_EXPENSE_PERIOD_YEARS, 12, 31).isoformat()
@@ -175,7 +195,7 @@ class HousingReliefFacts:
 
 
 def parse_housing_relief_facts(query: str) -> HousingReliefFacts:
-    sale_year = _extract_year(query, r"(?:sprzeda\w*|zby\w*).*?\b(20\d{2})\b")
+    sale_year = _extract_sale_year(query)
     purchase_year_match = re.search(r"(?:naby\w*|kupi\w*|zakup\w*).*?\b(20\d{2})\b", query, re.IGNORECASE)
     purchase_year = int(purchase_year_match.group(1)) if purchase_year_match else None
     revenue = (

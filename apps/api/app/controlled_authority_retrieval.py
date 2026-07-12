@@ -17,10 +17,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from app.rag import RagChunk, get_rag_config, search_chunks
+from app.rag import RagChunk, RagDocumentContext, fetch_document_contexts, get_rag_config, search_chunks
 
 
 Search = Callable[..., list[RagChunk]]
+ContextFetcher = Callable[..., list[RagDocumentContext]]
 _API_DIR = Path(__file__).resolve().parent.parent
 _DEFAULT_JUDGMENT_CORPUS = _API_DIR / "data" / "processed" / "cbosa_nsa_fsk_judgments.jsonl"
 
@@ -102,6 +103,7 @@ def retrieve_housing_authorities(
     query: str,
     *,
     search: Search = search_chunks,
+    context_fetcher: ContextFetcher = fetch_document_contexts,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     """Retrieve only high-relevance cards and preserve complete selection trace."""
     cards: list[dict[str, object]] = []
@@ -144,7 +146,7 @@ def retrieve_housing_authorities(
                 errors.append(f"{issue.issue_id}:{source_type}:{type(exc).__name__}")
                 continue
             candidate_counts[source_type] += len(candidates)
-            for chunk in candidates:
+            for chunk in _hydrate_document_contexts(candidates, context_fetcher=context_fetcher):
                 selection = _select_candidate(chunk, issue)
                 if selection is None:
                     filtered_counts[source_type] += 1
@@ -185,6 +187,51 @@ def retrieve_housing_authorities(
         "judgment_indexed_count_recorded": True,
     }
     return cards, outcome
+
+
+def _hydrate_document_contexts(
+    candidates: list[RagChunk],
+    *,
+    context_fetcher: ContextFetcher,
+) -> list[RagChunk]:
+    """Score holdings from the complete authority document, not a seed chunk."""
+    if not candidates:
+        return []
+    unique_ids = list(dict.fromkeys(chunk.document_id for chunk in candidates if chunk.document_id))
+    try:
+        contexts = context_fetcher(unique_ids, seed_chunks=candidates)
+    except Exception:
+        contexts = []
+    by_document = {context.document_id: context for context in contexts}
+    hydrated: list[RagChunk] = []
+    for chunk in candidates:
+        context = by_document.get(chunk.document_id)
+        if context is None or not context.text.strip():
+            hydrated.append(chunk)
+            continue
+        hydrated.append(
+            RagChunk(
+                chunk_id=f"{context.document_id}:document_context",
+                document_id=context.document_id,
+                chunk_index=0,
+                score=chunk.score,
+                chunk_text=context.text,
+                subject=context.subject,
+                signature=context.signature,
+                published_date=context.published_date,
+                source_url=context.source_url,
+                category=context.category,
+                source=context.source,
+                source_type=context.source_type,
+                source_subtype=context.source_subtype,
+                authority=context.authority,
+                publication=context.publication,
+                legal_state_date=context.legal_state_date,
+                source_pages=context.source_pages,
+                legal_provisions=context.legal_provisions,
+            )
+        )
+    return hydrated
 
 
 def _issue_query(query: str, issue: ControlledAuthorityIssue) -> str:
@@ -238,7 +285,12 @@ def _select_candidate(
         "issue_label": issue.label,
         "holding": holding,
         "holding_section": holding_section,
-        "holding_source_span": {"chunk_id": chunk.chunk_id, **holding_span},
+        "holding_source_span": {
+            "chunk_id": chunk.chunk_id,
+            "document_id": chunk.document_id,
+            "scope": "document_context" if chunk.chunk_id.endswith(":document_context") else "chunk",
+            **holding_span,
+        },
         "holding_complete_sentence": True,
         "outcome": _outcome_from_holding(holding),
         "transaction_type": transaction_type,

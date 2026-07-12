@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from app.controlled_authority_retrieval import audit_judgment_corpus, retrieve_housing_authorities
 from app.housing_relief_pipeline import HOUSING_RELIEF_BENCHMARK_QUERY, run_housing_relief_pipeline
-from app.rag import RagChunk
+from app.rag import RagChunk, RagDocumentContext
 
 
 def _chunk(*, text: str, provision: str, signature: str) -> RagChunk:
@@ -61,7 +61,11 @@ class ControlledHousingAuthorityRetrievalTests(unittest.TestCase):
                 return [GOOD_CREDIT, WRONG_MORTGAGE_NEIGHBOR]
             return []
 
-        cards, outcome = retrieve_housing_authorities("Sprzedałem mieszkanie i spłaciłem kredyt.", search=search)
+        cards, outcome = retrieve_housing_authorities(
+            "Sprzedałem mieszkanie i spłaciłem kredyt.",
+            search=search,
+            context_fetcher=lambda document_ids, *, seed_chunks: [],
+        )
 
         self.assertEqual(len(calls), 8)
         issued_queries = outcome["authority_queries"]
@@ -100,17 +104,59 @@ class ControlledHousingAuthorityRetrievalTests(unittest.TestCase):
                 return [WRONG_MORTGAGE_NEIGHBOR, TRUNCATED_HOLDING]
             return []
 
-        cards, outcome = retrieve_housing_authorities("Spłata kredytu po sprzedaży mieszkania.", search=search)
+        cards, outcome = retrieve_housing_authorities(
+            "Spłata kredytu po sprzedaży mieszkania.",
+            search=search,
+            context_fetcher=lambda document_ids, *, seed_chunks: [],
+        )
 
         self.assertEqual(cards, [])
         self.assertEqual(outcome["outcome"], "no_high_quality_authorities")
         self.assertTrue(outcome["empty_high_quality_result_supported"])
         self.assertGreater(outcome["filtered_counts"]["interpretation"], 0)
 
+    def test_extracts_holding_from_complete_document_not_seed_chunk(self) -> None:
+        seed = _chunk(
+            signature="0115-KDIT3.4011.4.2026.1.AK",
+            provision="art. 21 ust. 30a ustawy PIT",
+            text="Fragment wyszukiwawczy o art. 21 ust. 30a i spłacie kredytu.",
+        )
+        context = RagDocumentContext(
+            document_id=seed.document_id,
+            subject=seed.subject,
+            signature=seed.signature,
+            published_date=seed.published_date,
+            source_url=seed.source_url,
+            category=None,
+            source="eureka",
+            source_type="interpretation",
+            source_subtype=None,
+            authority="Dyrektor KIS",
+            publication=None,
+            legal_state_date=None,
+            source_pages=[],
+            legal_provisions=["art. 21 ust. 30a ustawy PIT"],
+            text=GOOD_CREDIT.chunk_text,
+            seed_chunk_ids=[seed.chunk_id],
+        )
+
+        cards, _ = retrieve_housing_authorities(
+            "Spłata kredytu po sprzedaży mieszkania.",
+            search=lambda query, *, limit, source_types: [seed]
+            if source_types == {"interpretation"} and "art. 21 ust. 30a" in query
+            else [],
+            context_fetcher=lambda document_ids, *, seed_chunks: [context],
+        )
+
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["holding_source_span"]["scope"], "document_context")
+        self.assertEqual(cards[0]["holding_source_span"]["document_id"], seed.document_id)
+
     def test_judgment_audit_records_corpus_index_and_filter_counts(self) -> None:
         cards, outcome = retrieve_housing_authorities(
             "Sprzedaż mieszkania.",
             search=lambda query, *, limit, source_types: [],
+            context_fetcher=lambda document_ids, *, seed_chunks: [],
         )
 
         self.assertEqual(cards, [])

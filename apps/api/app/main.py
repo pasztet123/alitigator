@@ -120,7 +120,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "1.1.2"
+API_VERSION = "1.1.3"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -174,6 +174,54 @@ def legal_runtime_debug(*, controlled_pipeline_used: bool = False) -> dict[str, 
         "controlled_pipeline_used": controlled_pipeline_used,
         "fallbacks_used": [],
     }
+
+
+def retrieve_controlled_authority_lane(query: str) -> tuple[list[dict[str, str]], dict[str, object]]:
+    """Run secondary-authority retrieval even when primary claims are deterministic.
+
+    A controlled calculation establishes the legal conclusion, but Alitigator is
+    also a research product.  Interpretations and judgments are therefore a
+    separate, non-blocking lane: their absence is reported in the trace rather
+    than silently becoming an empty sources section.
+    """
+    candidates: list[RagChunk] = []
+    errors: list[str] = []
+    counts: dict[str, int] = {}
+    for source_type, limit in (("interpretation", 4), ("judgment", 3)):
+        try:
+            hits = search_chunks(query, limit=limit, source_types={source_type})
+            counts[source_type] = len(hits)
+            candidates.extend(hits)
+        except Exception as exc:  # Authority research must not erase a verified primary answer.
+            logger.exception("Controlled authority retrieval failed for %s", source_type)
+            counts[source_type] = 0
+            errors.append(f"{source_type}:{type(exc).__name__}")
+
+    cards: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for chunk in candidates:
+        label = (chunk.signature or chunk.subject or "").strip()
+        key = (chunk.source_type, label)
+        if not label or key in seen:
+            continue
+        seen.add(key)
+        cards.append(
+            {
+                "source_type": chunk.source_type,
+                "label": label,
+                "source_url": chunk.source_url or "",
+            }
+        )
+    outcome: dict[str, object] = {
+        "authority_lane_executed": True,
+        "authority_candidates_count_recorded": True,
+        "candidate_counts": counts,
+        "rendered_authority_cards": len(cards),
+        "empty_authority_result_explained": not cards,
+        "outcome": "no_matching_authorities" if not cards else "authorities_found",
+        "errors": errors,
+    }
+    return cards, outcome
 
 
 def _git_commit() -> str:
@@ -3299,8 +3347,12 @@ async def chat(
     # Controlled cases bypass the legacy free-form writer entirely. The renderer
     # receives only validated claims and exact registry references.
     if is_mixed_invoice_query(effective_user_prompt):
+        authority_cards, authority_outcome = retrieve_controlled_authority_lane(effective_user_prompt)
         try:
-            controlled_result = run_legal_pipeline(effective_user_prompt)
+            controlled_result = run_legal_pipeline(
+                effective_user_prompt,
+                authority_cards=authority_cards,
+            )
         except Exception as exc:
             logger.exception("Mixed-invoice controlled pipeline failed")
             raise HTTPException(
@@ -3341,6 +3393,7 @@ async def chat(
                     for claim in controlled_result.claims.values()
                 ],
                 "renderer_payload": controlled_result.renderer_payload,
+                "authority_retrieval": authority_outcome,
                 "render_validation": {
                     "passed": controlled_result.render_validation.passed,
                     "missing_claim_ids": list(controlled_result.render_validation.missing_claim_ids),
@@ -3359,8 +3412,12 @@ async def chat(
         )
 
     if can_run_housing_relief_pipeline(effective_user_prompt):
+        authority_cards, authority_outcome = retrieve_controlled_authority_lane(effective_user_prompt)
         try:
-            controlled_result = run_housing_relief_pipeline(effective_user_prompt)
+            controlled_result = run_housing_relief_pipeline(
+                effective_user_prompt,
+                authority_cards=authority_cards,
+            )
         except Exception as exc:
             logger.exception("Housing-relief controlled pipeline failed")
             raise HTTPException(
@@ -3426,6 +3483,7 @@ async def chat(
                     for claim in controlled_result.claims.values()
                 ],
                 "renderer_payload": controlled_result.renderer_payload,
+                "authority_retrieval": authority_outcome,
                 "render_validation": {
                     "passed": controlled_result.render_validation.passed,
                     "missing_claim_ids": list(controlled_result.render_validation.missing_claim_ids),

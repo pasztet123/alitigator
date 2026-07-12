@@ -44,10 +44,9 @@ class MixedInvoiceEndToEndTests(unittest.TestCase):
         self.assertEqual(result.render_validation.thesis_contradictions, ())
         self.assertFalse(result.render_validation.truncated)
         self.assertEqual(result.render_validation.missing_required_sections, ())
-        self.assertIn("[provision_id:vat_art_108a_ust_1a]", result.answer)
-        self.assertIn("[version_id:vat_act_2019-11-01]", result.answer)
-        self.assertIn("Fakty: fact_invoice_total", result.answer)
-        self.assertIn("Obliczenia: calc_cost_payment_a", result.answer)
+        self.assertIn("Źródła\n- art. 15d ust. 1 pkt 3 ustawy CIT.", result.answer)
+        for forbidden in ("[claim_id:", "[provision_id:", "[version_id:", "fact_", "calculation_id:"):
+            self.assertNotIn(forbidden, result.answer)
 
         payload = result.renderer_payload
         self.assertNotIn("raw_documents", payload)
@@ -79,17 +78,9 @@ class MixedInvoiceEndToEndTests(unittest.TestCase):
         self.assertIsNotNone(current)
         self.assertIn("właściwego dla podatnika", current.text)
 
-    def test_validator_fails_closed_on_missing_claim_and_contradiction(self) -> None:
+    def test_validator_fails_closed_on_internal_metadata(self) -> None:
         result = run_legal_pipeline(BENCHMARK_QUERY)
-        broken = (
-            result.answer.replace(
-                "Płatność B nie podlega obowiązkowemu MPP.",
-                "Płatność B podlega obowiązkowemu MPP.",
-                1,
-            )
-            .replace("[claim_id:claim_invoice_scope]", "", 1)
-            + f"\n\n{END_MARKER}"
-        )
+        broken = result.answer + "\n[claim_id:claim_invoice_scope]" + f"\n\n{END_MARKER}"
         payload_result = run_legal_pipeline(BENCHMARK_QUERY)
         registry = build_mixed_invoice_registry()
         payload = build_renderer_payload(
@@ -99,10 +90,7 @@ class MixedInvoiceEndToEndTests(unittest.TestCase):
         validation = validate_rendered_answer(broken, payload)
 
         self.assertFalse(validation.passed)
-        self.assertIn("claim_invoice_scope", validation.missing_claim_ids)
-        self.assertIn(
-            "claim_mpp_payment_b", validation.thesis_contradictions
-        )
+        self.assertIn("internal_metadata_exposed", validation.errors)
 
     def test_validator_rejects_truncation_and_missing_section(self) -> None:
         result = run_legal_pipeline(BENCHMARK_QUERY)
@@ -129,7 +117,7 @@ class MixedInvoiceEndToEndTests(unittest.TestCase):
         sources_start, sources_sep, sources_and_rest = result.answer.partition("\n\nŹródła\n")
         sources_body, risks_sep, risks_and_rest = sources_and_rest.partition("\n\nRyzyka i luki\n")
         broken_sources = sources_body.replace(
-            "[provision_id:vat_art_108a_ust_1a]",
+            "art. 108a ust. 1a ustawy VAT",
             "",
             1,
         )

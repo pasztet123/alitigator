@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
+from typing import Iterable
 
 from app.controlled_legal_pipeline import (
     LegalPipelineResult,
@@ -35,6 +36,7 @@ MONEY_PATTERN = (
     r"(?P<scale>tys\.?|tysi(?:ą|a)c\w*|tysi[eę]cy|mln|milion\w*)?\s*zł"
 )
 MONEY_RE = re.compile(MONEY_PATTERN, re.IGNORECASE)
+HOUSING_EXPENSE_PERIOD_YEARS = 3
 
 
 def is_housing_relief_query(query: str) -> bool:
@@ -130,10 +132,31 @@ def _extract_year(query: str, pattern: str) -> int:
     return int(match.group(1))
 
 
+def housing_expense_deadline_for_sale_year(sale_year: int) -> str:
+    """Article 21(1)(131): three years counted from the end of sale year."""
+    return date(sale_year + HOUSING_EXPENSE_PERIOD_YEARS, 12, 31).isoformat()
+
+
+def _extract_transfer_date(query: str) -> str:
+    """Extract the ownership-transfer date while retaining day-level boundaries."""
+    trigger = (
+        r"(?:przeniesieni\w*\s+w(?:ł|l)asnoś\w*|"
+        r"akt\w*\s+(?:notarialn\w*|przenosz\w*\s+w(?:ł|l)asnoś\w*))"
+    )
+    iso_match = re.search(rf"{trigger}.{{0,80}}?\b(20\d{{2}}-\d{{2}}-\d{{2}})\b", query, re.I | re.S)
+    if iso_match:
+        return date.fromisoformat(iso_match.group(1)).isoformat()
+    year_match = re.search(rf"{trigger}.{{0,80}}?\b(20\d{{2}})\b", query, re.I | re.S)
+    if not year_match:
+        raise ValueError("Missing date for ownership transfer")
+    return date(int(year_match.group(1)), 12, 31).isoformat()
+
+
 @dataclass(frozen=True)
 class HousingReliefFacts:
     records: dict[str, FactRecord]
     sale_year: int
+    sale_year_end: str
     purchase_year: int | None
     revenue: int
     acquisition_cost: int | None
@@ -144,6 +167,7 @@ class HousingReliefFacts:
     qualified_expenses: int
     disqualified_developer_expense: int
     planned_transfer_year: int
+    planned_transfer_date: str
     deadline: str
 
 
@@ -198,19 +222,20 @@ def parse_housing_relief_facts(query: str) -> HousingReliefFacts:
         )
         or credit_repayment + developer_payment
     )
-    planned_transfer_year = _extract_year(
-        query,
-        r"(?:przeniesieni\w*\s+w(?:ł|l)asnoś\w*|"
-        r"akt\w*\s+(?:notarialn\w*|przenosz\w*\s+w(?:ł|l)asnoś\w*)).*?\b(20\d{2})\b",
-    )
-    deadline = date(sale_year + 3, 12, 31).isoformat()
-    developer_expense_qualifies = planned_transfer_year <= int(deadline[:4])
+    planned_transfer_date = _extract_transfer_date(query)
+    planned_transfer_year = int(planned_transfer_date[:4])
+    sale_year_end = date(sale_year, 12, 31).isoformat()
+    deadline = housing_expense_deadline_for_sale_year(sale_year)
+    developer_expense_qualifies = planned_transfer_date <= deadline
     disqualified_developer_expense = 0 if developer_expense_qualifies else developer_payment
     qualified_expenses = credit_repayment + (
         developer_payment if developer_expense_qualifies else 0
     )
     records = {
         "sale_year": FactRecord("sale_year", "year", sale_year, subject_role="transaction"),
+        "sale_year_end": FactRecord(
+            "sale_year_end", "date", sale_year_end, date=sale_year_end, subject_role="transaction"
+        ),
         "purchase_year": FactRecord("purchase_year", "year", purchase_year, subject_role="transaction") if purchase_year is not None else FactRecord("purchase_year", "year", None, status="missing", subject_role="transaction"),
         "revenue": FactRecord("revenue", "money", revenue, subject_role="transaction"),
         "acquisition_cost": FactRecord("acquisition_cost", "money", acquisition_cost, subject_role="transaction") if acquisition_cost is not None else FactRecord("acquisition_cost", "money", None, status="missing", subject_role="transaction"),
@@ -251,6 +276,13 @@ def parse_housing_relief_facts(query: str) -> HousingReliefFacts:
             planned_transfer_year,
             subject_role="transaction",
         ),
+        "planned_transfer_date": FactRecord(
+            "planned_transfer_date",
+            "date",
+            planned_transfer_date,
+            date=planned_transfer_date,
+            subject_role="transaction",
+        ),
         "housing_expense_deadline": FactRecord(
             "housing_expense_deadline",
             "date",
@@ -258,10 +290,18 @@ def parse_housing_relief_facts(query: str) -> HousingReliefFacts:
             date=deadline,
             subject_role="transaction",
         ),
+        "credit_not_previously_tax_preferenced": FactRecord(
+            "credit_not_previously_tax_preferenced",
+            "bool",
+            None,
+            status="missing",
+            subject_role="transaction",
+        ),
     }
     return HousingReliefFacts(
         records=records,
         sale_year=sale_year,
+        sale_year_end=sale_year_end,
         purchase_year=purchase_year,
         revenue=revenue,
         acquisition_cost=acquisition_cost,
@@ -272,6 +312,7 @@ def parse_housing_relief_facts(query: str) -> HousingReliefFacts:
         qualified_expenses=qualified_expenses,
         disqualified_developer_expense=disqualified_developer_expense,
         planned_transfer_year=planned_transfer_year,
+        planned_transfer_date=planned_transfer_date,
         deadline=deadline,
     )
 
@@ -405,7 +446,7 @@ def calculate_housing_relief(
             Decimal("1"), rounding=ROUND_HALF_UP
         )
     )
-    developer_expense_qualifies = facts.planned_transfer_year <= int(facts.deadline[:4])
+    developer_expense_qualifies = facts.planned_transfer_date <= facts.deadline
     return {
         "calc_housing_relief_revenue": CalculationRecord(
             "calc_housing_relief_revenue",
@@ -469,19 +510,55 @@ def calculate_housing_relief(
         "calc_housing_relief_deadline": CalculationRecord(
             "calc_housing_relief_deadline",
             "end_of_third_year_following_sale",
-            {"sale_year": facts.sale_year},
+            {
+                "sale_year": facts.sale_year,
+                "sale_year_end": facts.sale_year_end,
+                "statutory_period_years": HOUSING_EXPENSE_PERIOD_YEARS,
+                "deadline_source": "pit_art_21_ust_1_pkt_131",
+                "acquisition_condition_source": "pit_art_21_ust_25a",
+            },
             facts.deadline,
         ),
         "calc_housing_relief_developer_qualification": CalculationRecord(
             "calc_housing_relief_developer_qualification",
             "compare_transfer_year_to_deadline",
             {
-                "planned_transfer_year": facts.planned_transfer_year,
+                "planned_transfer_date": facts.planned_transfer_date,
                 "deadline": facts.deadline,
+                "acquisition_condition_source": "pit_art_21_ust_25a",
             },
             developer_expense_qualifies,
         ),
     }
+
+
+def validate_housing_deadline_invariants(
+    facts: HousingReliefFacts,
+    calculations: dict[str, CalculationRecord],
+) -> tuple[str, ...]:
+    """Independently recompute the statutory time limit before claims use it."""
+    expected_sale_year_end = date(facts.sale_year, 12, 31).isoformat()
+    expected_deadline = housing_expense_deadline_for_sale_year(facts.sale_year)
+    deadline = calculations.get("calc_housing_relief_deadline")
+    qualification = calculations.get("calc_housing_relief_developer_qualification")
+    errors: list[str] = []
+    if facts.sale_year_end != expected_sale_year_end:
+        errors.append("sale_year_end_invariant_failed")
+    if facts.deadline != expected_deadline:
+        errors.append("housing_expense_deadline_invariant_failed")
+    if deadline is None or deadline.result != expected_deadline:
+        errors.append("deadline_calculation_result_invalid")
+    elif (
+        deadline.inputs.get("sale_year_end") != expected_sale_year_end
+        or deadline.inputs.get("statutory_period_years") != HOUSING_EXPENSE_PERIOD_YEARS
+        or deadline.inputs.get("deadline_source") != "pit_art_21_ust_1_pkt_131"
+        or deadline.inputs.get("acquisition_condition_source") != "pit_art_21_ust_25a"
+    ):
+        errors.append("deadline_calculation_provenance_invalid")
+    expected_qualification = facts.planned_transfer_date <= expected_deadline
+    if qualification is None or qualification.result is not expected_qualification:
+        errors.append("developer_qualification_boundary_invalid")
+    return tuple(errors)
 
 
 def _claim(
@@ -604,13 +681,14 @@ def build_housing_relief_claims(
             "claim_developer_deadline",
             (
                 f"Ustawowy termin wynika z art. 21 ust. 25a ustawy PIT. Upływa {facts.deadline}. "
-                f"Skoro przeniesienie własności ma nastąpić dopiero w {facts.planned_transfer_year} r., "
+                f"Skoro przeniesienie własności ma nastąpić {facts.planned_transfer_date}, "
                 "wskazany wydatek deweloperski nie kwalifikuje się; to wynik negatywny, a nie ryzyko interpretacyjne."
             ),
             "housing_relief_developer_deadline",
             {
                 "housing_expense_deadline": facts.deadline,
                 "planned_transfer_year": facts.planned_transfer_year,
+                "planned_transfer_date": facts.planned_transfer_date,
                 "developer_payment": facts.developer_payment,
                 "disqualified_developer_expense": facts.disqualified_developer_expense,
                 "developer_expense_qualifies": False,
@@ -618,7 +696,7 @@ def build_housing_relief_claims(
                 "interpretive_risk_status_used": False,
             },
             ("pit_art_21_ust_25a",),
-            ("planned_transfer_year", "housing_expense_deadline"),
+            ("planned_transfer_date", "housing_expense_deadline"),
             calculation_ids=("calc_housing_relief_deadline",),
         ),
         _claim(
@@ -645,18 +723,34 @@ def build_housing_relief_claims(
             calculation_ids=("calc_housing_relief_credit_repayment",),
             legal_mechanism="housing_relief_credit_repayment",
         ),
+        _claim(
+            "claim_credit_prior_tax_relief_condition",
+            "Trzeba jeszcze potwierdzić, że spłacany kredyt ani jego odsetki nie zostały wcześniej rozliczone w innej uldze podatkowej; od tego zależy ostateczne uwzględnienie tej części wydatku.",
+            "",
+            {"status": "conditional_missing_fact"},
+            ("pit_art_21_ust_30",),
+            ("credit_not_previously_tax_preferenced",),
+            status="conditional_missing_fact",
+            legal_mechanism="",
+        ),
     ]
     return {item.claim_id: item for item in claims}
 
 
 def run_housing_relief_pipeline(
-    query: str, *, target_date: str = "2026-06-30"
+    query: str,
+    *,
+    target_date: str = "2026-06-30",
+    authority_cards: Iterable[dict[str, str]] = (),
 ) -> LegalPipelineResult:
     if not can_run_housing_relief_pipeline(query):
         raise ValueError("Query is not a supported housing-relief controlled case.")
     registry = build_housing_relief_registry()
     facts = parse_housing_relief_facts(query)
     calculations = calculate_housing_relief(facts)
+    deadline_errors = validate_housing_deadline_invariants(facts, calculations)
+    if deadline_errors:
+        raise ValueError("Deadline calculation invariant failed: " + ", ".join(deadline_errors))
     claims = build_housing_relief_claims(facts, calculations)
     for claim in claims.values():
         validation = validate_claim(
@@ -666,13 +760,18 @@ def run_housing_relief_pipeline(
             facts=facts.records,
             calculations=calculations,
         )
-        if not validation.claim_supported:
+        conditional_missing_fact = (
+            claim.status == "conditional_missing_fact"
+            and set(validation.errors) == {"missing_fact_dependency"}
+        )
+        if not validation.claim_supported and not conditional_missing_fact:
             raise ValueError(f"Claim {claim.claim_id} failed: {validation.errors}")
     payload = build_renderer_payload(
         claims,
         registry,
         target_date=target_date,
         calculations=calculations,
+        authority_cards=authority_cards,
     )
     rendered = render_answer(payload)
     validation = validate_rendered_answer(rendered, payload)

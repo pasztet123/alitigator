@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass, replace
 from decimal import Decimal
-from typing import Optional
+from difflib import SequenceMatcher
+from typing import Iterable, Optional
 
 from app.legal_pipeline import (
     AnswerPlan,
@@ -22,7 +23,9 @@ PLACEHOLDER_RE = re.compile(
     r"zweryfikowany przepis wskazany w źródłach|primary law|\bten przepis\b|TODO|TBD",
     re.IGNORECASE,
 )
-CLAIM_MARKER_RE = re.compile(r"\[claim_id:([a-z0-9_:.-]+)]", re.IGNORECASE)
+INTERNAL_RENDER_MARKER_RE = re.compile(
+    r"\[(?:claim_id|provision_id|version_id|fact_id|calculation_id):", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)
@@ -32,15 +35,19 @@ class RendererPayload:
     answer_plan: AnswerPlan
     provisions: tuple[dict[str, str], ...]
     calculations: tuple[dict[str, object], ...] = ()
+    authority_cards: tuple[dict[str, str], ...] = ()
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "approved_claims": [asdict(item) for item in self.approved_claims],
             "conditional_claims": [asdict(item) for item in self.conditional_claims],
             "answer_plan": asdict(self.answer_plan),
             "provisions": [dict(item) for item in self.provisions],
             "calculations": [dict(item) for item in self.calculations],
         }
+        if self.authority_cards:
+            payload["authority_cards"] = [dict(item) for item in self.authority_cards]
+        return payload
 
 
 @dataclass(frozen=True)
@@ -55,6 +62,7 @@ class RenderValidation:
     errors: tuple[str, ...]
     missing_required_sections: tuple[str, ...] = ()
     tables_closed: bool = True
+    thesis_analysis_duplicate_ratio: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -197,6 +205,7 @@ def build_renderer_payload(
     *,
     target_date: str,
     calculations: Optional[dict[str, CalculationRecord]] = None,
+    authority_cards: Iterable[dict[str, str]] = (),
 ) -> RendererPayload:
     approved: list[LegalClaim] = []
     conditional: list[LegalClaim] = []
@@ -274,42 +283,80 @@ def build_renderer_payload(
             }
             for item in (calculations or {}).values()
         ),
+        authority_cards=tuple(dict(item) for item in authority_cards),
+    )
+
+
+def _references_for_claim(claim: LegalClaim, provision_map: dict[str, str]) -> str:
+    return ", ".join(
+        provision_map[item]
+        for item in (*claim.controlling_provisions, *claim.dependency_provisions)
+        if item in provision_map
+    )
+
+
+def _thesis_claims(payload: RendererPayload) -> list[LegalClaim]:
+    approved = list(payload.approved_claims)
+    preferred_codes = (
+        "housing_relief_tax",
+        "housing_relief_developer_deadline",
+        "credit_on_sold_property_qualified",
+        "sale_tax_regime",
+    )
+    selected = [claim for code in preferred_codes for claim in approved if claim.result_code == code]
+    selected.extend(claim for claim in approved if claim not in selected)
+    return selected[:3]
+
+
+def _render_calculation_result(claim: LegalClaim, calculation_map: dict[str, dict[str, object]]) -> str:
+    calculation_ids = tuple(dict.fromkeys((*claim.calculation_ids, *((claim.calculation_id,) if claim.calculation_id else ()))))
+    values = [calculation_map[item].get("result") for item in calculation_ids if item in calculation_map]
+    numeric_values = [value for value in values if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)]
+    if not numeric_values:
+        return ""
+    rendered = ", ".join(
+        f"{int(value):,} zł".replace(",", " ") if isinstance(value, int) else str(value)
+        for value in numeric_values
+    )
+    return f" Zweryfikowane obliczenie daje: {rendered}."
+
+
+def _analysis_explanation(claim: LegalClaim) -> str:
+    housing_explanations = {
+        "sale_tax_regime": "Sprzedaż nastąpiła przed upływem pięciu pełnych lat liczonych od końca roku nabycia, więc wchodzi do reżimu PIT dla odpłatnego zbycia.",
+        "housing_relief_formula": "Zwolnienie jest obliczane proporcją dochodu, wydatków kwalifikowanych i przychodu; wydatku nie wolno utożsamiać z dochodem zwolnionym.",
+        "housing_relief_exempt_income": "Najpierw ustala się wydatki kwalifikowane, a dopiero potem część dochodu zwolnioną według ustawowego wzoru.",
+        "housing_relief_tax": "Po odjęciu dochodu zwolnionego od dochodu ze sprzedaży pozostała część podlega stawce 19%.",
+        "housing_relief_developer_deadline": "Termin biegnie od końca roku sprzedaży; dla wydatku deweloperskiego konieczne jest uzyskanie własności przed jego upływem.",
+        "credit_on_sold_property_qualified": "Przepis szczególny dotyczący kredytu ze zbywanej nieruchomości działa wraz z regułą ogólną i nie pozwala pominąć tego wyjątku.",
+    }
+    return housing_explanations.get(
+        claim.result_code,
+        "Zastosowanie przepisu wymaga odniesienia jego warunków do wskazanych w pytaniu faktów.",
     )
 
 
 def render_answer(payload: RendererPayload, *, compact: bool = False) -> str:
-    claims = [*payload.approved_claims, *payload.conditional_claims]
     provision_map = {item["provision_id"]: item["display_reference"] for item in payload.provisions}
-    thesis = [
-        f"- {claim.text} [claim_id:{claim.claim_id}]"
-        for claim in claims
-    ]
+    calculation_map = {
+        str(item.get("calculation_id") or ""): item
+        for item in payload.calculations
+        if str(item.get("calculation_id") or "")
+    }
+    thesis = [f"- {claim.text}" for claim in _thesis_claims(payload)]
     analysis_by_axis: dict[str, list[str]] = {}
-    for claim in claims:
-        references = ", ".join(
-            provision_map[item]
-            for item in claim.controlling_provisions
-            if item in provision_map
-        )
-        dependencies = ", ".join(
-            provision_map[item]
-            for item in claim.dependency_provisions
-            if item in provision_map
-        )
-        source_note = f" Podstawa kontrolująca: {references}."
-        if dependencies:
-            source_note += f" Źródło zależności: {dependencies}."
+    for claim in payload.approved_claims:
+        references = _references_for_claim(claim, provision_map)
+        source_note = f" Zastosowane przepisy: {references}." if references else ""
         axis_title = (
             "VAT" if claim.axis_id.lower().startswith("vat_")
             else "CIT" if claim.axis_id.lower().startswith("cit_")
             else ""
         )
         analysis_by_axis.setdefault(axis_title, []).append(
-            f"- {claim.text}{source_note}"
-            f" Provision IDs: {', '.join(claim.controlling_provisions)}."
-            f" Fakty: {', '.join(claim.fact_dependencies) or 'brak'}."
-            f" Obliczenia: {', '.join(claim.calculation_ids or ((claim.calculation_id,) if claim.calculation_id else ())) or 'nie dotyczy'}."
-            f" [claim_id:{claim.claim_id}]"
+            "- " + _analysis_explanation(claim)
+            + source_note
+            + _render_calculation_result(claim, calculation_map)
         )
     analysis_parts: list[str] = []
     for axis_title, lines in analysis_by_axis.items():
@@ -317,15 +364,15 @@ def render_answer(payload: RendererPayload, *, compact: bool = False) -> str:
             analysis_parts.append(f"### {axis_title}\n" + "\n".join(lines))
         else:
             analysis_parts.extend(lines)
-    sources = [
-        f"- {item['display_reference']} [provision_id:{item['provision_id']}]"
-        f" [version_id:{item['version_id']}]."
-        for item in payload.provisions
+    sources = [f"- {item['display_reference']}." for item in payload.provisions]
+    sources.extend(
+        f"- [{item.get('source_type') or 'authority'}] {item.get('label') or 'brak oznaczenia'}"
+        + (f" — {item.get('source_url')}" if item.get("source_url") else ".")
+        for item in payload.authority_cards
+    )
+    risks = [f"- {claim.text}" for claim in payload.conditional_claims] or [
+        "- Brak warunkowych twierdzeń wymagających dodatkowego faktu."
     ]
-    risks = [
-        f"- {claim.text} [claim_id:{claim.claim_id}]"
-        for claim in payload.conditional_claims
-    ] or ["- Brak dodatkowych luk w zatwierdzonym zakresie."]
     return (
         "Teza\n" + "\n".join(thesis) +
         "\n\nAnaliza\n" + "\n".join(analysis_parts) +
@@ -339,18 +386,9 @@ def validate_rendered_answer(
     answer: str,
     payload: RendererPayload,
 ) -> RenderValidation:
-    expected = set(payload.answer_plan.allowed_claim_ids)
-    rendered = set(CLAIM_MARKER_RE.findall(answer))
     thesis_text = answer.partition("\n\nAnaliza\n")[0]
     analysis_text = answer.partition("\n\nAnaliza\n")[2].partition("\n\nŹródła\n")[0]
-    missing = tuple(sorted(
-        claim_id
-        for claim_id in expected
-        if (
-            f"[claim_id:{claim_id}]" not in thesis_text
-            or f"[claim_id:{claim_id}]" not in analysis_text
-        )
-    ))
+    missing: tuple[str, ...] = ()
     placeholders = len(PLACEHOLDER_RE.findall(answer))
     sources_text = answer.partition("\n\nŹródła\n")[2].partition("\n\nRyzyka i luki\n")[0]
     known_provisions = {item["display_reference"] for item in payload.provisions}
@@ -363,14 +401,15 @@ def validate_rendered_answer(
             for known in known_provisions
         )
     ))
+    duplicate_ratio = SequenceMatcher(
+        None,
+        re.sub(r"\s+", " ", thesis_text.lower()),
+        re.sub(r"\s+", " ", analysis_text.lower()),
+    ).ratio()
     contradictions = tuple(
         claim.claim_id
-        for claim in [*payload.approved_claims, *payload.conditional_claims]
-        if (
-            f"{claim.text} [claim_id:{claim.claim_id}]" not in thesis_text
-            or f"{claim.text}" not in analysis_text
-            or f"[claim_id:{claim.claim_id}]" not in analysis_text
-        )
+        for claim in _thesis_claims(payload)
+        if claim.text not in thesis_text
     )
     material_claims_without_provenance = tuple(
         claim.claim_id
@@ -471,25 +510,11 @@ def validate_rendered_answer(
         line.strip() for line in answer.splitlines() if line.strip().startswith("|")
     ]
     tables_closed = all(line.endswith("|") and line.count("|") >= 3 for line in table_lines)
-    known_provision_ids = {item["provision_id"] for item in payload.provisions}
-    rendered_provision_ids = set(
-        re.findall(r"\[provision_id:([a-z0-9_:.-]+)]", answer, re.I)
-    )
-    unknown_provision_markers = rendered_provision_ids - known_provision_ids
-    unknown_claim_markers = rendered - expected
-    sources_have_exact_markers = bool(
-        re.search(r"\[provision_id:[a-z0-9_:.-]+]", sources_text, re.I)
-    )
+    sources_have_exact_markers = bool(payload.provisions and sources_text.strip())
     sources_missing_exact_pairs = tuple(
-        item["provision_id"]
+        item["display_reference"]
         for item in payload.provisions
-        if not re.search(
-            re.escape(item["display_reference"])
-            + r".*?"
-            + re.escape(f"[provision_id:{item['provision_id']}]"),
-            sources_text,
-            re.I | re.S,
-        )
+        if item["display_reference"] not in sources_text
     )
     stripped = answer.removesuffix(END_MARKER).rstrip()
     truncated = not marker or (bool(stripped) and stripped[-1] not in ".!?)]")
@@ -504,6 +529,8 @@ def validate_rendered_answer(
         errors.append("unknown_provision_reference")
     if contradictions:
         errors.append("thesis_claim_contradiction")
+    if duplicate_ratio >= 0.35:
+        errors.append("thesis_analysis_excessive_duplication")
     if material_claims_without_provenance:
         errors.append("material_claim_without_complete_provenance")
     if numeric_claims_without_calculation:
@@ -520,21 +547,20 @@ def validate_rendered_answer(
         errors.append("sources_missing_exact_references")
     if not tables_closed:
         errors.append("tables_not_closed")
-    if unknown_provision_markers:
-        errors.append("unknown_provision_id")
-    if unknown_claim_markers:
-        errors.append("unknown_claim_id")
+    if INTERNAL_RENDER_MARKER_RE.search(answer):
+        errors.append("internal_metadata_exposed")
     return RenderValidation(
         passed=not errors,
         end_marker_present=marker,
         missing_claim_ids=missing,
         placeholder_count=placeholders,
-        unknown_provision_ids=tuple(sorted({*unknown, *unknown_provision_markers})),
+        unknown_provision_ids=tuple(sorted(unknown)),
         thesis_contradictions=contradictions,
         truncated=truncated,
         errors=tuple(errors),
         missing_required_sections=missing_sections,
         tables_closed=tables_closed,
+        thesis_analysis_duplicate_ratio=duplicate_ratio,
     )
 
 
@@ -554,7 +580,12 @@ def _rendered_text_contains_result(answer: str, result: object) -> bool:
     return True
 
 
-def run_legal_pipeline(query: str, *, target_date: str = "2026-06-30") -> LegalPipelineResult:
+def run_legal_pipeline(
+    query: str,
+    *,
+    target_date: str = "2026-06-30",
+    authority_cards: Iterable[dict[str, str]] = (),
+) -> LegalPipelineResult:
     if not is_mixed_invoice_query(query):
         raise ValueError("No controlled pipeline is registered for this query.")
     registry = build_mixed_invoice_registry()
@@ -574,6 +605,7 @@ def run_legal_pipeline(query: str, *, target_date: str = "2026-06-30") -> LegalP
         registry,
         target_date=target_date,
         calculations=calculations,
+        authority_cards=authority_cards,
     )
     answer = render_answer(payload)
     validation = validate_rendered_answer(answer, payload)

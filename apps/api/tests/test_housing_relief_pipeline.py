@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from app.controlled_legal_pipeline import END_MARKER, build_renderer_payload, validate_rendered_answer
 from app.housing_relief_pipeline import (
@@ -8,6 +9,7 @@ from app.housing_relief_pipeline import (
     build_housing_relief_registry,
     calculate_housing_relief,
     can_run_housing_relief_pipeline,
+    validate_housing_deadline_invariants,
     parse_housing_relief_facts,
     run_housing_relief_pipeline,
 )
@@ -82,16 +84,16 @@ class HousingReliefPipelineTests(unittest.TestCase):
         self.assertFalse(
             result.claims["claim_developer_deadline"].result["interpretive_risk_status_used"]
         )
-        for provision_id in (
-            "pit_art_10_ust_1_pkt_8",
-            "pit_art_21_ust_1_pkt_131",
-            "pit_art_21_ust_25_pkt_2",
-            "pit_art_21_ust_25a",
-            "pit_art_21_ust_30",
-            "pit_art_21_ust_30a",
-            "pit_art_30e_ust_1",
+        for reference in (
+            "art. 10 ust. 1 pkt 8 ustawy PIT",
+            "art. 21 ust. 1 pkt 131 ustawy PIT",
+            "art. 21 ust. 25 pkt 2 ustawy PIT",
+            "art. 21 ust. 25a ustawy PIT",
+            "art. 21 ust. 30 ustawy PIT",
+            "art. 21 ust. 30a ustawy PIT",
+            "art. 30e ust. 1 ustawy PIT",
         ):
-            self.assertIn(f"[provision_id:{provision_id}]", result.answer)
+            self.assertIn(reference, result.answer)
         self.assertNotIn(
             "Spłata kredytu zaciągniętego na zakup sprzedanego mieszkania nie jest wydatkiem",
             result.answer,
@@ -119,12 +121,63 @@ class HousingReliefPipelineTests(unittest.TestCase):
         self.assertTrue(result.render_validation.passed)
         self.assertEqual(result.claims["claim_tax_result"].result["tax"], 38_000)
 
+    def test_housing_deadline_has_independent_statutory_provenance(self) -> None:
+        facts = parse_housing_relief_facts(HOUSING_RELIEF_BENCHMARK_QUERY)
+        calculations = calculate_housing_relief(facts)
+        deadline = calculations["calc_housing_relief_deadline"]
+        self.assertEqual(facts.sale_year_end, "2025-12-31")
+        self.assertEqual(facts.deadline, "2028-12-31")
+        self.assertEqual(deadline.result, "2028-12-31")
+        self.assertEqual(deadline.inputs["deadline_source"], "pit_art_21_ust_1_pkt_131")
+        self.assertEqual(deadline.inputs["acquisition_condition_source"], "pit_art_21_ust_25a")
+        self.assertEqual(validate_housing_deadline_invariants(facts, calculations), ())
+
+        corrupted = dict(calculations)
+        corrupted["calc_housing_relief_deadline"] = replace(deadline, result="2025-12-31")
+        self.assertIn(
+            "deadline_calculation_result_invalid",
+            validate_housing_deadline_invariants(facts, corrupted),
+        )
+
+    def test_housing_transfer_date_boundaries(self) -> None:
+        for transfer_date, expected in (
+            ("2027-12-31", True),
+            ("2028-12-31", True),
+            ("2029-01-01", False),
+        ):
+            query = NATURAL_LANGUAGE_QUERY.replace("2029 r.", transfer_date)
+            facts = parse_housing_relief_facts(query)
+            calculations = calculate_housing_relief(facts)
+            self.assertEqual(
+                calculations["calc_housing_relief_developer_qualification"].result,
+                expected,
+                transfer_date,
+            )
+
     def test_property_sale_always_plans_general_rule_relief_and_rate(self) -> None:
         plan = build_legal_source_plan(USER_REPORTED_QUERY)
         self.assertEqual(
             [(domain, article) for domain, article in plan.statute_targets if domain == "PIT"],
             [("PIT", "10"), ("PIT", "21"), ("PIT", "30e")],
         )
+
+    def test_user_answer_has_sources_and_no_internal_metadata(self) -> None:
+        result = run_housing_relief_pipeline(
+            HOUSING_RELIEF_BENCHMARK_QUERY,
+            authority_cards=(
+                {
+                    "source_type": "interpretation",
+                    "label": "0115-KDIT3.4011.123.2025.1.AK",
+                    "source_url": "https://example.test/interpretation",
+                },
+            ),
+        )
+        self.assertIn("Źródła\n- art. 10 ust. 1 pkt 8 ustawy PIT.", result.answer)
+        self.assertIn("0115-KDIT3.4011.123.2025.1.AK", result.answer)
+        self.assertIn("Ryzyka i luki\n- Trzeba jeszcze potwierdzić", result.answer)
+        for forbidden in ("[claim_id:", "[provision_id:", "fact_", "calculation_id:"):
+            self.assertNotIn(forbidden, result.answer)
+        self.assertLess(result.render_validation.thesis_analysis_duplicate_ratio, 0.35)
 
     def test_validator_blocks_formula_mismatch_in_text(self) -> None:
         facts = parse_housing_relief_facts(HOUSING_RELIEF_BENCHMARK_QUERY)

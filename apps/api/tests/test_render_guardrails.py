@@ -7,6 +7,7 @@ from app.main import (
     MODEL_CHAT_TIMEOUT_SECONDS,
     RENDER_COMPLETION_MARKER,
     build_chat_system_prompt,
+    build_render_diagnostics,
     complete_empty_sources_section,
     enforce_reply_guardrails,
     repair_empty_legal_reference_slots,
@@ -165,6 +166,26 @@ class ConditionalAnswerGuardrailTests(unittest.TestCase):
         )
         self.assertFalse(validation["sources_without_sources"])
         self.assertIn("Nie znaleziono zweryfikowanych źródeł", completed)
+
+    def test_render_diagnostics_show_sources_repair_state(self) -> None:
+        raw = (
+            "Teza\nWniosek.\n\nAnaliza\nAnaliza.\n\n"
+            "Źródła\nBrak zatwierdzonego źródła.\n\nRyzyka i luki\nBrak."
+        )
+        completed = complete_empty_sources_section(raw, retrieval_citations="")
+        diagnostics = build_render_diagnostics(
+            raw_candidate=raw,
+            guarded_candidate=raw,
+            completed_candidate=completed,
+            retrieved_chunks=[],
+        )
+
+        self.assertTrue(diagnostics["sources_repair_changed_output"])
+        self.assertEqual(diagnostics["retrieval"]["chunk_count"], 0)
+        self.assertIn(
+            "Nie znaleziono zweryfikowanych źródeł",
+            diagnostics["after_sources_repair"]["sources_section_preview"],
+        )
 
     def test_final_validator_rejects_empty_legal_reference_slots(self) -> None:
         reply = (

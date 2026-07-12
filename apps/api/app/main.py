@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -1349,6 +1350,56 @@ def complete_empty_sources_section(reply: str, *, retrieval_citations: str) -> s
         reply,
         count=1,
     )
+
+
+def build_render_diagnostics(
+    *,
+    raw_candidate: str,
+    guarded_candidate: str,
+    completed_candidate: str,
+    retrieved_chunks: list,
+) -> dict[str, object]:
+    """Create a privacy-conscious diagnostic payload for rejected model renders."""
+    def summarize(reply: str) -> dict[str, object]:
+        structured = parse_structured_reply(strip_render_completion_marker(reply))
+        sections = structured.sections if structured else []
+        sources_content = next(
+            (section.content for section in sections if section.title == "Źródła"),
+            None,
+        )
+        result: dict[str, object] = {
+            "characters": len(reply),
+            "sha256": hashlib.sha256(reply.encode("utf-8")).hexdigest(),
+            "has_completion_marker": RENDER_COMPLETION_MARKER in reply,
+            "section_titles": [section.title for section in sections],
+            "sources_section_present": sources_content is not None,
+            "sources_section_characters": len(sources_content or ""),
+            "sources_section_preview": (sources_content or "")[:4000],
+        }
+        if os.getenv("ALITIGATOR_CHAT_DIAGNOSTICS_INCLUDE_RENDERED_OUTPUT", "").lower() in {"1", "true", "yes"}:
+            result["full_rendered_output"] = reply
+        return result
+
+    return {
+        "raw_model_output": summarize(raw_candidate),
+        "after_guardrails": summarize(guarded_candidate),
+        "after_sources_repair": summarize(completed_candidate),
+        "guardrails_changed_output": raw_candidate != guarded_candidate,
+        "sources_repair_changed_output": guarded_candidate != completed_candidate,
+        "retrieval": {
+            "chunk_count": len(retrieved_chunks),
+            "documents": [
+                {
+                    "document_id": str(getattr(chunk, "document_id", "") or ""),
+                    "chunk_id": str(getattr(chunk, "chunk_id", "") or ""),
+                    "source_type": str(getattr(chunk, "source_type", "") or ""),
+                    "signature": str(getattr(chunk, "signature", "") or ""),
+                }
+                for chunk in retrieved_chunks[:30]
+            ],
+            "verified_source_lines": render_verified_retrieval_sources(retrieved_chunks),
+        },
+    }
 
 
 def validate_final_output(
@@ -2878,6 +2929,7 @@ async def chat(
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> ChatResponse:
     request_started_at = time.monotonic()
+    request_trace_id = uuid4().hex
 
     def remaining_request_seconds(*, reserve_seconds: float = 3.0) -> float:
         return CHAT_REQUEST_DEADLINE_SECONDS - (time.monotonic() - request_started_at) - reserve_seconds
@@ -3403,6 +3455,7 @@ async def chat(
             else None
         ),
     )
+    analysis_trace["request_trace_id"] = request_trace_id
     if hybrid_result:
         analysis_trace["hybrid_authority_rag"] = {
             "run_id": hybrid_result.run_id,
@@ -3524,6 +3577,7 @@ async def chat(
     reply = ""
     validation: dict[str, object] = {}
     last_render_error: Optional[HTTPException] = None
+    render_attempts: list[dict[str, object]] = []
     try:
         model_timeout = min(
             MODEL_CHAT_TIMEOUT_SECONDS,
@@ -3561,7 +3615,7 @@ async def chat(
                     )
                 writer_system_prompt = compact_system_prompt + retry_feedback
                 writer_input = [{"role": "user", "content": latest_user_message}]
-            candidate = await asyncio.wait_for(
+            raw_candidate = await asyncio.wait_for(
                 gateway.generate_text(
                     input=writer_input,
                     system_prompt=writer_system_prompt,
@@ -3571,17 +3625,24 @@ async def chat(
                 ),
                 timeout=model_timeout,
             )
-            candidate = enforce_reply_guardrails(
-                candidate,
+            guarded_candidate = enforce_reply_guardrails(
+                raw_candidate,
                 allowed_provision_references=allowed_provision_references,
                 missing_required_facts=missing_required_facts,
                 timeline_issues=timeline_issues,
                 claim_source_traces=list(analysis_trace.get("claim_source_traces") or []),
             )
             candidate = complete_empty_sources_section(
-                candidate,
+                guarded_candidate,
                 retrieval_citations=render_verified_retrieval_sources(retrieved_chunks),
             )
+            attempt_diagnostics = build_render_diagnostics(
+                raw_candidate=raw_candidate,
+                guarded_candidate=guarded_candidate,
+                completed_candidate=candidate,
+                retrieved_chunks=retrieved_chunks,
+            )
+            attempt_diagnostics["attempt"] = attempt + 1
             try:
                 validation = validate_final_output(
                     candidate,
@@ -3590,7 +3651,16 @@ async def chat(
                 )
             except HTTPException as exc:
                 last_render_error = exc
+                attempt_diagnostics["validation_error"] = str(exc.detail)
+                render_attempts.append(attempt_diagnostics)
+                logger.warning(
+                    "Chat render rejected trace=%s diagnostics=%s",
+                    request_trace_id,
+                    json.dumps(attempt_diagnostics, ensure_ascii=False, default=str),
+                )
                 continue
+            attempt_diagnostics["validation"] = validation
+            render_attempts.append(attempt_diagnostics)
             reply = candidate
             break
     except asyncio.TimeoutError as exc:
@@ -3610,11 +3680,25 @@ async def chat(
         ) from exc
 
     if not reply:
-        raise last_render_error or HTTPException(
+        logger.error(
+            "Chat render failed after retries trace=%s diagnostics=%s",
+            request_trace_id,
+            json.dumps(render_attempts, ensure_ascii=False, default=str),
+        )
+        if last_render_error is not None:
+            raise HTTPException(
+                status_code=last_render_error.status_code,
+                detail=f"{last_render_error.detail} Trace diagnostyczny: {request_trace_id}.",
+            )
+        raise HTTPException(
             status_code=502,
-            detail="Model dwukrotnie zwrócił niekompletną odpowiedź.",
+            detail=(
+                "Model dwukrotnie zwrócił niekompletną odpowiedź. "
+                f"Trace diagnostyczny: {request_trace_id}."
+            ),
         )
     analysis_trace["render_validation"] = validation
+    analysis_trace["render_attempts"] = render_attempts
     reply = strip_render_completion_marker(reply)
     exact_trace_block = render_exact_primary_law_trace_block(list(analysis_trace.get("claim_source_traces") or []))
     if exact_trace_block:

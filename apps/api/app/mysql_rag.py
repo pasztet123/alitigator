@@ -272,12 +272,27 @@ def ensure_chunk_fulltext_index(connection: pymysql.connections.Connection) -> N
 
 
 def ensure_search_schema_ready() -> None:
+    """Verify the read schema without applying DDL on a request path.
+
+    ``index_exists_mysql`` serves the public health endpoint.  Applying table
+    alterations or creating indexes from there can block a fresh Cloud Run
+    revision while MariaDB performs a migration.  Schema evolution belongs to
+    the explicit reindex/migration command, which calls ``ensure_schema``
+    before writing corpus data.
+    """
     global _MYSQL_SEARCH_SCHEMA_READY
     if _MYSQL_SEARCH_SCHEMA_READY:
         return
 
+    documents_table, chunks_table = get_mysql_target()
     with mysql_connection() as connection:
-        ensure_schema(connection)
+        with connection.cursor() as cursor:
+            cursor.execute("SHOW TABLES LIKE %s", (documents_table,))
+            documents_exists = cursor.fetchone() is not None
+            cursor.execute("SHOW TABLES LIKE %s", (chunks_table,))
+            chunks_exists = cursor.fetchone() is not None
+    if not documents_exists or not chunks_exists:
+        raise RuntimeError("MySQL RAG schema is missing; run the explicit corpus migration")
     _MYSQL_SEARCH_SCHEMA_READY = True
 
 
@@ -292,7 +307,6 @@ def index_exists_mysql() -> bool:
         return False
     documents_table, chunks_table = get_mysql_target()
     try:
-        ensure_search_schema_ready()
         with mysql_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(f"SHOW TABLES LIKE %s", (documents_table,))

@@ -123,7 +123,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.12"
+API_VERSION = "2.0.13"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -1620,6 +1620,144 @@ def complete_empty_sources_section(reply: str, *, retrieval_citations: str) -> s
         reply,
         count=1,
     )
+
+
+def build_render_retry_input(
+    *,
+    user_prompt: str,
+    rejected_output: str,
+    validation_error: str,
+    allowed_provision_references: set[str],
+) -> str:
+    """Build an edit-only retry with a closed provision-reference vocabulary."""
+    references = "\n".join(
+        f"- {reference}" for reference in sorted(allowed_provision_references)
+    ) or "- brak; pomiń numery jednostek redakcyjnych"
+    return (
+        "Popraw poprzedni render, zachowując jego poprawne wnioski i wymagane sekcje.\n"
+        f"Błąd walidacji: {validation_error}\n\n"
+        "ZAMKNIĘTA LISTA DOZWOLONYCH REFERENCJI:\n"
+        f"{references}\n\n"
+        "Nie wolno podać żadnego numeru artykułu, ustępu, punktu ani litery spoza tej listy. "
+        "Jeżeli dokładnej podstawy nie ma na liście, pomiń numer i zawęź twierdzenie. "
+        "Nie używaj sformułowań 'ten przepis', 'zweryfikowany przepis wskazany w źródłach' "
+        "ani innych placeholderów. Ostatnią linią ma być wymagany znacznik końca.\n\n"
+        f"PYTANIE UŻYTKOWNIKA:\n{user_prompt}\n\n"
+        f"POPRZEDNI ODRZUCONY RENDER:\n{rejected_output}"
+    )
+
+
+def render_verified_primary_law_source_lines(
+    claim_source_traces: list[dict[str, object]],
+) -> str:
+    """Render only registry-bound primary-law identifiers, without model prose."""
+    lines: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for trace in claim_source_traces:
+        source_document_id = str(trace.get("source_document_id") or "").strip()
+        reference = str(trace.get("provision_reference") or "").strip()
+        key = (source_document_id, normalize_provision_reference(reference))
+        if not source_document_id or not key[1] or key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"- source_document_id: {source_document_id} | {reference}")
+    return "\n".join(lines)
+
+
+def build_fail_closed_render_fallback(
+    rejected_output: str,
+    *,
+    allowed_provision_references: set[str],
+    verified_source_lines: str,
+    required_axis_labels: Optional[list[str]] = None,
+) -> tuple[str, int]:
+    """Drop complete unsupported claims instead of guessing replacement provisions.
+
+    This is deliberately a last-resort renderer.  It preserves safe paragraphs,
+    removes any entire line containing an unregistered reference or a source
+    placeholder, and discloses the omission.  It never rewrites one article
+    number into another.
+    """
+    structured = parse_structured_reply(strip_render_completion_marker(rejected_output))
+    sections = {
+        section.title: section.content
+        for section in (structured.sections if structured else [])
+    }
+    removed_count = 0
+
+    def line_is_unsafe(line: str) -> bool:
+        references = [
+            normalize_provision_reference(match.group(0))
+            for match in PROVISION_REFERENCE_RENDER_RE.finditer(line)
+        ]
+        return (
+            any(reference not in allowed_provision_references for reference in references)
+            or bool(GENERIC_PRIMARY_LAW_PLACEHOLDER_RE.search(line))
+            or bool(EMPTY_LEGAL_REFERENCE_SLOT_RE.search(line))
+            or bool(UNCERTAIN_PROVISION_PHRASES_RE.search(line))
+            or bool(UNCERTAIN_NUMBERING_FRAGMENT_RE.search(line))
+            or (
+                bool(UNSUPPORTED_AUTHORITY_LINE_RE.search(line))
+                and not bool(AUTHORITY_SIGNATURE_RE.search(line))
+            )
+        )
+
+    def safe_content(title: str) -> str:
+        nonlocal removed_count
+        safe_lines: list[str] = []
+        for line in sections.get(title, "").splitlines():
+            if line_is_unsafe(line):
+                removed_count += 1
+                continue
+            safe_lines.append(line)
+        return "\n".join(safe_lines).strip()
+
+    thesis = safe_content("Teza") or (
+        "Na podstawie zweryfikowanego materiału nie można zatwierdzić pominiętego "
+        "twierdzenia modelu. Pozostałe wnioski wymagają oparcia na jednostkach "
+        "redakcyjnych wskazanych w sekcji Źródła."
+    )
+    analysis = safe_content("Analiza")
+    if not analysis:
+        analysis = (
+            "Pominięto twierdzenia zawierające referencje spoza zamkniętego rejestru "
+            "źródeł. System nie zastąpił ich innymi numerami przepisów."
+        )
+    for axis in required_axis_labels or []:
+        if not re.search(
+            rf"(?im)^\s*(?:#{{1,6}}\s*)?(?:\*\*)?{re.escape(axis)}(?:\*\*)?(?:\s*[:–—-]|\s*$)",
+            analysis,
+        ):
+            analysis += (
+                f"\n\n### {axis}\n"
+                "Nie zatwierdzono usuniętego fragmentu tej osi bez zweryfikowanej podstawy prawnej."
+            )
+
+    sources = safe_content("Źródła")
+    if verified_source_lines:
+        sources = verified_source_lines
+    elif not re.search(
+        r"(?:art\.|Dz\.|DU/|\[provision_id:|source_document_id|https?://)",
+        sources,
+        re.IGNORECASE,
+    ):
+        sources = "Nie znaleziono zweryfikowanych źródeł primary law w retrievalu."
+
+    risks = safe_content("Ryzyka i luki")
+    disclosure = (
+        f"Automatyczny guardrail pominął {removed_count} "
+        "fragmentów zawierających niezweryfikowane odwołania lub placeholdery; "
+        "nie zastępował ich domyślnymi numerami przepisów."
+    )
+    risks = f"{risks}\n\n{disclosure}" if risks else disclosure
+    fallback = (
+        f"Teza\n{thesis}\n\n"
+        f"Analiza\n{analysis}\n\n"
+        f"Źródła\n{sources}\n\n"
+        f"Ryzyka i luki\n{risks}\n\n"
+        f"{RENDER_COMPLETION_MARKER}"
+    )
+    return fallback, removed_count
 
 
 def build_render_diagnostics(
@@ -4087,6 +4225,7 @@ async def chat(
     reply = ""
     validation: dict[str, object] = {}
     last_render_error: Optional[HTTPException] = None
+    last_raw_candidate = ""
     render_attempts: list[dict[str, object]] = []
     try:
         model_timeout = min(
@@ -4124,7 +4263,15 @@ async def chat(
                         "Każde odwołanie do przepisu musi mieć konkretny numer artykułu/ustępu albo zostać pominięte."
                     )
                 writer_system_prompt = compact_system_prompt + retry_feedback
-                writer_input = [{"role": "user", "content": latest_user_message}]
+                writer_input = [{
+                    "role": "user",
+                    "content": build_render_retry_input(
+                        user_prompt=latest_user_message,
+                        rejected_output=last_raw_candidate,
+                        validation_error=str(last_render_error.detail) if last_render_error else "nieznany błąd",
+                        allowed_provision_references=allowed_provision_references,
+                    ),
+                }]
             raw_candidate = await asyncio.wait_for(
                 gateway.generate_text(
                     input=writer_input,
@@ -4135,6 +4282,7 @@ async def chat(
                 ),
                 timeout=model_timeout,
             )
+            last_raw_candidate = raw_candidate
             # A writer error is rejected, never "repaired" by regexes.  In
             # particular, do not substitute an unverified article with "ten
             # przepis": that loses the lineage needed to find the real fault.
@@ -4184,6 +4332,57 @@ async def chat(
             status_code=502,
             detail="Model odpowiedzi zwrócił niepoprawny wynik."
         ) from exc
+
+    if not reply and last_raw_candidate:
+        verified_primary_sources = render_verified_primary_law_source_lines(
+            list(analysis_trace.get("claim_source_traces") or [])
+        )
+        fallback_candidate, removed_count = build_fail_closed_render_fallback(
+            last_raw_candidate,
+            allowed_provision_references=allowed_provision_references,
+            verified_source_lines=(
+                verified_primary_sources
+                or render_verified_retrieval_sources(retrieved_chunks)
+            ),
+            required_axis_labels=required_axis_labels,
+        )
+        fallback_diagnostics = build_render_diagnostics(
+            raw_candidate=last_raw_candidate,
+            guarded_candidate=fallback_candidate,
+            completed_candidate=fallback_candidate,
+            retrieved_chunks=retrieved_chunks,
+        )
+        fallback_diagnostics.update({
+            "attempt": "deterministic_fail_closed_fallback",
+            "removed_unsafe_fragments": removed_count,
+        })
+        try:
+            validation = validate_final_output(
+                fallback_candidate,
+                axis_coverage=axis_coverage,
+                expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
+                allowed_provision_references=allowed_provision_references,
+                verified_source_count=len(legal_rules),
+            )
+        except HTTPException as exc:
+            fallback_diagnostics["validation_error"] = str(exc.detail)
+            render_attempts.append(fallback_diagnostics)
+            logger.error(
+                "Fail-closed render fallback rejected trace=%s diagnostics=%s",
+                request_trace_id,
+                json.dumps(fallback_diagnostics, ensure_ascii=False, default=str),
+            )
+        else:
+            validation["fail_closed_repair_applied"] = True
+            validation["removed_unsafe_fragments"] = removed_count
+            fallback_diagnostics["validation"] = validation
+            render_attempts.append(fallback_diagnostics)
+            reply = fallback_candidate
+            logger.warning(
+                "Fail-closed render fallback used trace=%s removed_unsafe_fragments=%d",
+                request_trace_id,
+                removed_count,
+            )
 
     if not reply:
         logger.error(

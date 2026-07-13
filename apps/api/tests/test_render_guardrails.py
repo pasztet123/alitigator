@@ -7,7 +7,9 @@ from app.main import (
     MODEL_CHAT_TIMEOUT_SECONDS,
     RENDER_COMPLETION_MARKER,
     build_chat_system_prompt,
+    build_fail_closed_render_fallback,
     build_render_diagnostics,
+    build_render_retry_input,
     build_missing_primary_law_reply,
     complete_empty_sources_section,
     enforce_reply_guardrails,
@@ -17,6 +19,53 @@ from app.main import (
 
 
 class ConditionalAnswerGuardrailTests(unittest.TestCase):
+    def test_retry_input_closes_reference_vocabulary_and_includes_rejected_render(self) -> None:
+        retry = build_render_retry_input(
+            user_prompt="Jak rozliczyć wydatek?",
+            rejected_output="Teza\nBłędnie: art. 21 ust. 2 i ten przepis.",
+            validation_error="niezweryfikowane referencje",
+            allowed_provision_references={"art. 21 ust. 25", "art. 26 ust. 7a"},
+        )
+
+        self.assertIn("ZAMKNIĘTA LISTA DOZWOLONYCH REFERENCJI", retry)
+        self.assertIn("- art. 21 ust. 25", retry)
+        self.assertIn("POPRZEDNI ODRZUCONY RENDER", retry)
+        self.assertIn("art. 21 ust. 2 i ten przepis", retry)
+
+    def test_fail_closed_fallback_drops_unsupported_claim_lines_without_guessing(self) -> None:
+        rejected = (
+            "Teza\nBezpieczny wniosek wynika z art. 21 ust. 25.\n"
+            "Błędny wniosek wynika z art. 21 ust. 2.\n\n"
+            "Analiza\n### PIT\nPoprawna analiza pozostaje.\n"
+            "Ten przepis rzekomo rozstrzyga resztę.\n"
+            "Kolejny błędny fragment: art. 26 ust. 7.\n\n"
+            "Źródła\nart. 21 ust. 2 ustawy PIT.\n\n"
+            "Ryzyka i luki\nWymagana ostrożność.\n\n"
+            f"{RENDER_COMPLETION_MARKER}"
+        )
+        fallback, removed_count = build_fail_closed_render_fallback(
+            rejected,
+            allowed_provision_references={"art. 21 ust. 25"},
+            verified_source_lines="- source_document_id: pit_act | art. 21 ust. 25",
+            required_axis_labels=["PIT"],
+        )
+
+        self.assertGreaterEqual(removed_count, 4)
+        self.assertIn("Bezpieczny wniosek wynika z art. 21 ust. 25", fallback)
+        self.assertNotRegex(fallback, r"art\. 21 ust\. 2(?:\D|$)")
+        self.assertNotRegex(fallback, r"art\. 26 ust\. 7(?:\D|$)")
+        self.assertNotIn("Ten przepis", fallback)
+        self.assertIn("nie zastępował ich domyślnymi numerami", fallback)
+        validation = validate_final_output(
+            fallback,
+            axis_coverage=[{"axis_id": "pit", "label": "PIT"}],
+            expected_sections=["Teza", "Analiza", "Źródła", "Ryzyka i luki"],
+            allowed_provision_references={"art. 21 ust. 25"},
+            verified_source_count=1,
+        )
+        self.assertEqual(validation["unverified_references"], [])
+        self.assertTrue(validation["no_placeholder_tokens"])
+
     def test_missing_primary_law_reply_contains_no_material_conclusion(self) -> None:
         reply = build_missing_primary_law_reply()
         validation = validate_final_output(

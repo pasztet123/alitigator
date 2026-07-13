@@ -31,6 +31,60 @@ def _statute_chunk() -> RagChunk:
 
 
 class ChatRetrievalDeadlineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_returns_fail_closed_answer_after_two_invalid_model_renders(self) -> None:
+        invalid_render = (
+            "Teza\nTen przepis pozwala uwzględnić wydatek na podstawie art. 21 ust. 2.\n\n"
+            "Analiza\n### VAT\nDalszy błędny wniosek oparto na art. 26 ust. 7.\n\n"
+            "Źródła\nart. 21 ust. 2.\n\n"
+            "Ryzyka i luki\nWymagana weryfikacja.\n\n"
+            "<<ALITIGATOR_COMPLETE>>"
+        )
+
+        class InvalidGateway:
+            def __init__(self) -> None:
+                self.inputs = []
+
+            async def generate_text(self, **kwargs):
+                self.inputs.append(kwargs["input"])
+                return invalid_render
+
+        gateway = InvalidGateway()
+        request = ChatRequest(
+            messages=[
+                ChatMessage(
+                    role="user",
+                    content="Czy odpłatna dostawa towarów na terytorium kraju podlega VAT?",
+                )
+            ]
+        )
+        user = AuthenticatedUser(id="user", email=None, full_name=None)
+
+        with (
+            patch("app.main.ensure_profile"),
+            patch("app.main.is_chat_storage_available", return_value=False),
+            patch("app.main.is_model_gateway_configured", return_value=True),
+            patch("app.main.get_legal_pipeline_mode", return_value="legacy"),
+            patch("app.main.get_legal_retrieval_mode", return_value="baseline"),
+            patch(
+                "app.main.retrieve_baseline_chat_evidence",
+                return_value=([_statute_chunk()], {"primary_law": {"status": "completed"}}),
+            ),
+            patch("app.main.create_model_gateway", return_value=gateway),
+            patch("app.main.consume_credit_for_chat"),
+        ):
+            response = await chat(request, current_user=user)
+
+        self.assertEqual(2, len(gateway.inputs))
+        self.assertIn("ZAMKNIĘTA LISTA DOZWOLONYCH REFERENCJI", gateway.inputs[1][0]["content"])
+        self.assertNotIn("art. 21 ust. 2", response.reply)
+        self.assertNotIn("art. 26 ust. 7", response.reply)
+        self.assertNotIn("Ten przepis", response.reply)
+        self.assertTrue(response.analysis_trace["render_validation"]["fail_closed_repair_applied"])
+        self.assertGreaterEqual(
+            response.analysis_trace["render_validation"]["removed_unsafe_fragments"],
+            3,
+        )
+
     async def test_optional_authority_timeout_does_not_erase_primary_law(self) -> None:
         def slow_authority_retrieval(*args, **kwargs):
             time.sleep(0.2)

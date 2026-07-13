@@ -7163,12 +7163,13 @@ def build_legal_rule_trace_context(rules: list[LegalRule]) -> str:
 def build_provision_reference_registry(chunks: list[RagChunk], rules: list[LegalRule]) -> set[str]:
     registry: set[str] = set()
     for rule in rules:
-        registry.add(normalize_provision_reference(rule.citation))
+        registry.update(extract_normalized_provision_references("", [rule.citation]))
         for dependency in rule.definition_dependencies:
-            registry.add(normalize_provision_reference(dependency))
+            registry.update(extract_normalized_provision_references("", [dependency]))
     for chunk in chunks:
-        for provision in chunk.legal_provisions:
-            registry.add(normalize_provision_reference(provision))
+        registry.update(
+            extract_normalized_provision_references("", chunk.legal_provisions)
+        )
     return {item for item in registry if item}
 
 

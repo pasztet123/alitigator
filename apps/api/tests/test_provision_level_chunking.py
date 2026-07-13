@@ -6,11 +6,31 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app import law_chunk
-from app.rag import build_record_index_chunks
+from app.rag import build_record_index_chunks, extract_normalized_provision_references
 from app.treaty_chunk import TreatySource, build_record as build_treaty_record
 
 
 class ProvisionLevelChunkingTests(unittest.TestCase):
+    def test_prefixed_and_hierarchical_metadata_references_use_render_canonical_form(self) -> None:
+        references = extract_normalized_provision_references(
+            "",
+            [
+                "PIT art. 5a pkt 28",
+                "ustawa PIT-art. 21-ust. 25-pkt 1",
+                "art. 26 ust. 7, art. 26 ust. 7a",
+            ],
+        )
+
+        self.assertEqual(
+            [
+                "art. 5a pkt 28",
+                "art. 21 ust. 25 pkt 1",
+                "art. 26 ust. 7",
+                "art. 26 ust. 7a",
+            ],
+            references,
+        )
+
     def test_statute_index_uses_exact_editorial_units_instead_of_article_parts(self) -> None:
         records = self.build_law_records(
             "Art. 21.\n25. Reguła ogólna.\n30. Wyłączenie.\n30a. Szczególna reguła obejmuje także spłatę kredytu.",

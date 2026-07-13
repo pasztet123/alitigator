@@ -106,7 +106,7 @@ from app.rag import (
     normalize_provision_reference,
     prioritize_legal_rules_for_query,
     reindex_corpus,
-    search_chat_chunks,
+    search_primary_law_chunks,
     search_chunks,
     build_source_plan_context,
 )
@@ -123,7 +123,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.10"
+API_VERSION = "2.0.11"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -309,6 +309,135 @@ RETRIEVAL_STAGE_TIMEOUT_SECONDS = min(
     75.0,
     max(20.0, float(os.getenv("ALITIGATOR_RETRIEVAL_STAGE_TIMEOUT_SECONDS", "45"))),
 )
+
+
+async def retrieve_baseline_chat_evidence(
+    query: str,
+    *,
+    include_interpretations: bool,
+    include_judgments: Optional[bool],
+    timeout_seconds: float,
+) -> tuple[list[RagChunk], dict[str, object]]:
+    """Retrieve primary and secondary sources without an all-or-nothing timeout.
+
+    Primary law is fetched first and preserved.  Interpretations and judgments
+    are optional, independently observable lanes; their timeout or backend
+    failure cannot turn a successful statute lookup into an empty retrieval.
+    """
+    started = time.monotonic()
+    deadline = started + max(0.001, timeout_seconds)
+    # Primary law owns the full retrieval budget.  Optional lanes use only the
+    # time left after it completes; reserving time for them would reintroduce
+    # the failure mode where a slow-but-successful statute query is cancelled
+    # solely to make room for non-controlling materials.
+    primary_budget = max(0.001, timeout_seconds)
+    trace: dict[str, object] = {
+        "strategy": "primary_first_independent_lanes",
+        "timeout_seconds": timeout_seconds,
+        "primary_law": {"status": "not_started", "count": 0},
+        "interpretation": {"status": "disabled", "count": 0},
+        "judgment": {"status": "disabled", "count": 0},
+    }
+
+    primary_chunks: list[RagChunk] = []
+    try:
+        primary_chunks = await asyncio.wait_for(
+            asyncio.to_thread(search_primary_law_chunks, query),
+            timeout=primary_budget,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Primary-law retrieval exceeded its lane budget timeout_seconds=%.1f",
+            primary_budget,
+        )
+        trace["primary_law"] = {
+            "status": "deadline_exceeded",
+            "count": 0,
+            "timeout_seconds": primary_budget,
+        }
+    except Exception as exc:
+        logger.exception("Primary-law retrieval failed")
+        trace["primary_law"] = {
+            "status": "backend_error",
+            "count": 0,
+            "error_type": type(exc).__name__,
+        }
+    else:
+        trace["primary_law"] = {
+            "status": "completed" if primary_chunks else "no_candidates",
+            "count": len(primary_chunks),
+            "elapsed_ms": round((time.monotonic() - started) * 1000),
+        }
+
+    requested_lanes: list[str] = []
+    if include_interpretations:
+        requested_lanes.append("interpretation")
+    if include_judgments is not False:
+        requested_lanes.append("judgment")
+
+    remaining = deadline - time.monotonic()
+    authority_chunks: list[RagChunk] = []
+    if requested_lanes and remaining > 0:
+
+        async def retrieve_authority_lane(source_type: str) -> tuple[str, list[RagChunk]]:
+            chunks = await asyncio.to_thread(
+                search_chunks,
+                query,
+                source_types={source_type},
+            )
+            return source_type, chunks
+
+        tasks = [retrieve_authority_lane(source_type) for source_type in requested_lanes]
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=max(0.001, remaining),
+            )
+        except asyncio.TimeoutError:
+            for source_type in requested_lanes:
+                trace[source_type] = {
+                    "status": "deadline_exceeded",
+                    "count": 0,
+                }
+        else:
+            for source_type, result in zip(requested_lanes, results):
+                if isinstance(result, Exception):
+                    logger.error(
+                        "Optional authority retrieval failed lane=%s error=%s",
+                        source_type,
+                        type(result).__name__,
+                    )
+                    trace[source_type] = {
+                        "status": "backend_error",
+                        "count": 0,
+                        "error_type": type(result).__name__,
+                    }
+                    continue
+                _, chunks = result
+                authority_chunks.extend(chunks)
+                trace[source_type] = {
+                    "status": "completed" if chunks else "no_candidates",
+                    "count": len(chunks),
+                }
+    elif requested_lanes:
+        for source_type in requested_lanes:
+            trace[source_type] = {"status": "skipped_no_budget", "count": 0}
+
+    merged: list[RagChunk] = []
+    seen_chunk_ids: set[str] = set()
+    for chunk in [*primary_chunks, *authority_chunks]:
+        if chunk.chunk_id in seen_chunk_ids:
+            continue
+        seen_chunk_ids.add(chunk.chunk_id)
+        merged.append(chunk)
+    trace["total_count"] = len(merged)
+    trace["total_elapsed_ms"] = round((time.monotonic() - started) * 1000)
+    trace["primary_preserved_when_authority_incomplete"] = bool(primary_chunks) and any(
+        str((trace.get(source_type) or {}).get("status"))
+        in {"deadline_exceeded", "backend_error", "skipped_no_budget"}
+        for source_type in requested_lanes
+    )
+    return merged, trace
 
 SYSTEM_PROMPT = """
 Jesteś asystentem aLitigator dla polskich prawników podatkowych.
@@ -3661,6 +3790,7 @@ async def chat(
     )
     retrieval_mode = get_legal_retrieval_mode()
     hybrid_result: Optional[HybridAuthorityResult] = None
+    retrieval_lane_trace: dict[str, object] = {}
     retrieval_timeout = min(
         RETRIEVAL_STAGE_TIMEOUT_SECONDS,
         max(5.0, remaining_request_seconds(reserve_seconds=20.0)),
@@ -3693,24 +3823,32 @@ async def chat(
         else:
             retrieved_chunks = list(hybrid_result.selected_chunks)
     else:
+        retrieved_chunks, retrieval_lane_trace = await retrieve_baseline_chat_evidence(
+            effective_user_prompt,
+            include_interpretations=include_interpretations,
+            include_judgments=include_judgments,
+            timeout_seconds=retrieval_timeout,
+        )
+    # Hybrid retrieval remains experimental.  Its timeout must still recover
+    # primary law through the configured backend instead of depending on raw
+    # files that are absent from the production image.
+    if retrieval_mode == "hybrid_authority" and not any(
+        chunk.source_type == "statute" for chunk in retrieved_chunks
+    ):
+        recovery_budget = min(15.0, max(0.001, remaining_request_seconds(reserve_seconds=20.0)))
         try:
-            retrieved_chunks = await asyncio.wait_for(
-                asyncio.to_thread(
-                    search_chat_chunks,
-                    effective_user_prompt,
-                    include_interpretations=include_interpretations,
-                    include_judgments=include_judgments,
-                ),
-                timeout=retrieval_timeout,
+            recovered_primary = await asyncio.wait_for(
+                asyncio.to_thread(search_primary_law_chunks, effective_user_prompt),
+                timeout=recovery_budget,
             )
-        except asyncio.TimeoutError:
+        except Exception as exc:
             logger.warning(
-                "Baseline retrieval exceeded its request budget trace=%s timeout_seconds=%.1f",
+                "Hybrid primary-law recovery failed trace=%s error=%s",
                 request_trace_id,
-                retrieval_timeout,
+                type(exc).__name__,
             )
-            retrieved_chunks = []
-    retrieved_chunks = add_primary_source_fallback_chunks(effective_user_prompt, retrieved_chunks)
+            recovered_primary = []
+        retrieved_chunks = [*recovered_primary, *retrieved_chunks]
     if query_mentions_ksef(effective_user_prompt):
         has_current_ksef_source = any(
             "Dz.U. 2025 poz. 1203" in " ".join(
@@ -3787,6 +3925,7 @@ async def chat(
     analysis_trace["request_trace_id"] = request_trace_id
     analysis_trace["verified_primary_source_count"] = len(legal_rules)
     analysis_trace["allowed_provision_references"] = sorted(allowed_provision_references)
+    analysis_trace["retrieval_lanes"] = retrieval_lane_trace
     if hybrid_result:
         analysis_trace["hybrid_authority_rag"] = {
             "run_id": hybrid_result.run_id,

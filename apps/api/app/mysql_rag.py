@@ -1034,12 +1034,17 @@ def fetch_statute_rows_by_targets_mysql(
         patterns = statute_target_metadata_patterns(article_key)
         if not patterns:
             continue
+        domain_clause = "UPPER(d.tax_domain) = %s"
+        domain_values: list[Any] = [domain.upper()]
+        if domain.upper() == "NIERUCHOMOŚCI":
+            domain_clause = "(UPPER(d.tax_domain) = %s OR LOWER(d.subject) LIKE %s)"
+            domain_values.append("%podatkach i opłatach lokalnych%")
         clauses.append(
-            "(UPPER(d.tax_domain) = %s AND ("
+            f"({domain_clause} AND ("
             + " OR ".join("d.legal_provisions_json LIKE %s" for _ in patterns)
             + "))"
         )
-        values.append(domain.upper())
+        values.extend(domain_values)
         values.extend(patterns)
     if not clauses:
         return []

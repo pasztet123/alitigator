@@ -2423,14 +2423,19 @@ def query_targets_property_sale_pit(query: str) -> bool:
 
 def query_targets_mortgage_settlement_refund(query: str) -> bool:
     normalized = normalize_whitespace(query or "").lower()
-    return bool(
+    has_mortgage_or_settlement = bool(
         re.search(
             r"\b(ugod\w*\s+z\s+bankiem|kredyt\w*\s+hipoteczn\w*|kredyt\w*\s+mieszkaniow\w*|"
             r"zaniechan\w*\s+pobor\w*|art\.\s*52i|umorzen\w*\s+zadłużen\w*|umorzen\w*\s+zadluzen\w*|"
-            r"skapitalizowan\w*\s+odsetk\w*|prowizj\w*|opłat\w*|oplata\w*)\b",
+            r"skapitalizowan\w*\s+odsetk\w*)\b",
             normalized,
         )
     )
+    has_bank_fee_context = bool(
+        re.search(r"\b(prowizj\w*|opłat\w*|oplata\w*)\b", normalized)
+        and re.search(r"\b(bank\w*|kredyt\w*|pożycz\w*|pozycz\w*|ugod\w*)\b", normalized)
+    )
+    return has_mortgage_or_settlement or has_bank_fee_context
 
 
 def query_targets_vat_dropshipping_ioss(query: str) -> bool:
@@ -5117,7 +5122,8 @@ def build_explicit_statute_article_targets(query: str) -> list[tuple[str, str]]:
 def query_is_statute_focused(query: str) -> bool:
     normalized = normalize_whitespace(query or "").lower()
     return bool(
-        re.search(
+        detect_explicit_statute_domains(query)
+        or re.search(
             r"\b(przepis\w*|ustaw\w*|podstaw\w* prawn\w*|uregulowan\w*|reguluj\w*|"
             r"co mówi|co wynika|przytocz|zacytuj|jak brzmi|pokaż|pokaz|podaj|treść|tresc|brzmieni\w*)\b",
             normalized,
@@ -5147,6 +5153,12 @@ def build_general_statute_concept_targets(query: str) -> list[tuple[str, str]]:
     if "VAT" in domains:
         if asks_act_scope:
             targets.extend([("VAT", "1")])
+        elif re.search(r"\b(czynno[śs]c\w* podleg\w*|przedmiot\w* opodatkow\w*|odp[łl]atn\w* dostaw\w*)\b", normalized):
+            targets.extend([("VAT", "5")])
+        elif re.search(r"\b(dostaw\w* towar\w*)\b", normalized):
+            targets.extend([("VAT", "7")])
+        elif re.search(r"\b(terytori\w* kraj\w*|definicj\w* ustawow\w*)\b", normalized):
+            targets.extend([("VAT", "2")])
         elif re.search(r"\b(ksef|faktur\w*)\b", normalized):
             targets.extend([("VAT", "106a"), ("VAT", "106b"), ("VAT", "106ga"), ("VAT", "106gb")])
         elif re.search(r"\b(odlicz\w*|naliczon\w*)\b", normalized):
@@ -5159,6 +5171,14 @@ def build_general_statute_concept_targets(query: str) -> list[tuple[str, str]]:
     if "CIT" in domains:
         if asks_act_scope:
             targets.extend([("CIT", "1")])
+        elif re.search(r"\b(obowi[ąa]zk\w* podatkow\w*.*ca[łl]o[śs]ci|siedzib\w* lub zarz[ąa]d\w*|rezydencj\w* podatkow\w*)\b", normalized):
+            targets.extend([("CIT", "3")])
+        elif re.search(r"\b(definicj\w* ustawow\w*|przedsi[ęe]biorstw\w*|zorganizowan\w* cz[ęe][śs][ćc]\w* przedsi[ęe]biorstw\w*)\b", normalized):
+            targets.extend([("CIT", "4a")])
+        elif re.search(r"\b(przedmiot\w* opodatkow\w*)\b", normalized):
+            targets.extend([("CIT", "7")])
+        elif re.search(r"\b(podatkow\w* grup\w* kapita[łl]ow\w*)\b", normalized):
+            targets.extend([("CIT", "7a")])
         elif re.search(r"\b(wht|u [źz]r[óo]d[łl]a|odset(?:k|ek|e?k)\w*|zarz[ąa]dz\w*|nierezydent\w*)\b", normalized):
             targets.extend([("CIT", "21"), ("CIT", "22"), ("CIT", "26")])
         elif re.search(r"\b(koszt\w*|kup|uzyskania przychod)\b", normalized):
@@ -5183,7 +5203,15 @@ def build_general_statute_concept_targets(query: str) -> list[tuple[str, str]]:
         targets.extend([("SD", "1")] if asks_act_scope else [("SD", "1"), ("SD", "4a"), ("SD", "9"), ("SD", "14"), ("SD", "15")])
 
     if "ORDYNACJA" in domains:
-        if re.search(r"\b(sukcesj\w*|przekszta[łl]c\w*)\b", normalized):
+        if asks_act_scope:
+            targets.extend([("ORDYNACJA", "1")])
+        elif re.search(r"\b(in dubio pro tributario|niedaj[ąa]c\w* usun[ąa][ćc]\w* w[ąa]tpliwo[śs]c\w*)\b", normalized):
+            targets.extend([("ORDYNACJA", "2a")])
+        elif re.search(r"\b(definicj\w* ustawow\w*)\b", normalized):
+            targets.extend([("ORDYNACJA", "3")])
+        elif re.search(r"\b(defini\w* podat\w*|czym jest podatek)\b", normalized):
+            targets.extend([("ORDYNACJA", "6")])
+        elif re.search(r"\b(sukcesj\w*|przekszta[łl]c\w*)\b", normalized):
             targets.extend([("ORDYNACJA", "93a"), ("ORDYNACJA", "93e")])
         elif re.search(r"\b(przedawn\w*)\b", normalized):
             targets.extend([("ORDYNACJA", "70")])
@@ -5196,7 +5224,22 @@ def build_general_statute_concept_targets(query: str) -> list[tuple[str, str]]:
         targets.extend([("AKCYZA", "1"), ("AKCYZA", "8"), ("AKCYZA", "21")])
 
     if "NIERUCHOMOŚCI" in domains:
-        targets.extend([("NIERUCHOMOŚCI", "2"), ("NIERUCHOMOŚCI", "3"), ("NIERUCHOMOŚCI", "4"), ("NIERUCHOMOŚCI", "5"), ("NIERUCHOMOŚCI", "7")])
+        if asks_act_scope:
+            targets.extend([("NIERUCHOMOŚCI", "1")])
+        elif re.search(
+            r"\b(definicj\w*|defini\w*|oznacza|budyn\w*|budowl\w*|powierzchni\w* użytkow\w*|powierzchni\w* uzytkow\w*)\b",
+            normalized,
+        ):
+            targets.extend([("NIERUCHOMOŚCI", "1a")])
+        else:
+            targets.extend([
+                ("NIERUCHOMOŚCI", "1a"),
+                ("NIERUCHOMOŚCI", "2"),
+                ("NIERUCHOMOŚCI", "3"),
+                ("NIERUCHOMOŚCI", "4"),
+                ("NIERUCHOMOŚCI", "5"),
+                ("NIERUCHOMOŚCI", "7"),
+            ])
 
     return list(dict.fromkeys(targets))
 
@@ -5464,6 +5507,15 @@ def resolve_statute_tax_domains(query: str) -> set[str]:
     retrieval, expand those topics to the concrete statute domains that carry
     the governing provisions.
     """
+    explicit_domains = detect_explicit_statute_domains(query)
+    # An explicit act name is stronger evidence than broad topical markers.
+    # For example, "ustawa o podatkach i opłatach lokalnych" used to trigger
+    # the generic PIT marker and route a building-definition question into the
+    # PIT corpus.  Preserve all explicitly named acts, but do not dilute them
+    # with heuristic domains.
+    if explicit_domains:
+        return {normalize_statute_domain(domain) for domain in explicit_domains}
+
     domains = {domain.upper() for domain in detect_domains(query)}
     if "WHT" in domains:
         domains.update({"CIT", "PIT"})
@@ -6588,10 +6640,23 @@ def fetch_statute_rows_by_targets(
     if not targets or not config.db_path.exists():
         return []
 
-    target_clauses = ["(UPPER(tax_domain) = ? AND legal_provisions_json LIKE ?)" for _ in targets]
+    target_clauses: list[str] = []
     target_values: list[str] = []
     for domain, article_key in targets:
-        target_values.extend((domain.upper(), f'%"art. {article_key}"%'))
+        normalized_domain = domain.upper()
+        if normalized_domain == "NIERUCHOMOŚCI":
+            target_clauses.append(
+                "((UPPER(tax_domain) = ? OR LOWER(subject) LIKE ?) "
+                "AND legal_provisions_json LIKE ?)"
+            )
+            target_values.extend((
+                normalized_domain,
+                "%podatkach i opłatach lokalnych%",
+                f'%"art. {article_key}"%',
+            ))
+        else:
+            target_clauses.append("(UPPER(tax_domain) = ? AND legal_provisions_json LIKE ?)")
+            target_values.extend((normalized_domain, f'%"art. {article_key}"%'))
 
     connection = get_connection(config.db_path)
     try:
@@ -6619,7 +6684,7 @@ def fetch_statute_rows_by_targets(
             FROM chunks c
             JOIN documents d ON d.document_id = c.document_id
             WHERE c.document_id IN ({placeholders})
-              AND c.chunk_index = 0
+              AND LENGTH(TRIM(c.chunk_text)) >= 40
             """,
             tuple(document_ids),
         ).fetchall()
@@ -6628,13 +6693,34 @@ def fetch_statute_rows_by_targets(
 
     order = build_statute_target_order(targets)
 
-    def row_sort_key(row: sqlite3.Row) -> tuple[int, str]:
+    def row_sort_key(row: sqlite3.Row) -> tuple[int, str, int, int]:
         matched_target = row_matching_statute_target(row, targets)
+        text = normalize_whitespace(str(row["chunk_text"] or ""))
+        # Provision-level corpora commonly keep an article heading in chunk 0
+        # and its operative paragraphs in later chunks.  Returning chunk 0
+        # made the rule extractor see only "Art. 3" even though the indexed
+        # controlling text was present next door.
+        heading_penalty = int(
+            len(text) < 80
+            or bool(re.fullmatch(r"(?:art\.?|artyku[łl])\s*\d+[a-z]?\s*\.?", text, re.IGNORECASE))
+        )
+        subject = str(row["subject"] or "")
+        treaty_penalty = int(subject.lower().startswith("upo polska"))
         if matched_target:
-            return order.get(matched_target, len(order)), str(row["subject"] or "")
+            return (
+                order.get(matched_target, len(order)),
+                subject,
+                heading_penalty,
+                int(row["chunk_index"]),
+            )
         article_key = extract_primary_article_key(row)
         domain = str(row["tax_domain"] or "").upper()
-        return order.get((domain, article_key), len(order)), str(row["subject"] or "")
+        return (
+            order.get((domain, article_key), len(order)),
+            subject,
+            heading_penalty + treaty_penalty,
+            int(row["chunk_index"]),
+        )
 
     deduped: list[sqlite3.Row] = []
     seen_chunks: set[str] = set()
@@ -6972,17 +7058,41 @@ def compute_rule_specificity_rank(
 
 def prioritize_legal_rules_for_query(rules: list[LegalRule], query: str) -> list[LegalRule]:
     query_tokens = {token.lower() for token in QUERY_TOKEN_RE.findall(query or "")}
+    preferred_targets = set(build_preferred_statute_targets(query))
 
-    def rule_score(rule: LegalRule) -> tuple[int, int, int, int, str, str]:
+    def rule_domain(rule: LegalRule) -> str:
+        title = normalize_whitespace(rule.act_title or "").lower()
+        source_id = (rule.source_id or "").lower()
+        if "towarów i usług" in title or "towarow i uslug" in title or "vat" in source_id:
+            return "VAT"
+        if "osób prawnych" in title or "osob prawnych" in title or "cit" in source_id:
+            return "CIT"
+        if "osób fizycznych" in title or "osob fizycznych" in title or "pit" in source_id:
+            return "PIT"
+        if "ordynacja podatkowa" in title:
+            return "ORDYNACJA"
+        if "podatkach i opłatach lokalnych" in title or "podatkach i oplatach lokalnych" in title:
+            return "NIERUCHOMOŚCI"
+        if "czynności cywilnoprawnych" in title or "czynnosci cywilnoprawnych" in title:
+            return "PCC"
+        if "spadków i darowizn" in title or "spadkow i darowizn" in title:
+            return "SD"
+        if "akcyz" in title:
+            return "AKCYZA"
+        return ""
+
+    def rule_score(rule: LegalRule) -> tuple[int, int, int, int, int, str, str]:
         haystack = normalize_whitespace(
             " ".join([rule.act_title, rule.citation, rule.directive, " ".join(rule.scope_subject_terms), " ".join(rule.scope_object_terms)])
         ).lower()
         overlap = sum(1 for token in query_tokens if token in haystack)
         direct_entity_bonus = 2 if any(term in haystack for term in ("spółka komandytowa", "spolka komandytowa", "mały podatnik", "maly podatnik", "fundacja rodzinna")) else 0
         repealed_penalty = -10 if rule.rule_type == "repealed" else 0
+        target_bonus = 1 if (rule_domain(rule), rule.article_key.lower()) in preferred_targets else 0
         return (
-            rule.specificity_rank + direct_entity_bonus + repealed_penalty,
+            target_bonus,
             overlap,
+            rule.specificity_rank + direct_entity_bonus + repealed_penalty,
             len(rule.definition_dependencies),
             1 if rule.rule_type != "repealed" else 0,
             normalize_whitespace(rule.legal_state_date or ""),
@@ -8099,16 +8209,33 @@ def retrieve_deterministic_statute_chunks(
         row_to_rag_chunk(row, score=200.0, evidence_role="deterministic_primary_law")
         for row in rows
     ]
+    # The indexed corpus is the source of truth at request time.  Scanning the
+    # multi-gigabyte JSONL source on every direct statute lookup made local
+    # requests take tens of seconds, while production images intentionally do
+    # not contain those files at all.  Consult source files only for targets
+    # that are genuinely absent from the active SQLite index.
+    missing_statute_targets = [
+        target
+        for target in source_plan.statute_targets
+        if not any(chunk_matches_statute_target(chunk, target) for chunk in ranked_chunks)
+    ]
     fallback_chunks: list[RagChunk] = []
-    if source_plan.statute_targets:
+    if missing_statute_targets:
         fallback_chunks.extend(
             load_processed_statute_chunks_by_targets(
-                list(source_plan.statute_targets),
+                missing_statute_targets,
                 chunk_limit_per_target=1,
             )
         )
     for axis in source_plan.axes:
         if axis.direct_subject_prefix:
+            if any(
+                normalize_whitespace(chunk.subject or "").lower().startswith(
+                    normalize_whitespace(axis.direct_subject_prefix).lower()
+                )
+                for chunk in ranked_chunks
+            ):
+                continue
             fallback_chunks.extend(
                 load_processed_statute_chunks_by_subject_prefix(
                     axis.direct_subject_prefix,
@@ -8116,10 +8243,16 @@ def retrieve_deterministic_statute_chunks(
                     chunk_limit=max(4, len(axis.preferred_targets) or 4),
                 )
             )
-    if required_document_ids:
+    indexed_document_ids = {str(chunk.document_id or "") for chunk in ranked_chunks}
+    missing_document_ids = [
+        document_id
+        for document_id in required_document_ids
+        if document_id not in indexed_document_ids
+    ]
+    if missing_document_ids:
         fallback_chunks.extend(
             load_processed_document_chunks_by_ids(
-                required_document_ids,
+                missing_document_ids,
                 chunk_limit_per_document=1,
             )
         )
@@ -8128,101 +8261,123 @@ def retrieve_deterministic_statute_chunks(
         [*ranked_chunks, *fallback_chunks],
         list(source_plan.statute_targets),
     )
+    query_tokens = {
+        token.lower()
+        for token in QUERY_TOKEN_RE.findall(query or "")
+        if len(token) >= 4 and token.lower() not in RANKING_STOPWORDS
+    }
+
+    def controlling_unit_score(chunk: RagChunk) -> tuple[int, int, int]:
+        text = normalize_whitespace(
+            " ".join([chunk.subject or "", chunk.chunk_text or ""])
+        ).lower()
+        overlap = sum(1 for token in query_tokens if token in text)
+        substantive = int(
+            len(normalize_whitespace(chunk.chunk_text or "")) >= 80
+            and not re.fullmatch(
+                r"(?:art\.?|artyku[łl])\s*\d+[a-z]?\s*\.?",
+                normalize_whitespace(chunk.chunk_text or ""),
+                re.IGNORECASE,
+            )
+        )
+        return overlap, substantive, -chunk.chunk_index
+
+    # Keep one best editorial unit per canonical article.  Choosing chunk 0
+    # blindly frequently selected a heading or an unrelated paragraph while
+    # the controlling paragraph was present in the same indexed article.
+    best_by_source: dict[str, RagChunk] = {}
+    source_order: list[str] = []
+    for chunk in dedupe_chunks_by_chunk_id(ordered_chunks):
+        source_id = chunk_canonical_source_id(chunk)
+        if source_id not in best_by_source:
+            best_by_source[source_id] = chunk
+            source_order.append(source_id)
+            continue
+        if controlling_unit_score(chunk) > controlling_unit_score(best_by_source[source_id]):
+            best_by_source[source_id] = chunk
     return [
         annotate_chunk_evidence_role(chunk, "deterministic_primary_law")
-        for chunk in dedupe_chunks_by_canonical_source(ordered_chunks)
+        for chunk in (best_by_source[source_id] for source_id in source_order)
     ][:target_limit]
 
 
 def add_primary_source_fallback_chunks(query: str, chunks: list[RagChunk]) -> list[RagChunk]:
-    explicit_fallback_chunks: list[RagChunk] = []
-    explicit_targets = build_explicit_statute_article_targets(query)
-    if explicit_targets:
-        explicit_fallback_chunks = load_processed_statute_chunks_by_targets(
-            explicit_targets,
-            chunk_limit_per_target=6,
+    """Prepend deterministic primary law from the configured read backend.
+
+    Historically this function always scanned processed source files.  That
+    silently created two different runtimes: local development could recover
+    a provision, but the production image (which correctly excludes the raw
+    corpus) could not.  ``retrieve_deterministic_statute_chunks`` already
+    routes through MySQL when MySQL is active and falls back to source files
+    only when an indexed SQLite target is missing, so it is the single safe
+    recovery path.
+    """
+    source_plan = build_legal_source_plan(
+        query,
+        include_interpretations=False,
+        include_judgments=False,
+    )
+    deterministic = retrieve_deterministic_statute_chunks(
+        query,
+        plan=source_plan,
+        limit=max(get_rag_config().retrieval_limit, len(source_plan.statute_targets) or 1),
+    )
+    return dedupe_chunks_by_chunk_id([*deterministic, *chunks])
+
+
+def search_primary_law_chunks(
+    query: str,
+    *,
+    limit: Optional[int] = None,
+) -> list[RagChunk]:
+    """Retrieve primary law independently from optional authority lanes.
+
+    This function is deliberately backend-routed and statute-only.  Callers
+    can put a hard deadline around it without allowing a slow interpretation
+    or judgment search to erase an already retrieved controlling provision.
+    """
+    config = get_rag_config()
+    effective_limit = max(limit or config.retrieval_limit, 12)
+    source_plan = build_legal_source_plan(
+        query,
+        include_interpretations=False,
+        include_judgments=False,
+    )
+    deterministic = retrieve_deterministic_statute_chunks(
+        query,
+        plan=source_plan,
+        limit=max(effective_limit, len(source_plan.statute_targets) or 1),
+    )
+    domains = set(source_plan.tax_domains)
+    runtime = resolve_rag_runtime()
+    if runtime.read_backend == "mysql":
+        from app.mysql_rag import search_chunks_mysql
+
+        semantic = search_chunks_mysql(
+            query,
+            limit=effective_limit,
+            source_types={"statute"},
+            enforce_query_domain=bool(domains),
+            tax_domains=domains or None,
+        )
+    elif runtime.read_backend == "supabase":
+        from app.supabase_rag import search_chunks_supabase
+
+        semantic = search_chunks_supabase(
+            query,
+            limit=effective_limit,
+            source_types={"statute"},
+            tax_domains=domains or None,
         )
     else:
-        general_targets = build_general_statute_concept_targets(query)
-        if general_targets:
-            explicit_fallback_chunks = load_processed_statute_chunks_by_targets(
-                general_targets,
-                chunk_limit_per_target=1,
-            )
-
-    required_document_ids: list[str] = []
-    if query_targets_ksef_current_law(query):
-        required_document_ids.extend(KSEF_CURRENT_BUNDLE_DOCUMENT_IDS)
-    if query_targets_family_foundation_mechanism(query):
-        required_document_ids.extend(FAMILY_FOUNDATION_PRIMARY_BUNDLE_DOCUMENT_IDS)
-
-    required_fallback_chunks: list[RagChunk] = []
-    if required_document_ids:
-        existing_document_ids = {str(chunk.document_id or "") for chunk in chunks}
-        missing_document_ids = [
-            document_id
-            for document_id in dict.fromkeys(required_document_ids)
-            if document_id not in existing_document_ids
-        ]
-        fallback_chunks = load_processed_document_chunks_by_ids(missing_document_ids, chunk_limit_per_document=1)
-        if fallback_chunks:
-            seen_chunk_ids = {chunk.chunk_id for chunk in chunks}
-            for chunk in fallback_chunks:
-                if chunk.chunk_id in seen_chunk_ids:
-                    continue
-                seen_chunk_ids.add(chunk.chunk_id)
-                required_fallback_chunks.append(chunk)
-
-    target_fallback_chunks_by_axis: list[list[RagChunk]] = []
-    for axis in decompose_query_into_legal_axes(query):
-        if not axis.preferred_targets or (axis.source_types and "statute" not in axis.source_types):
-            continue
-        current_chunks = [*explicit_fallback_chunks, *required_fallback_chunks, *chunks]
-        if axis.direct_subject_prefix:
-            axis_fallback_chunks = load_processed_statute_chunks_by_subject_prefix(
-                axis.direct_subject_prefix,
-                targets=axis.preferred_targets,
-                chunk_limit=max(4, len(axis.preferred_targets)),
-            )
-            if axis_fallback_chunks:
-                target_fallback_chunks_by_axis.append(axis_fallback_chunks)
-            continue
-        missing_targets = [
-            target
-            for target in axis.preferred_targets
-            if not any(
-                chunk_has_substantive_axis_preferred_target(
-                    replace(axis, source_types={"statute"}, preferred_targets=(target,)),
-                    chunk,
-                )
-                for chunk in current_chunks
-            )
-        ]
-        if missing_targets:
-            axis_fallback_chunks = load_processed_statute_chunks_by_targets(
-                missing_targets,
-                chunk_limit_per_target=1,
-            )
-            if axis_fallback_chunks:
-                target_fallback_chunks_by_axis.append(axis_fallback_chunks)
-
-    target_fallback_chunks: list[RagChunk] = []
-    if target_fallback_chunks_by_axis:
-        max_axis_chunks = max(len(axis_chunks) for axis_chunks in target_fallback_chunks_by_axis)
-        for position in range(max_axis_chunks):
-            for axis_chunks in target_fallback_chunks_by_axis:
-                if position < len(axis_chunks):
-                    target_fallback_chunks.append(axis_chunks[position])
-    if not target_fallback_chunks:
-        return dedupe_chunks_by_chunk_id([*explicit_fallback_chunks, *required_fallback_chunks, *chunks])
-    seen_chunk_ids = {chunk.chunk_id for chunk in [*explicit_fallback_chunks, *required_fallback_chunks, *chunks]}
-    deduped_target_fallback_chunks: list[RagChunk] = []
-    for chunk in target_fallback_chunks:
-        if chunk.chunk_id in seen_chunk_ids:
-            continue
-        seen_chunk_ids.add(chunk.chunk_id)
-        deduped_target_fallback_chunks.append(chunk)
-    return dedupe_chunks_by_chunk_id([*explicit_fallback_chunks, *required_fallback_chunks, *deduped_target_fallback_chunks, *chunks])
+        semantic = _search_chunks_single_query(
+            query,
+            limit=effective_limit,
+            source_types={"statute"},
+            enforce_query_domain=bool(domains),
+            tax_domains=domains or None,
+        )
+    return dedupe_chunks_by_chunk_id([*deterministic, *semantic])[:effective_limit]
 
 
 def _search_chunks_single_query(

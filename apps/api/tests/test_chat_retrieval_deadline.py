@@ -6,10 +6,92 @@ from unittest.mock import patch
 
 from app.auth import AuthenticatedUser
 from app.housing_relief_pipeline import HOUSING_RELIEF_BENCHMARK_QUERY
-from app.main import ChatMessage, ChatRequest, chat
+from app.main import ChatMessage, ChatRequest, chat, retrieve_baseline_chat_evidence
+from app.rag import RagChunk
+
+
+def _statute_chunk() -> RagChunk:
+    return RagChunk(
+        chunk_id="vat-art-5:1",
+        document_id="vat-art-5",
+        chunk_index=1,
+        score=1.0,
+        chunk_text=(
+            "Art. 5 ust. 1 pkt 1. Opodatkowaniu podatkiem od towarów i usług "
+            "podlegają odpłatna dostawa towarów i odpłatne świadczenie usług."
+        ),
+        subject="O podatku od towarów i usług - art. 5",
+        signature=None,
+        published_date="2026-01-01",
+        source_url="https://example.test/vat/art-5",
+        category=None,
+        source_type="statute",
+        legal_provisions=["art. 5"],
+    )
 
 
 class ChatRetrievalDeadlineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_optional_authority_timeout_does_not_erase_primary_law(self) -> None:
+        def slow_authority_retrieval(*args, **kwargs):
+            time.sleep(0.2)
+            return []
+
+        with (
+            patch("app.main.search_primary_law_chunks", return_value=[_statute_chunk()]),
+            patch("app.main.search_chunks", side_effect=slow_authority_retrieval),
+        ):
+            chunks, trace = await retrieve_baseline_chat_evidence(
+                "Czy odpłatna dostawa towarów podlega VAT?",
+                include_interpretations=True,
+                include_judgments=True,
+                timeout_seconds=0.05,
+            )
+
+        self.assertEqual([chunk.chunk_id for chunk in chunks], ["vat-art-5:1"])
+        self.assertEqual(trace["primary_law"]["status"], "completed")
+        self.assertEqual(trace["interpretation"]["status"], "deadline_exceeded")
+        self.assertEqual(trace["judgment"]["status"], "deadline_exceeded")
+        self.assertTrue(trace["primary_preserved_when_authority_incomplete"])
+
+    async def test_generic_chat_uses_primary_law_when_authorities_time_out(self) -> None:
+        def slow_authority_retrieval(*args, **kwargs):
+            time.sleep(0.2)
+            return []
+
+        request = ChatRequest(
+            messages=[
+                ChatMessage(
+                    role="user",
+                    content="Czy odpłatna dostawa towarów na terytorium kraju podlega VAT?",
+                )
+            ]
+        )
+        user = AuthenticatedUser(id="user", email=None, full_name=None)
+
+        with (
+            patch("app.main.ensure_profile"),
+            patch("app.main.is_chat_storage_available", return_value=False),
+            patch("app.main.is_model_gateway_configured", return_value=False),
+            patch("app.main.get_legal_pipeline_mode", return_value="legacy"),
+            patch("app.main.get_legal_retrieval_mode", return_value="baseline"),
+            patch("app.main.RETRIEVAL_STAGE_TIMEOUT_SECONDS", 0.05),
+            patch("app.main.search_primary_law_chunks", return_value=[_statute_chunk()]),
+            patch("app.main.search_chunks", side_effect=slow_authority_retrieval),
+        ):
+            response = await chat(request, current_user=user)
+
+        self.assertNotIn("Nie można zatwierdzić materialnej odpowiedzi", response.reply)
+        self.assertIn("Lokalny retrieval znalazł zweryfikowane źródła", response.reply)
+        self.assertEqual(
+            response.analysis_trace["retrieval_lanes"]["primary_law"]["status"],
+            "completed",
+        )
+        self.assertTrue(
+            response.analysis_trace["retrieval_lanes"][
+                "primary_preserved_when_authority_incomplete"
+            ]
+        )
+
     async def test_housing_reply_survives_authority_retrieval_timeout(self) -> None:
         def slow_authority_retrieval(_: str):
             time.sleep(0.2)

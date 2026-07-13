@@ -206,6 +206,46 @@ Domyślny przepływ jest taki:
 - jeśli pliki źródłowe ustaw są nowsze niż lokalny SQLite, backend automatycznie odświeży indeks przy pierwszym zapytaniu.
 - chat używa retrievalu chunkowego do wyboru dokumentów, a następnie domyślnie odtwarza pełną treść do 6 wybranych dokumentów i przekazuje ją modelowi do wewnętrznej selekcji oraz syntezy.
 
+### Bezpieczny backfill SQLite → MySQL
+
+Backfill produkcyjnego MySQL jest add-only: nie usuwa danych, nie robi
+`TRUNCATE` i nie przebudowuje indeksów FULLTEXT. Uruchamiaj go z katalogu
+głównego repozytorium. Najpierw wykonaj dry-run:
+
+```bash
+PYTHONPATH=apps/api apps/api/.venv/bin/python \
+  apps/api/scripts/backfill_missing_sqlite_to_mysql.py \
+  --env-file apps/api/.env \
+  --sqlite-path apps/api/data/processed/eureka_rag.sqlite3 \
+  --dry-run
+```
+
+Następnie uzupełnij brakujące dokumenty, chunki i ich cytowania:
+
+```bash
+PYTHONPATH=apps/api apps/api/.venv/bin/python \
+  apps/api/scripts/backfill_missing_sqlite_to_mysql.py \
+  --env-file apps/api/.env \
+  --sqlite-path apps/api/data/processed/eureka_rag.sqlite3
+```
+
+Jeżeli dokumenty/chunki już istnieją, ale wcześniejsza migracja nie dograła
+wszystkich wpisów w tabeli cytowań, uruchom osobno idempotentną synchronizację
+cytowań. Dla dużego korpusu najlepiej ograniczyć ją do brakującego typu źródła
+i wykonać poza szczytem:
+
+```bash
+PYTHONPATH=apps/api apps/api/.venv/bin/python \
+  apps/api/scripts/backfill_missing_sqlite_to_mysql.py \
+  --env-file apps/api/.env \
+  --sqlite-path apps/api/data/processed/eureka_rag.sqlite3 \
+  --source-type interpretation \
+  --sync-all-citations
+```
+
+Każdą komendę można wznowić; inserty używają `INSERT IGNORE`. Przy równoległym
+backfillu ustaw tę samą wartość `--shard-count` i różne `--shard-index`.
+
 ## Model → RAG → Model
 
 Nowa architektura działa obok baseline'u i jest odwracalna jedną flagą:

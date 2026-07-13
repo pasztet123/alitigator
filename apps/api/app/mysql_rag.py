@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -97,6 +98,7 @@ from app.rag import (
 
 
 _MYSQL_SEARCH_SCHEMA_READY = False
+logger = logging.getLogger(__name__)
 
 
 def is_mysql_rag_enabled() -> bool:
@@ -491,7 +493,12 @@ def upsert_document_mysql(connection: pymysql.connections.Connection, row: dict[
         )
 
 
-def insert_chunks_mysql(connection: pymysql.connections.Connection, rows: list[dict[str, Any]]) -> None:
+def insert_chunks_mysql(
+    connection: pymysql.connections.Connection,
+    rows: list[dict[str, Any]],
+    *,
+    declared_legal_provisions: Iterable[str] = (),
+) -> None:
     if not rows:
         return
     _, chunks_table = get_mysql_target()
@@ -512,7 +519,8 @@ def insert_chunks_mysql(connection: pymysql.connections.Connection, rows: list[d
             (row["chunk_id"], citation)
             for row in rows
             for citation in extract_normalized_provision_references(
-                str(row.get("chunk_text") or "")
+                str(row.get("chunk_text") or ""),
+                declared_legal_provisions,
             )
         ]
         if citation_rows:
@@ -568,7 +576,13 @@ def reindex_corpus_mysql(*, limit: Optional[int] = None, force: bool = False) ->
 
                 delete_document_mysql(connection, document_id)
                 upsert_document_mysql(connection, document_row)
-                insert_chunks_mysql(connection, chunk_rows)
+                insert_chunks_mysql(
+                    connection,
+                    chunk_rows,
+                    declared_legal_provisions=json.loads(
+                        document_row.get("legal_provisions_json") or "[]"
+                    ),
+                )
 
                 indexed += 1
                 chunk_count += len(chunk_rows)
@@ -617,6 +631,66 @@ def build_mysql_candidate_queries(query: str) -> list[str]:
         build_mysql_boolean_query(" ".join(get_query_expansion_terms(query))),
     ]
     return list(dict.fromkeys(value for value in candidates if value))
+
+
+def authority_citation_targets(
+    query: str,
+    *,
+    source_types: Optional[set[str]],
+) -> list[str]:
+    """Return exact, indexed citations for an authority-only lookup.
+
+    Controlled authority queries always contain the provision that anchors the
+    issue.  Searching that citation through ``rag_chunks_citations`` is both
+    more precise and orders of magnitude cheaper than a broad boolean FULLTEXT
+    scan over every authority chunk.  General chat retrieval deliberately keeps
+    its broader recall path.
+    """
+    normalized_types = {value.lower() for value in source_types or set() if value}
+    if not normalized_types or not normalized_types.issubset({"interpretation", "judgment"}):
+        return []
+    return extract_normalized_provision_references(query)
+
+
+def authority_metadata_citation_patterns(citations: Iterable[str]) -> list[str]:
+    """Build plain and Eureka-hierarchy LIKE patterns for document metadata."""
+    patterns: list[str] = []
+    for citation in citations:
+        normalized = normalize_provision_reference(str(citation))
+        if not normalized:
+            continue
+        hierarchy_form = re.sub(
+            r"\s+(?=(?:ust\.|pkt\b|lit\.))",
+            "-",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        for value in (normalized, hierarchy_form):
+            pattern = f"%{value}%"
+            if pattern not in patterns:
+                patterns.append(pattern)
+    return patterns
+
+
+def _configure_search_statement_timeout(cursor: Any) -> None:
+    """Bound MariaDB FULLTEXT fallbacks below the outer request deadline."""
+    try:
+        configured_timeout = float(
+            os.getenv("ALITIGATOR_RAG_MYSQL_SEARCH_STATEMENT_TIMEOUT_SECONDS", "12")
+        )
+    except ValueError:
+        configured_timeout = 12.0
+    timeout_seconds = max(
+        1.0,
+        min(configured_timeout, 30.0),
+    )
+    try:
+        # MariaDB supports a per-session server-side deadline.  If a compatible
+        # MySQL deployment does not expose it, socket and request deadlines stay
+        # in force and retrieval continues normally.
+        cursor.execute("SET SESSION max_statement_time = %s", (timeout_seconds,))
+    except pymysql.MySQLError:
+        logger.debug("MySQL max_statement_time is unavailable", exc_info=True)
 
 
 def escape_pymysql_query_literals(sql: str) -> str:
@@ -766,6 +840,7 @@ def fetch_document_contexts_mysql(document_ids: list[str], *, seed_chunks: list[
     documents_table, chunks_table = get_mysql_target()
     with mysql_connection() as connection:
         with connection.cursor() as cursor:
+            _configure_search_statement_timeout(cursor)
             cursor.execute(
                 f"""
                 SELECT
@@ -902,6 +977,11 @@ def fetch_candidate_rows_mysql(
     documents_table, chunks_table = get_mysql_target()
     candidate_limit = max(config.candidate_pool_limit, effective_limit * 20)
     query_rows: list[list[dict[str, Any]]] = []
+    citation_targets = authority_citation_targets(
+        detection_text,
+        source_types=source_types,
+    )
+    metadata_citation_patterns = authority_metadata_citation_patterns(citation_targets)
 
     statute_exact_articles: set[str] = set()
     statute_family_prefixes: set[str] = set()
@@ -936,31 +1016,110 @@ def fetch_candidate_rows_mysql(
     match_queries = build_mysql_candidate_queries(query)
     if not match_queries and not query_rows:
         return "", []
+    direct_authority_rows_found = False
     with mysql_connection() as connection:
         with connection.cursor() as cursor:
-            for match_query in match_queries:
-                cursor.execute(
-                    f"""
-                    SELECT
-                        c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
-                        d.subject, d.signature, d.published_date, d.source_url, d.category,
-                        d.keywords_json, d.legal_provisions_json, d.issues_json, d.law_tags_json,
-                        d.facts_text, d.question_text, d.tax_domain, d.source, d.source_type,
-                        d.source_subtype, d.authority, d.publication, d.legal_state_date,
-                        d.source_pages_json,
-                        MATCH(c.search_text, c.question_text, c.facts_text, c.tax_domain)
-                            AGAINST (%s IN BOOLEAN MODE) AS lexical_score
-                    FROM `{chunks_table}` c
-                    JOIN `{documents_table}` d ON d.document_id = c.document_id
-                    WHERE MATCH(c.search_text, c.question_text, c.facts_text, c.tax_domain)
-                        AGAINST (%s IN BOOLEAN MODE)
-                        {filter_sql}
-                    ORDER BY lexical_score DESC, d.published_date DESC, c.chunk_index ASC, c.chunk_id ASC
-                    LIMIT %s
-                    """,
-                    (match_query, match_query, *filter_values, candidate_limit),
-                )
-                query_rows.append(list(cursor.fetchall()))
+            _configure_search_statement_timeout(cursor)
+            if citation_targets:
+                citations_table = f"{chunks_table}_citations"
+                placeholders = ", ".join(["%s"] * len(citation_targets))
+                try:
+                    cursor.execute(
+                        f"""
+                        SELECT
+                            c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                            d.subject, d.signature, d.published_date, d.source_url, d.category,
+                            d.keywords_json, d.legal_provisions_json, d.issues_json, d.law_tags_json,
+                            d.facts_text, d.question_text, d.tax_domain, d.source, d.source_type,
+                            d.source_subtype, d.authority, d.publication, d.legal_state_date,
+                            d.source_pages_json, 0.0 AS lexical_score
+                        FROM `{citations_table}` citation
+                        JOIN `{chunks_table}` c ON c.chunk_id = citation.chunk_id
+                        JOIN `{documents_table}` d ON d.document_id = c.document_id
+                        WHERE citation.citation IN ({placeholders})
+                            {filter_sql}
+                        ORDER BY d.published_date DESC, c.chunk_index ASC, c.chunk_id ASC
+                        LIMIT %s
+                        """,
+                        (*citation_targets, *filter_values, candidate_limit),
+                    )
+                    direct_rows = list(cursor.fetchall())
+                except pymysql.MySQLError:
+                    # Old indexes may predate the citation side table.  Keep the
+                    # bounded FULLTEXT fallback available until they are rebuilt.
+                    logger.warning("Indexed authority citation lookup failed; using FULLTEXT fallback", exc_info=True)
+                    direct_rows = []
+                if direct_rows:
+                    query_rows.append(direct_rows)
+                    direct_authority_rows_found = True
+
+                # Supplement the side table from document-level declarations.
+                # This keeps recall correct for an index created before declared
+                # legal provisions were backfilled into chunk citations.  One
+                # lead chunk per document prevents popular provisions from
+                # exhausting the pool with duplicate chunks before reranking.
+                metadata_clauses = ["d.legal_provisions_json LIKE %s"] * len(metadata_citation_patterns)
+                if metadata_clauses:
+                    cursor.execute(
+                        f"""
+                        SELECT
+                            c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                            d.subject, d.signature, d.published_date, d.source_url, d.category,
+                            d.keywords_json, d.legal_provisions_json, d.issues_json, d.law_tags_json,
+                            d.facts_text, d.question_text, d.tax_domain, d.source, d.source_type,
+                            d.source_subtype, d.authority, d.publication, d.legal_state_date,
+                            d.source_pages_json, 0.0 AS lexical_score
+                        FROM `{documents_table}` d
+                        JOIN `{chunks_table}` c
+                          ON c.document_id = d.document_id AND c.chunk_index = 0
+                        WHERE ({' OR '.join(metadata_clauses)})
+                            {filter_sql}
+                        ORDER BY d.published_date DESC, c.chunk_id ASC
+                        LIMIT %s
+                        """,
+                        (*metadata_citation_patterns, *filter_values, candidate_limit),
+                    )
+                    metadata_rows = list(cursor.fetchall())
+                    if metadata_rows:
+                        query_rows.append(metadata_rows)
+                        direct_authority_rows_found = True
+
+            # An exact citation pool is already broad enough for factual local
+            # reranking and later full-document hydration.  FULLTEXT is only a
+            # fallback for missing/unknown citation metadata (notably historical
+            # judgments), and is limited to one bounded statement in that case.
+            fallback_queries = [] if direct_authority_rows_found else match_queries
+            if citation_targets:
+                fallback_queries = fallback_queries[:1]
+            for match_query in fallback_queries:
+                try:
+                    cursor.execute(
+                        f"""
+                        SELECT
+                            c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                            d.subject, d.signature, d.published_date, d.source_url, d.category,
+                            d.keywords_json, d.legal_provisions_json, d.issues_json, d.law_tags_json,
+                            d.facts_text, d.question_text, d.tax_domain, d.source, d.source_type,
+                            d.source_subtype, d.authority, d.publication, d.legal_state_date,
+                            d.source_pages_json,
+                            MATCH(c.search_text, c.question_text, c.facts_text, c.tax_domain)
+                                AGAINST (%s IN BOOLEAN MODE) AS lexical_score
+                        FROM `{chunks_table}` c
+                        JOIN `{documents_table}` d ON d.document_id = c.document_id
+                        WHERE MATCH(c.search_text, c.question_text, c.facts_text, c.tax_domain)
+                            AGAINST (%s IN BOOLEAN MODE)
+                            {filter_sql}
+                        ORDER BY lexical_score DESC, d.published_date DESC, c.chunk_index ASC, c.chunk_id ASC
+                        LIMIT %s
+                        """,
+                        (match_query, match_query, *filter_values, candidate_limit),
+                    )
+                    query_rows.append(list(cursor.fetchall()))
+                except pymysql.OperationalError as exc:
+                    if exc.args and int(exc.args[0]) in {1969, 3024}:
+                        logger.warning("Bounded MySQL authority FULLTEXT fallback timed out")
+                        continue
+                    raise
 
     rows: list[dict[str, Any]] = []
     seen_chunks: set[str] = set()
@@ -982,8 +1141,10 @@ def fetch_candidate_rows_mysql(
             seen_chunks.add(chunk_id)
             chunks_per_document[document_id] = chunks_per_document.get(document_id, 0) + 1
             if len(rows) >= candidate_limit:
-                return " || ".join(match_queries), rows
-    return " || ".join(match_queries), rows
+                descriptor = [*(f"citation:{value}" for value in citation_targets), *fallback_queries]
+                return " || ".join(descriptor), rows
+    descriptor = [*(f"citation:{value}" for value in citation_targets), *fallback_queries]
+    return " || ".join(descriptor), rows
 
 
 def _resolve_axis_scope_mysql(

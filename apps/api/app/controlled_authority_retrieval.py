@@ -24,6 +24,7 @@ Search = Callable[..., list[RagChunk]]
 ContextFetcher = Callable[..., list[RagDocumentContext]]
 _API_DIR = Path(__file__).resolve().parent.parent
 _DEFAULT_JUDGMENT_CORPUS = _API_DIR / "data" / "processed" / "cbosa_nsa_fsk_judgments.jsonl"
+_HOUSING_CREDIT_SPECIAL_RULE_START_YEAR = 2022
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class ControlledAuthorityIssue:
     event_type: str
     required_terms: tuple[str, ...]
     distinguishing_fact: str
+    judgment_query_suffix: str | None = None
 
 
 HOUSING_AUTHORITY_ISSUES: tuple[ControlledAuthorityIssue, ...] = (
@@ -53,6 +55,11 @@ HOUSING_AUTHORITY_ISSUES: tuple[ControlledAuthorityIssue, ...] = (
         event_type="repayment_from_sale_proceeds",
         required_terms=("kredyt", "spłat", "sprzed"),
         distinguishing_fact="czy kredyt został zaciągnięty na sprzedane mieszkanie przed sprzedażą",
+        judgment_query_suffix=(
+            "art. 21 ust. 1 pkt 131 oraz art. 21 ust. 25 pkt 2 ustawy PIT "
+            "spłata kredytu zaciągniętego na nabycie następnie sprzedanej "
+            "nieruchomości ze środków z jej sprzedaży"
+        ),
     ),
     ControlledAuthorityIssue(
         issue_id="developer_ownership_deadline",
@@ -121,8 +128,12 @@ def retrieve_housing_authorities(
         # query.  The former pair of broad factual and provision-first queries
         # doubled expensive MySQL work without improving the later factual
         # selection stage, which already scores the full document text.
-        authority_query = issue.query_suffix
         for source_type, limit in (("interpretation", 8), ("judgment", 6)):
+            authority_query = (
+                issue.judgment_query_suffix
+                if source_type == "judgment" and issue.judgment_query_suffix
+                else issue.query_suffix
+            )
             queries.append(
                 {
                     "issue_id": issue.issue_id,
@@ -137,8 +148,10 @@ def retrieve_housing_authorities(
             )
             jobs.append((issue, source_type, limit, authority_query))
 
-    # Search each issue-source pair independently.  Parallel reads keep the
-    # stricter retrieval design from multiplying user-visible latency.
+    search_results: list[tuple[ControlledAuthorityIssue, str, list[RagChunk]]] = []
+    # Search each issue-source pair independently.  Exact citation lookups are
+    # cheap; the bounded parallelism also contains the legacy FULLTEXT fallback
+    # needed for authorities whose citation metadata is unknown.
     with ThreadPoolExecutor(max_workers=min(4, len(jobs))) as executor:
         futures = {
             executor.submit(search, authority_query, limit=limit, source_types={source_type}): (issue, source_type)
@@ -147,30 +160,57 @@ def retrieve_housing_authorities(
         for future in as_completed(futures):
             issue, source_type = futures[future]
             try:
-                candidates = future.result()
+                candidates = _dedupe_candidate_documents(future.result())
             except Exception as exc:  # Secondary research must not suppress primary law.
                 errors.append(f"{issue.issue_id}:{source_type}:{type(exc).__name__}")
                 continue
             candidate_counts[source_type] += len(candidates)
-            for chunk in _hydrate_document_contexts(candidates, context_fetcher=context_fetcher):
-                selection, waterfall = _select_candidate_with_trace(chunk, issue)
-                waterfalls[source_type].append(waterfall)
-                if selection is None:
-                    filtered_counts[source_type] += 1
-                    continue
-                key = (issue.issue_id, chunk.source_type, chunk.signature or chunk.document_id)
-                if key in seen:
-                    continue
-                seen.add(key)
-                cards.append(selection)
-                selected_counts[source_type] += 1
+            search_results.append((issue, source_type, candidates))
+
+    # Hydrate every unique authority in one database round-trip.  The previous
+    # per-query hydration repeated large document reads eight times and consumed
+    # a material part of the request budget even after search had completed.
+    seed_chunks = [chunk for _, _, candidates in search_results for chunk in candidates]
+    hydrated_chunks = _hydrate_document_contexts(seed_chunks, context_fetcher=context_fetcher)
+    hydrated_by_document = {chunk.document_id: chunk for chunk in hydrated_chunks}
+
+    for issue, source_type, candidates in search_results:
+        for seed_chunk in candidates:
+            chunk = hydrated_by_document.get(seed_chunk.document_id, seed_chunk)
+            selection, waterfall = _select_candidate_with_trace(chunk, issue)
+            waterfalls[source_type].append(waterfall)
+            if selection is None:
+                filtered_counts[source_type] += 1
+                continue
+            key = (issue.issue_id, chunk.source_type, chunk.signature or chunk.document_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            cards.append(selection)
+            selected_counts[source_type] += 1
 
     cards.sort(key=lambda item: (-float(item["authority_score"]), str(item["issue_id"]), str(item["label"])))
+    quality_pass_counts = dict(selected_counts)
+    cards = _limit_authority_cards(cards, per_issue_source=1)
+    selected_counts = {
+        source_type: sum(1 for card in cards if card.get("source_type") == source_type)
+        for source_type in ("interpretation", "judgment")
+    }
     judgment_audit = audit_judgment_corpus(
         candidate_count=candidate_counts["judgment"],
         selected_count=selected_counts["judgment"],
         filtered_count=filtered_counts["judgment"],
         errors=errors,
+    )
+    interpretation_errors = [error for error in errors if ":interpretation:" in error]
+    interpretation_empty_reason = (
+        "retrieval_error"
+        if interpretation_errors and candidate_counts["interpretation"] == 0
+        else "no_candidates_from_corpus"
+        if candidate_counts["interpretation"] == 0
+        else "candidates_not_selected"
+        if selected_counts["interpretation"] == 0
+        else ""
     )
     outcome: dict[str, object] = {
         "authority_lane_executed": True,
@@ -181,6 +221,7 @@ def retrieve_housing_authorities(
         "candidate_counts": candidate_counts,
         "filtered_counts": filtered_counts,
         "selected_counts": selected_counts,
+        "quality_pass_counts": quality_pass_counts,
         "rendered_authority_cards": len(cards),
         "empty_high_quality_result_supported": True,
         "outcome": "no_high_quality_authorities" if not cards else "high_quality_authorities_found",
@@ -188,9 +229,11 @@ def retrieve_housing_authorities(
         "judgment_lane": judgment_audit,
         "interpretation_lane": {
             "executed": True,
+            "status": "completed_with_errors" if interpretation_errors else "completed",
             "candidates_before_filters": candidate_counts["interpretation"],
             "candidates_after_filters": candidate_counts["interpretation"] - filtered_counts["interpretation"],
             "selected_count": selected_counts["interpretation"],
+            "empty_result_reason": interpretation_empty_reason,
             "candidate_waterfall": waterfalls["interpretation"],
         },
         "judgment_filter_waterfall": waterfalls["judgment"],
@@ -206,6 +249,36 @@ def retrieve_housing_authorities(
         "judgment_indexed_count_recorded": True,
     }
     return cards, outcome
+
+
+def _dedupe_candidate_documents(candidates: list[RagChunk]) -> list[RagChunk]:
+    """Keep the strongest seed chunk once per authority document."""
+    deduped: list[RagChunk] = []
+    seen: set[str] = set()
+    for chunk in candidates:
+        document_id = str(chunk.document_id or "").strip()
+        if not document_id or document_id in seen:
+            continue
+        seen.add(document_id)
+        deduped.append(chunk)
+    return deduped
+
+
+def _limit_authority_cards(
+    cards: list[dict[str, object]],
+    *,
+    per_issue_source: int,
+) -> list[dict[str, object]]:
+    """Keep the answer useful without rendering a wall of near-duplicates."""
+    selected: list[dict[str, object]] = []
+    counts: dict[tuple[str, str], int] = {}
+    for card in cards:
+        key = (str(card.get("issue_id") or ""), str(card.get("source_type") or ""))
+        if counts.get(key, 0) >= per_issue_source:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+        selected.append(card)
+    return selected
 
 
 def _hydrate_document_contexts(
@@ -265,36 +338,53 @@ def _select_candidate(
     if source_type not in {"interpretation", "judgment"}:
         return None
     text = _source_text(chunk)
-    transaction_type, event_type = _classify_transaction(text)
-    if _is_wrong_neighbor(transaction_type, event_type, issue):
-        return None
-    holding, holding_span, holding_section = _extract_complete_holding(chunk)
+    holding, holding_span, holding_section = _extract_complete_holding(chunk, issue)
     if holding is None or holding_span is None or not holding_section:
         return None
+    transaction_type, event_type = _classify_transaction(text, holding=holding, issue=issue)
+    if _is_wrong_neighbor(transaction_type, event_type, issue):
+        return None
     provision_score = _provision_match_score(text, issue.required_provision)
+    provision_status = _provision_match_status(chunk, provision_score)
+    historical_evidence = _historical_authority_evidence(chunk, issue)
     issue_score = _issue_match_score(text, issue)
     material_fact_score = _material_fact_match_score(text, issue)
     holding_relevance = _holding_relevance_score(holding, issue)
+    provision_allowed, authority_status, effective_provision_score = _authority_provision_gate(
+        source_type=source_type,
+        issue=issue,
+        provision_status=provision_status,
+        historical_evidence=historical_evidence,
+        issue_score=issue_score,
+        material_fact_score=material_fact_score,
+        holding_relevance=holding_relevance,
+    )
     # An authority must earn every leg of the relevance test.  In particular a
     # document on a neighbouring mortgage topic cannot pass merely on keywords.
     if (
-        provision_score < 1.0
+        not provision_allowed
         or issue_score < 0.34
         or material_fact_score < 0.34
         or holding_relevance < 0.34
     ):
         return None
     score = round(
-        provision_score * 0.35
+        effective_provision_score * 0.35
         + issue_score * 0.25
         + material_fact_score * 0.22
         + holding_relevance * 0.18,
         4,
     )
-    binding_reason = (
-        f"Holding dotyczy issue „{issue.label}”, wskazuje art. {issue.required_provision} "
-        "i odpowiada materialnym faktom tego claimu."
-    )
+    if authority_status == "historical_authority":
+        binding_reason = (
+            f"Historyczne rozstrzygnięcie dotyczy mechanizmu „{issue.label}”, ale nie stosuje "
+            f"obecnego art. {issue.required_provision}; wyjaśnia tło zmiany i nie zastępuje aktualnej ustawy."
+        )
+    else:
+        binding_reason = (
+            f"Holding dotyczy issue „{issue.label}”, wskazuje art. {issue.required_provision} "
+            "i odpowiada materialnym faktom tego claimu."
+        )
     return {
         "source_type": source_type,
         "label": (chunk.signature or chunk.subject or chunk.document_id).strip(),
@@ -314,15 +404,28 @@ def _select_candidate(
         "outcome": _outcome_from_holding(holding),
         "transaction_type": transaction_type,
         "event_type": event_type,
-        "provision_match_score": provision_score,
+        "provision_match_score": None if provision_status == "unknown" else provision_score,
+        "provision_match_status": provision_status,
+        "authority_status": authority_status,
+        "temporal_status": "historical" if authority_status == "historical_authority" else (
+            "uncertain" if authority_status == "provision_metadata_unknown" else "current"
+        ),
+        "current_law_support": authority_status == "current_authority",
+        "historical_basis": historical_evidence or "",
         "issue_match_score": issue_score,
         "material_fact_match_score": material_fact_score,
         "holding_relevance_score": holding_relevance,
         "authority_score": score,
         "similarity_reason": (
-            f"Zgodny przepis i mechanizm: {issue.label}."
+            f"Historycznie zgodny mechanizm: {issue.label}; aktualną podstawą jest art. {issue.required_provision}."
+            if authority_status == "historical_authority"
+            else f"Zgodny przepis i mechanizm: {issue.label}."
         ),
-        "distinguishing_facts": issue.distinguishing_fact,
+        "distinguishing_facts": (
+            f"Źródło historyczne — nie przedstawia obecnego art. {issue.required_provision}; {issue.distinguishing_fact}."
+            if authority_status == "historical_authority"
+            else issue.distinguishing_fact
+        ),
         "claim_bindings": [
             {"claim_id": claim_id, "score": score, "reason": binding_reason}
             for claim_id in issue.claim_ids
@@ -335,14 +438,26 @@ def _select_candidate_with_trace(
 ) -> tuple[dict[str, object] | None, dict[str, object]]:
     """Keep every quality decision observable; unknown metadata is not mismatch."""
     text = _source_text(chunk)
-    transaction_type, event_type = _classify_transaction(text)
-    holding, _, holding_section = _extract_complete_holding(chunk)
-    scores = {
-        "provision": _provision_match_score(text, issue.required_provision),
+    holding, _, holding_section = _extract_complete_holding(chunk, issue)
+    transaction_type, event_type = _classify_transaction(text, holding=holding or "", issue=issue)
+    provision_score = _provision_match_score(text, issue.required_provision)
+    provision_status = _provision_match_status(chunk, provision_score)
+    historical_evidence = _historical_authority_evidence(chunk, issue)
+    scores: dict[str, float | None] = {
+        "provision": None if provision_status == "unknown" else provision_score,
         "issue": _issue_match_score(text, issue),
         "material_fact": _material_fact_match_score(text, issue),
         "holding": _holding_relevance_score(holding or "", issue),
     }
+    provision_allowed, authority_status, _ = _authority_provision_gate(
+        source_type=str(chunk.source_type or "").lower(),
+        issue=issue,
+        provision_status=provision_status,
+        historical_evidence=historical_evidence,
+        issue_score=float(scores["issue"] or 0.0),
+        material_fact_score=float(scores["material_fact"] or 0.0),
+        holding_relevance=float(scores["holding"] or 0.0),
+    )
     metadata = {
         name: "match" if value else "unknown"
         for name, value in {
@@ -356,10 +471,26 @@ def _select_candidate_with_trace(
     rejection = ""
     if _is_wrong_neighbor(transaction_type, event_type, issue): rejection = "wrong_neighbor"
     elif holding is None or not holding_section: rejection = "missing_holding"
+    elif not provision_allowed: rejection = (
+        "provision_metadata_unknown_insufficient_match"
+        if provision_status == "unknown"
+        else "provision_mismatch"
+    )
     else:
-        rejection = next((key for key, threshold in thresholds.items() if scores[key] < threshold), "")
+        rejection = next(
+            (
+                key
+                for key, threshold in thresholds.items()
+                if key != "provision" and float(scores[key] or 0.0) < threshold
+            ),
+            "",
+        )
     trace = {"document_id": chunk.document_id, "source_type": chunk.source_type,
+             "issue_id": issue.issue_id, "issue_label": issue.label,
              "scores": scores, "thresholds": thresholds, "metadata": metadata,
+             "provision_match_status": provision_status,
+             "authority_status": authority_status,
+             "historical_basis": historical_evidence,
              "first_rejection_reason": rejection or None,
              "result": "selected" if not rejection else "rejected"}
     return (_select_candidate(chunk, issue) if not rejection else None), trace
@@ -389,6 +520,78 @@ def _provision_match_score(text: str, required: str) -> float:
     return 1.0 if re.search(patterns[required], normalized, re.IGNORECASE) else 0.0
 
 
+def _provision_match_status(chunk: RagChunk, provision_score: float) -> str:
+    if provision_score >= 1.0:
+        return "match"
+    # No declared provisions means the legal-unit comparison is unknown, not a
+    # proven negative.  Strong factual/holding evidence may still admit a
+    # judgment as uncertain secondary authority.
+    if not tuple(value for value in chunk.legal_provisions if str(value).strip()):
+        return "unknown"
+    return "mismatch"
+
+
+def _authority_provision_gate(
+    *,
+    source_type: str,
+    issue: ControlledAuthorityIssue,
+    provision_status: str,
+    historical_evidence: str | None,
+    issue_score: float,
+    material_fact_score: float,
+    holding_relevance: float,
+) -> tuple[bool, str, float]:
+    if provision_status == "match":
+        return True, "current_authority", 1.0
+
+    strong_mechanism_match = min(issue_score, material_fact_score, holding_relevance) >= 0.67
+    if source_type == "judgment" and strong_mechanism_match:
+        # Article 21(30a) codified a mechanism litigated under the earlier legal
+        # state.  Such a judgment may explain the genesis of the current rule,
+        # but must never be presented as proof of current law.
+        if issue.issue_id == "credit_on_sold_property" and historical_evidence:
+            return True, "historical_authority", 0.45
+        if provision_status == "unknown":
+            return True, "provision_metadata_unknown", 0.35
+    return False, "rejected_authority", 0.0
+
+
+def _historical_authority_evidence(
+    chunk: RagChunk,
+    issue: ControlledAuthorityIssue,
+) -> str | None:
+    """Return explicit proof that the dispute uses the pre-30a legal state."""
+    if str(chunk.source_type or "").lower() != "judgment" or issue.issue_id != "credit_on_sold_property":
+        return None
+    for label, value in (
+        ("legal_state_date", chunk.legal_state_date or ""),
+        ("publication_date", chunk.published_date or ""),
+    ):
+        year_match = re.search(r"\b(20\d{2})\b", value)
+        if year_match and int(year_match.group(1)) < _HOUSING_CREDIT_SPECIAL_RULE_START_YEAR:
+            return f"{label}:{year_match.group(1)}"
+
+    # A judgment can be published years after the material tax period.  Limit
+    # detection to the case-identification/opening part of the document, rather
+    # than treating a citation of an older judgment deep in the reasoning as the
+    # legal state of the case at hand.
+    opening = re.sub(r"\s+", " ", chunk.chunk_text[:8000]).lower()
+    material_period_patterns = (
+        r"(?:podatk\w*|zobowiązani\w*)[^.]{0,180}\bza(?:\s+rok)?\s+(20\d{2})",
+        r"odpłatn\w* zbyci\w*[^.]{0,180}(?:w roku|w dniu|w)\s+(?:\d{1,2}[.-]\d{1,2}[.-])?(20\d{2})",
+        r"sprzedaż\w*[^.]{0,140}(?:w roku|w dniu|w)\s+(?:\d{1,2}[.-]\d{1,2}[.-])?(20\d{2})",
+    )
+    years = [
+        int(match.group(1))
+        for pattern in material_period_patterns
+        for match in re.finditer(pattern, opening, re.IGNORECASE)
+    ]
+    historical_years = [year for year in years if year < _HOUSING_CREDIT_SPECIAL_RULE_START_YEAR]
+    if historical_years:
+        return f"material_tax_period:{max(historical_years)}"
+    return None
+
+
 def _issue_match_score(text: str, issue: ControlledAuthorityIssue) -> float:
     lowered = text.lower()
     hits = sum(1 for term in issue.required_terms if term in lowered)
@@ -409,20 +612,69 @@ def _material_fact_match_score(text: str, issue: ControlledAuthorityIssue) -> fl
 
 
 def _holding_relevance_score(holding: str, issue: ControlledAuthorityIssue) -> float:
-    return _issue_match_score(holding, issue) if holding else 0.0
+    if not holding:
+        return 0.0
+    issue_score = _issue_match_score(holding, issue)
+    if issue.issue_id == "credit_on_sold_property" and not _credit_on_sold_property_relation(holding):
+        return 0.0
+    return issue_score
 
 
-def _classify_transaction(text: str) -> tuple[str, str]:
+def _credit_on_sold_property_relation(text: str) -> bool:
+    """Require the credit to relate to the sold asset, not merely co-occur."""
+    normalized = re.sub(r"\s+", " ", text.lower())
+    return bool(
+        re.search(
+            r"spłat\w* kredyt\w*.{0,180}(?:na (?:uprzednie )?(?:nabycie|zakup|wybudowanie|wytworzenie))"
+            r".{0,180}(?:następnie )?(?:sprzedan|zbywan)",
+            normalized,
+        )
+        or re.search(
+            r"spłat\w* kredyt\w*.{0,180}(?:na (?:uprzednie )?(?:nabycie|zakup|wybudowanie|wytworzenie))"
+            r".{0,180}(?:tego|tej|ww\.) (?:lokalu|mieszkania|nieruchomości|budynku)",
+            normalized,
+        )
+        or re.search(
+            r"(?:sprzedaż|sprzedaży|zbycie|zbycia).{0,360}(?:na spłat\w*|spłat\w*).{0,100}kredyt\w*"
+            r".{0,220}(?:nabycie|zakup|wybudowanie|wytworzenie).{0,100}(?:tego|tej|sprzedan|zbywan|ww\.)",
+            normalized,
+        )
+    )
+
+
+def _classify_transaction(
+    text: str,
+    *,
+    holding: str = "",
+    issue: ControlledAuthorityIssue | None = None,
+) -> tuple[str, str]:
+    # The selected holding is the highest-signal window.  Whole-document prose
+    # routinely mentions gifts, currency conversion or debt relief only as
+    # background; treating one incidental word as the transaction type rejected
+    # directly relevant interpretations.
+    focus = re.sub(r"\s+", " ", holding).lower()
     lowered = text.lower()
-    if re.search(r"umorzen|umorz", lowered):
+    credit_focus = focus or lowered
+    if (
+        "kredyt" in credit_focus
+        and re.search(r"spłat|spłaci", credit_focus)
+        and re.search(r"zbywan|sprzed", credit_focus)
+    ):
+        return "credit_repayment", "repayment_from_sale_proceeds"
+    if issue and issue.event_type == "ownership_transfer_deadline" and (
+        "deweloper" in credit_focus and re.search(r"własno|naby", credit_focus)
+    ):
+        return "developer_acquisition", "ownership_transfer_deadline"
+    negative_focus = focus or lowered[:6000]
+    if re.search(r"umorzen|umorz", negative_focus):
         return "mortgage_remission", "remission"
-    if re.search(r"zwolnieni\w* z dług|zwolnieni\w* z długu", lowered):
+    if re.search(r"zwolnieni\w* z dług|zwolnieni\w* z długu", negative_focus):
         return "debt_release", "debt_release"
-    if re.search(r"ugoda.*bank|bank.*ugod", lowered):
+    if re.search(r"ugoda.{0,160}bank|bank.{0,160}ugod", negative_focus):
         return "bank_settlement", "bank_settlement"
-    if re.search(r"przewalutowan|walut", lowered):
+    if re.search(r"przewalutowan|kredyt\w* walut", negative_focus):
         return "currency_conversion", "currency_conversion"
-    if re.search(r"darowizn|otrzymał.*nieodpłat", lowered):
+    if re.search(r"darowizn|otrzymał.{0,160}nieodpłat", negative_focus):
         return "gifted_property", "gift"
     if re.search(r"spłat|spłaci", lowered) and "kredyt" in lowered:
         return "credit_repayment", "repayment_from_sale_proceeds"
@@ -447,65 +699,191 @@ def _is_wrong_neighbor(
     } or event_type in {"remission", "debt_release", "bank_settlement", "currency_conversion", "gift"}
 
 
-def _extract_complete_holding(chunk: RagChunk) -> tuple[str | None, dict[str, int] | None, str | None]:
+def _extract_complete_holding(
+    chunk: RagChunk,
+    issue: ControlledAuthorityIssue,
+) -> tuple[str | None, dict[str, int] | None, str | None]:
     text = chunk.chunk_text
     source_type = str(chunk.source_type or "").lower()
     sections: list[tuple[str, int, int]] = []
     if source_type == "interpretation":
-        sections.extend(_sections_after_headers(text, ("Ocena stanowiska", "Ocena Państwa stanowiska"), "assessment"))
-        sections.extend(_sections_after_headers(text, ("Stanowisko.*?jest (?:prawidłowe|nieprawidłowe)",), "assessment"))
+        interpretation_stops = (
+            "Dodatkowe informacje",
+            "Informacja o zakresie rozstrzygnięcia",
+            "Funkcja ochronna",
+            "Pouczenie",
+            "Skarga do sądu",
+        )
+        sections.extend(
+            _sections_after_headers(
+                text,
+                ("Ocena stanowiska", "Ocena Państwa stanowiska"),
+                "assessment_reasoning",
+                stop_headers=interpretation_stops,
+            )
+        )
+        sections.extend(
+            _sections_after_headers(
+                text,
+                (r"Stanowisko[^.\n]{0,300}?jest (?:prawidłowe|nieprawidłowe)",),
+                "assessment_reasoning",
+                stop_headers=interpretation_stops,
+            )
+        )
     elif source_type == "judgment":
-        sections.extend(_sections_after_headers(text, ("Sentencja", "Z tych względów"), "operative"))
-        sections.extend(_sections_after_headers(text, ("(?:NSA|Naczelny Sąd Administracyjny|WSA|Sąd).*?(?:oddala|uchyla|uwzględnia|orzeka)",), "operative"))
-    for section_name, start, end in sections:
+        sections.extend(
+            _sections_after_headers(
+                text,
+                ("Naczelny Sąd Administracyjny zważył", "Sąd zważył", "Uzasadnienie"),
+                "judicial_reasoning",
+                stop_headers=("Pouczenie",),
+            )
+        )
+        sections.extend(
+            _sections_after_headers(
+                text,
+                ("Sentencja", "Z tych względów"),
+                "operative",
+                stop_headers=("Uzasadnienie",),
+            )
+        )
+
+    candidates: list[tuple[tuple[float, ...], str, dict[str, int], str]] = []
+    seen_spans: set[tuple[int, int]] = set()
+    search_sections = [*sections, (
+        "assessment_reasoning" if source_type == "interpretation" else "judicial_reasoning",
+        0,
+        len(text),
+    )]
+    for section_name, start, end in search_sections:
         segment = text[start:end]
         for sentence, offset_start, offset_end in _complete_sentences(segment):
-            if _holding_sentence_is_relevant(sentence):
-                return sentence, {"start": start + offset_start, "end": start + offset_end}, section_name
-    # Historical authorities and older interpretations often lack the newer
-    # editorial heading.  A complete, mechanism-relevant sentence is still
-    # usable secondary authority, but is labelled rather than treated as
-    # current-law proof.
-    for sentence, start, end in _complete_sentences(text):
-        if _holding_sentence_is_relevant(sentence):
-            return sentence, {"start": start, "end": end}, "historical_or_unheaded"
-    return None, None, None
+            absolute_span = (start + offset_start, start + offset_end)
+            if absolute_span in seen_spans:
+                continue
+            seen_spans.add(absolute_span)
+            rank = _holding_candidate_rank(
+                sentence,
+                issue=issue,
+                section_name=section_name,
+                position=absolute_span[0],
+                source_type=source_type,
+            )
+            if rank is None:
+                continue
+            candidates.append(
+                (rank, sentence, {"start": absolute_span[0], "end": absolute_span[1]}, section_name)
+            )
+    if not candidates:
+        return None, None, None
+    _, sentence, span, section_name = max(candidates, key=lambda item: item[0])
+    return sentence, span, section_name
 
 
-def _sections_after_headers(text: str, headers: Iterable[str], section: str) -> list[tuple[str, int, int]]:
+def _sections_after_headers(
+    text: str,
+    headers: Iterable[str],
+    section: str,
+    *,
+    stop_headers: Iterable[str] = (),
+) -> list[tuple[str, int, int]]:
     found: list[tuple[str, int, int]] = []
     for header in headers:
         for match in re.finditer(header, text, re.IGNORECASE | re.DOTALL):
             start = match.start()
-            next_header = re.search(
-                r"(?:Uzasadnienie(?:\s+interpretacji)?|Pouczenie|Funkcj[aię]|Stan faktyczny|Opis zdarzenia|Skarga)",
-                text[match.end() :],
-                re.IGNORECASE,
+            stop_pattern = "|".join(f"(?:{value})" for value in stop_headers)
+            next_header = (
+                re.search(stop_pattern, text[match.end() :], re.IGNORECASE)
+                if stop_pattern
+                else None
             )
-            end = match.end() + next_header.start() if next_header else min(len(text), match.end() + 1600)
+            end = match.end() + next_header.start() if next_header else len(text)
             found.append((section, start, end))
     return found
 
 
 def _complete_sentences(text: str) -> Iterable[tuple[str, int, int]]:
-    for match in re.finditer(r"[^.!?]{20,}[.!?](?=\s|$)", text, re.DOTALL):
-        value = re.sub(r"\s+", " ", match.group(0)).strip()
-        if value and len(value) <= 600 and value[-1] in ".!?":
-            yield value, match.start(), match.end()
+    # Protect common legal abbreviations before locating sentence boundaries;
+    # otherwise a conclusion ending with "art. 21 ..." is truncated at "art.".
+    protected = list(text)
+    abbreviation_re = re.compile(
+        r"\b(?:art|ust|pkt|lit|poz|dz|nr|sygn|ww|tj|t\.\s*j|r|"
+        r"p\.\s*p\.\s*s\.\s*a|u\.\s*p\.\s*d\.\s*o\.\s*f|o\.\s*p)\.",
+        re.IGNORECASE,
+    )
+    for abbreviation in abbreviation_re.finditer(text):
+        for index in range(abbreviation.start(), abbreviation.end()):
+            if protected[index] == ".":
+                protected[index] = "․"
+    protected_text = "".join(protected)
+    sentence_start = 0
+    for boundary in re.finditer(r"[.!?](?=\s|$)", protected_text):
+        raw_start = sentence_start
+        raw_end = boundary.end()
+        sentence_start = raw_end
+        while raw_start < raw_end and text[raw_start].isspace():
+            raw_start += 1
+        value = re.sub(r"\s+", " ", text[raw_start:raw_end]).strip()
+        if value and 20 <= len(value) <= 1400 and value[-1] in ".!?":
+            yield value, raw_start, raw_end
+
+
+def _holding_candidate_rank(
+    sentence: str,
+    *,
+    issue: ControlledAuthorityIssue,
+    section_name: str,
+    position: int,
+    source_type: str,
+) -> tuple[float, ...] | None:
+    if not _holding_sentence_is_relevant(sentence):
+        return None
+    lowered = sentence.lower()
+    if "?" in sentence or re.match(r"\s*(?:czy|wątpliwości|pytani[ea])\b", lowered):
+        return None
+    if re.search(r"\b(?:zdaniem|według)\s+(?:pani|pana|wnioskodawc|skarżąc)|\bwnioskodawc\w* uważa", lowered):
+        return None
+    issue_score = _holding_relevance_score(sentence, issue)
+    material_score = _material_fact_match_score(sentence, issue)
+    strong_conclusion = 1.0 if re.search(
+        r"uprawnia|nie uprawnia|stanowi|nie stanowi|nie jest (?:wydatkiem|kosztem)|"
+        r"jest wydatkiem|przysługuje|nie przysługuje|należało uznać|prawidłowy wniosek|"
+        r"nie można (?:podzielić|uznać)",
+        lowered,
+    ) else 0.0
+    section_score = 1.0 if section_name in {"assessment_reasoning", "judicial_reasoning"} else 0.5
+    source_specific = 1.0 if (
+        source_type == "interpretation" and re.search(r"uprawnia|stanowisko|zwoln", lowered)
+    ) or (
+        source_type == "judgment" and re.search(r"sąd|należy|nie jest|stanowi|prawidłow", lowered)
+    ) else 0.0
+    return (
+        issue_score,
+        material_score,
+        strong_conclusion,
+        section_score,
+        source_specific,
+        min(position / max(len(sentence), 1), 1_000_000.0),
+    )
 
 
 def _holding_sentence_is_relevant(sentence: str) -> bool:
     lowered = sentence.lower()
     return bool(
-        re.search(r"stanowisko|uznano|stwierdza|należy|przysługuje|nie przysługuje|oddala|uchyla|zwoln", lowered)
+        re.search(
+            r"stanowisko|uznano|stwierdza|należy|przysługuje|nie przysługuje|"
+            r"uprawnia|nie uprawnia|stanowi|nie stanowi|nie jest|prawidłow|"
+            r"oddala|uchyla|zwoln",
+            lowered,
+        )
     )
 
 
 def _outcome_from_holding(holding: str) -> str:
     lowered = holding.lower()
-    if re.search(r"nieprawidłowe|nie przysługuje|oddala", lowered):
+    if re.search(r"nieprawidłowe|nie przysługuje|nie uprawnia|nie stanowi|nie jest wydatkiem|oddala", lowered):
         return "niekorzystny"
-    if re.search(r"prawidłowe|przysługuje|uchyla|zwoln", lowered):
+    if re.search(r"prawidłowe|przysługuje|uprawnia|stanowi|jest wydatkiem|uchyla|zwoln", lowered):
         return "korzystny_lub_potwierdzający"
     return "nierozstrzygnięty"
 
@@ -605,6 +983,7 @@ def audit_judgment_corpus(
     )
     return {
         "executed": True,
+        "status": "completed_with_errors" if any(":judgment:" in error for error in errors) else "completed",
         "candidate_count": candidate_count,
         "selected_count": selected_count,
         "filtered_count": filtered_count,

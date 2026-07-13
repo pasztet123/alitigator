@@ -36,6 +36,7 @@ class RendererPayload:
     provisions: tuple[dict[str, str], ...]
     calculations: tuple[dict[str, object], ...] = ()
     authority_cards: tuple[dict[str, object], ...] = ()
+    interpretation_lane_outcome: dict[str, object] = field(default_factory=dict)
     judgment_lane_outcome: dict[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
@@ -48,6 +49,8 @@ class RendererPayload:
         }
         if self.authority_cards:
             payload["authority_cards"] = [dict(item) for item in self.authority_cards]
+        if self.interpretation_lane_outcome:
+            payload["interpretation_lane_outcome"] = dict(self.interpretation_lane_outcome)
         if self.judgment_lane_outcome:
             payload["judgment_lane_outcome"] = dict(self.judgment_lane_outcome)
         return payload
@@ -209,6 +212,7 @@ def build_renderer_payload(
     target_date: str,
     calculations: Optional[dict[str, CalculationRecord]] = None,
     authority_cards: Iterable[dict[str, object]] = (),
+    interpretation_lane_outcome: Optional[dict[str, object]] = None,
     judgment_lane_outcome: Optional[dict[str, object]] = None,
 ) -> RendererPayload:
     approved: list[LegalClaim] = []
@@ -288,6 +292,7 @@ def build_renderer_payload(
             for item in (calculations or {}).values()
         ),
         authority_cards=tuple(dict(item) for item in authority_cards),
+        interpretation_lane_outcome=dict(interpretation_lane_outcome or {}),
         judgment_lane_outcome=dict(judgment_lane_outcome or {}),
     )
 
@@ -427,7 +432,11 @@ def _authority_summary(item: dict[str, object]) -> str:
         items = str(value or "").split()
         return " ".join(items[:limit]) + ("…" if len(items) > limit else "")
 
-    source_type = str(item.get("source_type") or "authority")
+    raw_source_type = str(item.get("source_type") or "authority")
+    source_type = {
+        "interpretation": "interpretacja",
+        "judgment": "orzeczenie",
+    }.get(raw_source_type, raw_source_type)
     label = str(item.get("label") or "brak oznaczenia")
     date = str(item.get("date") or "")
     issue = str(item.get("issue_label") or item.get("issue_id") or "brak")
@@ -435,11 +444,17 @@ def _authority_summary(item: dict[str, object]) -> str:
     outcome = str(item.get("outcome") or "brak jednoznacznego wyniku")
     similarity = words(item.get("similarity_reason"), 14)
     distinction = words(item.get("distinguishing_facts"), 10)
+    authority_status = str(item.get("authority_status") or "current_authority")
+    status_note = (
+        " Status: źródło historyczne — nie jest przedstawiane jako wykładnia obecnego przepisu."
+        if authority_status == "historical_authority"
+        else ""
+    )
     summary = (
         f"- [{source_type}] {label}"
         + (f" ({date})" if date else "")
         + f"; zagadnienie: {issue}. Holding: {holding}. Wynik: {outcome}. "
-        + f"Podobieństwo: {similarity}. Różnica: {distinction}."
+        + f"Podobieństwo: {similarity}. Różnica: {distinction}.{status_note}"
     )
     source_url = str(item.get("source_url") or "")
     return summary + (f" Link: {source_url}" if source_url else "")
@@ -475,16 +490,20 @@ def render_answer(payload: RendererPayload, *, compact: bool = False) -> str:
             analysis_parts.extend(lines)
     sources = [f"- {item['display_reference']}." for item in payload.provisions]
     sources.extend(_authority_summary(item) for item in payload.authority_cards)
+    if payload.interpretation_lane_outcome:
+        selected_count = int(payload.interpretation_lane_outcome.get("selected_count") or 0)
+        status = str(payload.interpretation_lane_outcome.get("status") or "completed")
+        if selected_count == 0 and status in {"deadline_exceeded", "error", "completed_with_errors"}:
+            sources.append("- Interpretacje: wyszukiwanie nie zostało ukończone; brak wyniku nie oznacza braku relewantnych źródeł.")
+        elif selected_count == 0:
+            sources.append("- Interpretacje: nie znaleziono dostatecznie relewantnej interpretacji dla tego zagadnienia.")
     if payload.judgment_lane_outcome:
-        candidate_count = int(payload.judgment_lane_outcome.get("candidate_count") or 0)
         selected_count = int(payload.judgment_lane_outcome.get("selected_count") or 0)
+        status = str(payload.judgment_lane_outcome.get("status") or "completed")
         empty_reason = str(payload.judgment_lane_outcome.get("empty_result_reason") or "")
-        reason_text = {
-            "no_candidates_from_corpus": "brak kandydatów w korpusie",
-            "candidates_not_selected": "żaden kandydat nie spełnił kryteriów wyboru",
-            "retrieval_error": "wyszukiwanie nie zakończyło się poprawnie",
-        }.get(empty_reason, empty_reason)
-        if selected_count == 0:
+        if selected_count == 0 and (status in {"deadline_exceeded", "error", "completed_with_errors"} or empty_reason == "retrieval_error"):
+            sources.append("- Orzeczenia: wyszukiwanie nie zostało ukończone; brak wyniku nie oznacza braku relewantnych źródeł.")
+        elif selected_count == 0:
             sources.append("- Orzeczenia: nie znaleziono dostatecznie relewantnego orzeczenia dla tego zagadnienia.")
     risks = [f"- {claim.text}" for claim in payload.conditional_claims] or [
         "- Brak warunkowych twierdzeń wymagających dodatkowego faktu."
@@ -750,6 +769,7 @@ def run_legal_pipeline(
     *,
     target_date: str = "2026-06-30",
     authority_cards: Iterable[dict[str, object]] = (),
+    interpretation_lane_outcome: Optional[dict[str, object]] = None,
     judgment_lane_outcome: Optional[dict[str, object]] = None,
 ) -> LegalPipelineResult:
     if not is_mixed_invoice_query(query):
@@ -772,6 +792,7 @@ def run_legal_pipeline(
         target_date=target_date,
         calculations=calculations,
         authority_cards=bind_authority_cards_to_claims(authority_cards, claims),
+        interpretation_lane_outcome=interpretation_lane_outcome,
         judgment_lane_outcome=judgment_lane_outcome,
     )
     answer = render_answer(payload)

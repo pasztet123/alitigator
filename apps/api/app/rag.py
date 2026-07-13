@@ -1855,7 +1855,7 @@ _cross_encoder_load_failed = False
 _cross_encoder_lock = threading.Lock()
 _index_refresh_lock = threading.Lock()
 
-INDEX_BUILD_VERSION = "provision_units_v2"
+INDEX_BUILD_VERSION = "provision_units_v3"
 
 
 @dataclass(frozen=True)
@@ -1907,8 +1907,23 @@ def extract_normalized_provision_references(
     text: str,
     declared: Iterable[str] = (),
 ) -> list[str]:
-    values = [str(value) for value in declared]
-    values.extend(match.group(0) for match in EXACT_PROVISION_REFERENCE_RE.finditer(text))
+    values = [match.group(0) for match in EXACT_PROVISION_REFERENCE_RE.finditer(text)]
+    for declared_value in declared:
+        raw_value = str(declared_value)
+        # Eureka metadata encodes hierarchy with hyphens, for example
+        # ``...-art. 21-ust. 1-pkt 131``.  Convert only structural separators,
+        # then persist the same canonical citation used for natural text.
+        expanded_value = re.sub(
+            r"-(?=(?:art|ust|pkt|lit)(?:\.|\s))",
+            " ",
+            raw_value,
+            flags=re.IGNORECASE,
+        )
+        declared_matches = [
+            match.group(0)
+            for match in EXACT_PROVISION_REFERENCE_RE.finditer(expanded_value)
+        ]
+        values.extend(declared_matches or [raw_value])
     seen: set[str] = set()
     result: list[str] = []
     for value in values:

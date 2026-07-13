@@ -911,6 +911,7 @@ def run_housing_relief_pipeline(
     *,
     target_date: str = "2026-06-30",
     authority_cards: Iterable[dict[str, object]] = (),
+    interpretation_lane_outcome: dict[str, object] | None = None,
     judgment_lane_outcome: dict[str, object] | None = None,
 ) -> LegalPipelineResult:
     if not can_run_housing_relief_pipeline(query):
@@ -942,6 +943,7 @@ def run_housing_relief_pipeline(
         target_date=target_date,
         calculations=calculations,
         authority_cards=bind_authority_cards_to_claims(authority_cards, claims),
+        interpretation_lane_outcome=interpretation_lane_outcome,
         judgment_lane_outcome=judgment_lane_outcome,
     )
     rendered = render_answer(payload)

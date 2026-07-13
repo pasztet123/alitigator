@@ -123,7 +123,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.6"
+API_VERSION = "2.0.7"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -3417,6 +3417,7 @@ async def chat(
             controlled_result = run_legal_pipeline(
                 effective_user_prompt,
                 authority_cards=authority_cards,
+                interpretation_lane_outcome=dict(authority_outcome.get("interpretation_lane") or {}),
                 judgment_lane_outcome=dict(authority_outcome["judgment_lane"]),
             )
         except Exception as exc:
@@ -3503,15 +3504,19 @@ async def chat(
                 "selected_counts": {"interpretation": 0, "judgment": 0},
                 "interpretation_lane": {
                     "executed": True,
+                    "status": "deadline_exceeded",
                     "candidates_before_filters": 0,
                     "candidates_after_filters": 0,
                     "selected_count": 0,
                     "candidate_waterfall": [],
                 },
                 "judgment_lane": {
+                    "executed": True,
+                    "status": "deadline_exceeded",
                     "candidate_count": 0,
                     "selected_count": 0,
                     "filtered_count": 0,
+                    "empty_result_reason": "retrieval_error",
                     "zero_candidates_root_cause": "request_deadline_exceeded",
                 },
             }
@@ -3519,6 +3524,7 @@ async def chat(
             controlled_result = run_housing_relief_pipeline(
                 effective_user_prompt,
                 authority_cards=authority_cards,
+                interpretation_lane_outcome=dict(authority_outcome["interpretation_lane"]),
                 judgment_lane_outcome=dict(authority_outcome["judgment_lane"]),
             )
         except Exception as exc:

@@ -217,8 +217,9 @@ class HousingReliefPipelineTests(unittest.TestCase):
         self.assertIn("Wynik:", result.answer)
         self.assertIn("Podobieństwo:", result.answer)
         self.assertIn("Różnica:", result.answer)
-        self.assertIn("Orzeczenia: wyszukiwanie wykonane; kandydaci: 0; wybrane: 0.", result.answer)
-        self.assertIn("Powód braku wyboru: brak kandydatów w korpusie.", result.answer)
+        self.assertIn("Orzeczenia: nie znaleziono dostatecznie relewantnego orzeczenia", result.answer)
+        self.assertNotIn("kandydaci:", result.answer)
+        self.assertNotIn("Powód braku wyboru:", result.answer)
         authority_card = result.renderer_payload["authority_cards"][0]
         self.assertEqual(authority_card["issue_id"], "pit_housing_relief")
         self.assertIn("claim_sale_tax_regime", authority_card["claim_ids"])
@@ -233,6 +234,39 @@ class HousingReliefPipelineTests(unittest.TestCase):
         for forbidden in ("[claim_id:", "[provision_id:", "fact_", "calculation_id:"):
             self.assertNotIn(forbidden, result.answer)
         self.assertLess(result.render_validation.thesis_analysis_duplicate_ratio, 0.35)
+
+    def test_authority_lane_statuses_distinguish_no_match_from_timeout(self) -> None:
+        completed = run_housing_relief_pipeline(
+            HOUSING_RELIEF_BENCHMARK_QUERY,
+            interpretation_lane_outcome={
+                "executed": True,
+                "status": "completed",
+                "selected_count": 0,
+            },
+            judgment_lane_outcome={
+                "executed": True,
+                "status": "completed",
+                "selected_count": 0,
+            },
+        )
+        self.assertIn("Interpretacje: nie znaleziono dostatecznie relewantnej interpretacji", completed.answer)
+        self.assertIn("Orzeczenia: nie znaleziono dostatecznie relewantnego orzeczenia", completed.answer)
+
+        timed_out = run_housing_relief_pipeline(
+            HOUSING_RELIEF_BENCHMARK_QUERY,
+            interpretation_lane_outcome={
+                "executed": True,
+                "status": "deadline_exceeded",
+                "selected_count": 0,
+            },
+            judgment_lane_outcome={
+                "executed": True,
+                "status": "deadline_exceeded",
+                "selected_count": 0,
+                "empty_result_reason": "retrieval_error",
+            },
+        )
+        self.assertEqual(timed_out.answer.count("brak wyniku nie oznacza braku relewantnych źródeł"), 2)
 
     def test_explicit_credit_facts_drive_main_scenario_while_documents_remain_conditional(self) -> None:
         result = run_housing_relief_pipeline(HOUSING_RELIEF_BENCHMARK_QUERY)

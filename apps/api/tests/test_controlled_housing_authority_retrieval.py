@@ -8,7 +8,13 @@ from app.housing_relief_pipeline import HOUSING_RELIEF_BENCHMARK_QUERY, run_hous
 from app.rag import RagChunk, RagDocumentContext
 
 
-def _chunk(*, text: str, provision: str, signature: str) -> RagChunk:
+def _chunk(
+    *,
+    text: str,
+    provision: str,
+    signature: str,
+    source_type: str = "interpretation",
+) -> RagChunk:
     return RagChunk(
         chunk_id=f"interpretation:{signature}",
         document_id=signature,
@@ -20,7 +26,7 @@ def _chunk(*, text: str, provision: str, signature: str) -> RagChunk:
         published_date="2026-01-15",
         source_url="https://example.test/authority",
         category=None,
-        source_type="interpretation",
+        source_type=source_type,
         legal_provisions=[provision],
     )
 
@@ -48,6 +54,36 @@ TRUNCATED_HOLDING = _chunk(
     signature="0115-KDIT3.4011.3.2026.1.AK",
     provision="art. 21 ust. 30a ustawy PIT",
     text="Ocena stanowiska. Stanowisko jest prawidłowe w sprawie spłaty kredytu",
+)
+
+REALISTIC_CREDIT_INTERPRETATION = _chunk(
+    signature="0113-KDIPT2-2.4011.60.2026.2.KR",
+    provision="[PIT] Ustawa o PIT-art. 21-ust. 30a",
+    text=(
+        "Ocena stanowiska\n"
+        "Stanowisko, które przedstawiła Pani we wniosku jest prawidłowe. "
+        "Uzasadnienie interpretacji indywidualnej. "
+        "Czy spłata kredytu z pieniędzy ze sprzedaży lokalu daje zwolnienie? "
+        "Zdaniem Pani spłata kredytu stanowi własny cel mieszkaniowy. "
+        "Biorąc pod uwagę powyższe stwierdzić należy, że przeznaczenie środków "
+        "ze sprzedaży lokalu na spłatę kredytu hipotecznego zaciągniętego na "
+        "nabycie tego lokalu uprawnia Panią do zastosowania zwolnienia z art. "
+        "21 ust. 1 pkt 131 w związku z art. 21 ust. 30a ustawy PIT. "
+        "Dodatkowe informacje. Pouczenie nie stanowi części oceny."
+    ),
+)
+
+HISTORICAL_CREDIT_JUDGMENT = _chunk(
+    signature="II FSK 1105/25 - Wyrok NSA z 2026-02-05",
+    provision="art. 21 ust. 1 pkt 131 ustawy PIT",
+    source_type="judgment",
+    text=(
+        "Sentencja. Naczelny Sąd Administracyjny oddala skargę kasacyjną. "
+        "Uzasadnienie. Sprawa dotyczy podatku dochodowego za rok 2018. "
+        "Naczelny Sąd Administracyjny zważył, co następuje. "
+        "Po drugie, spłata kredytu zaciągniętego na nabycie następnie sprzedanej "
+        "nieruchomości nie jest wydatkiem na zaspokojenie potrzeb mieszkaniowych sprzedawcy."
+    ),
 )
 
 
@@ -83,7 +119,7 @@ class ControlledHousingAuthorityRetrievalTests(unittest.TestCase):
         self.assertEqual(card["issue_id"], "credit_on_sold_property")
         self.assertEqual(card["transaction_type"], "credit_repayment")
         self.assertEqual(card["event_type"], "repayment_from_sale_proceeds")
-        self.assertEqual(card["holding_section"], "assessment")
+        self.assertEqual(card["holding_section"], "assessment_reasoning")
         self.assertTrue(card["holding_complete_sentence"])
         self.assertEqual(card["provision_match_score"], 1.0)
         self.assertGreater(card["authority_score"], 0.7)
@@ -155,6 +191,125 @@ class ControlledHousingAuthorityRetrievalTests(unittest.TestCase):
         self.assertEqual(len(cards), 1)
         self.assertEqual(cards[0]["holding_source_span"]["scope"], "document_context")
         self.assertEqual(cards[0]["holding_source_span"]["document_id"], seed.document_id)
+
+    def test_realistic_interpretation_selects_substantive_conclusion_after_boilerplate(self) -> None:
+        cards, outcome = retrieve_housing_authorities(
+            "Spłata kredytu dotyczącego sprzedanego lokalu.",
+            search=lambda query, *, limit, source_types: [REALISTIC_CREDIT_INTERPRETATION]
+            if source_types == {"interpretation"} and "art. 21 ust. 30a" in query
+            else [],
+            context_fetcher=lambda document_ids, *, seed_chunks: [],
+        )
+
+        self.assertEqual(len(cards), 1)
+        self.assertIn("uprawnia Panią", cards[0]["holding"])
+        self.assertIn("spłatę kredytu", cards[0]["holding"])
+        self.assertNotIn("Czy spłata", cards[0]["holding"])
+        self.assertEqual(cards[0]["authority_status"], "current_authority")
+        self.assertEqual(outcome["interpretation_lane"]["selected_count"], 1)
+
+    def test_incidental_gift_does_not_reclassify_credit_authority(self) -> None:
+        mixed_context = _chunk(
+            signature="0115-KDIT2.4011.547.2025.2.DT",
+            provision="art. 21 ust. 30a ustawy PIT",
+            text=(
+                "Ocena stanowiska. Działka pod nowy dom pochodziła z darowizny. "
+                "Uzasadnienie interpretacji. Środki ze sprzedaży mieszkania przeznaczone "
+                "na spłatę kredytu zaciągniętego na nabycie tego mieszkania uprawniają "
+                "do zwolnienia na podstawie art. 21 ust. 30a ustawy PIT."
+            ),
+        )
+        cards, _ = retrieve_housing_authorities(
+            "Spłata kredytu dotyczącego sprzedanego lokalu.",
+            search=lambda query, *, limit, source_types: [mixed_context]
+            if source_types == {"interpretation"} and "art. 21 ust. 30a" in query
+            else [],
+            context_fetcher=lambda document_ids, *, seed_chunks: [],
+        )
+
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["transaction_type"], "credit_repayment")
+
+    def test_relevant_pre_30a_judgment_is_labeled_historical(self) -> None:
+        calls: list[tuple[str, set[str]]] = []
+
+        def search(query: str, *, limit: int, source_types: set[str]):
+            calls.append((query, source_types))
+            if source_types == {"judgment"} and "art. 21 ust. 1 pkt 131" in query:
+                return [HISTORICAL_CREDIT_JUDGMENT]
+            return []
+
+        cards, outcome = retrieve_housing_authorities(
+            "Spłata kredytu dotyczącego sprzedanej nieruchomości.",
+            search=search,
+            context_fetcher=lambda document_ids, *, seed_chunks: [],
+        )
+
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["authority_status"], "historical_authority")
+        self.assertEqual(cards[0]["temporal_status"], "historical")
+        self.assertFalse(cards[0]["current_law_support"])
+        self.assertEqual(cards[0]["historical_basis"], "material_tax_period:2018")
+        self.assertIn("nie jest wydatkiem", cards[0]["holding"])
+        self.assertTrue(any(types == {"judgment"} and "art. 21 ust. 25 pkt 2" in query for query, types in calls))
+        self.assertEqual(outcome["judgment_lane"]["selected_count"], 1)
+
+    def test_missing_provision_metadata_is_unknown_not_zero_mismatch(self) -> None:
+        unknown_metadata = _chunk(
+            signature="II FSK 1105/25 bez metadanych",
+            provision="",
+            source_type="judgment",
+            text=HISTORICAL_CREDIT_JUDGMENT.chunk_text,
+        )
+        cards, outcome = retrieve_housing_authorities(
+            "Spłata kredytu dotyczącego sprzedanej nieruchomości.",
+            search=lambda query, *, limit, source_types: [unknown_metadata]
+            if source_types == {"judgment"} and "art. 21 ust. 1 pkt 131" in query
+            else [],
+            context_fetcher=lambda document_ids, *, seed_chunks: [],
+        )
+
+        trace = next(
+            item
+            for item in outcome["judgment_filter_waterfall"]
+            if item["document_id"] == unknown_metadata.document_id
+            and item["issue_id"] == "credit_on_sold_property"
+        )
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(trace["provision_match_status"], "unknown")
+        self.assertIsNone(trace["scores"]["provision"])
+        self.assertNotEqual(trace["first_rejection_reason"], "provision_mismatch")
+        self.assertIsNone(cards[0]["provision_match_score"])
+
+    def test_current_judgment_without_30a_is_not_assumed_historical(self) -> None:
+        no_historical_evidence = _chunk(
+            signature="II FSK 999/26",
+            provision="art. 21 ust. 1 pkt 131 ustawy PIT",
+            source_type="judgment",
+            text=(
+                "Sentencja. Naczelny Sąd Administracyjny oddala skargę kasacyjną. "
+                "Uzasadnienie. Naczelny Sąd Administracyjny zważył, co następuje. "
+                "Spłata kredytu zaciągniętego na nabycie następnie sprzedanej nieruchomości "
+                "nie jest wydatkiem na zaspokojenie potrzeb mieszkaniowych sprzedawcy."
+            ),
+        )
+        cards, outcome = retrieve_housing_authorities(
+            "Spłata kredytu dotyczącego sprzedanej nieruchomości.",
+            search=lambda query, *, limit, source_types: [no_historical_evidence]
+            if source_types == {"judgment"} and "art. 21 ust. 1 pkt 131" in query
+            else [],
+            context_fetcher=lambda document_ids, *, seed_chunks: [],
+        )
+
+        trace = next(
+            item
+            for item in outcome["judgment_filter_waterfall"]
+            if item["document_id"] == no_historical_evidence.document_id
+            and item["issue_id"] == "credit_on_sold_property"
+        )
+        self.assertEqual(cards, [])
+        self.assertEqual(trace["first_rejection_reason"], "provision_mismatch")
+        self.assertIsNone(trace["historical_basis"])
 
     def test_judgment_audit_records_corpus_index_and_filter_counts(self) -> None:
         cards, outcome = retrieve_housing_authorities(

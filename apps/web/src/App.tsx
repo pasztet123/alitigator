@@ -202,7 +202,7 @@ const HINT_DEBOUNCE_MS = 900
 const MIN_DRAFT_LENGTH_FOR_HINTS = 24
 const ACTIVE_HINT_COUNT = 3
 const MAX_HINT_QUESTION_COUNT = 5
-const APP_VERSION = '2.0.3'
+const APP_VERSION = '2.0.4'
 const ASSISTANT_SECTION_TITLES = [
   'Teza',
   'Analiza',
@@ -298,13 +298,6 @@ function normalizePromptHintsResponse(payload: PromptHintsResponse | { hints?: u
     model: String(payload.model ?? 'fallback'),
     mode: payload.mode === 'live' ? 'live' : 'fallback',
   }
-}
-
-function buildExcludedHintQuestions(promptHints: PromptHint[], answeredHints: IntentHintAnswer[]) {
-  return [
-    ...promptHints.map((hint) => hint.question),
-    ...answeredHints.map((hint) => hint.question),
-  ]
 }
 
 function escapeRegExp(value: string) {
@@ -691,6 +684,7 @@ function App() {
     isSending: false,
     selectedChatId: null as string | null,
   })
+  const activeHintRequestControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     activeWorkspaceRef.current = {
@@ -718,11 +712,13 @@ async function fetchPromptHints({
     answeredHints,
     excludedQuestions,
     maxHints,
+    signal,
   }: {
     draftText: string
     answeredHints: IntentHintAnswer[]
   excludedQuestions: string[]
   maxHints: number
+  signal?: AbortSignal
 }) {
   const normalizedDraft = draftText.trim()
   if (!normalizedDraft || maxHints < 1) {
@@ -732,6 +728,7 @@ async function fetchPromptHints({
   const response = await appFetch('/api/chat/hints', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal,
     body: JSON.stringify({
         draft: normalizedDraft,
         intent_hints: answeredHints,
@@ -1035,6 +1032,9 @@ async function fetchPromptHints({
   }, [chatStorageAvailable, localThreadMessages, selectedChatId, session])
 
   useEffect(() => {
+    activeHintRequestControllerRef.current?.abort()
+    activeHintRequestControllerRef.current = null
+
     const trimmedDraft = draft.trim()
     const answeredHints = buildIntentHintsPayload(intentHintAnswers)
 
@@ -1049,6 +1049,7 @@ async function fetchPromptHints({
     }
 
     const controller = new AbortController()
+    activeHintRequestControllerRef.current = controller
     const timeoutId = window.setTimeout(() => {
       setIsHintsLoading(true)
 
@@ -1057,6 +1058,7 @@ async function fetchPromptHints({
         answeredHints,
         excludedQuestions: answeredHints.map((hint) => hint.question),
         maxHints: Math.min(ACTIVE_HINT_COUNT, Math.max(MAX_HINT_QUESTION_COUNT - answeredHints.length, 0)) || 1,
+        signal: controller.signal,
       })
         .then((payload) => {
           if (controller.signal.aborted) {
@@ -1066,6 +1068,9 @@ async function fetchPromptHints({
           setHintMode(payload.mode)
         })
         .catch(() => {
+          if (controller.signal.aborted) {
+            return
+          }
           setPromptHints([])
           setHintMode('fallback')
         })
@@ -1078,6 +1083,9 @@ async function fetchPromptHints({
 
     return () => {
       controller.abort()
+      if (activeHintRequestControllerRef.current === controller) {
+        activeHintRequestControllerRef.current = null
+      }
       window.clearTimeout(timeoutId)
     }
   }, [draft, isSending, intentHintAnswers])
@@ -1302,6 +1310,8 @@ async function fetchPromptHints({
   }
 
   function handleStartNewChat() {
+    activeHintRequestControllerRef.current?.abort()
+    activeHintRequestControllerRef.current = null
     setSelectedChatId(null)
     setMessages([])
     setDraft('')
@@ -1340,37 +1350,10 @@ async function fetchPromptHints({
       return
     }
 
+    // Keep a single request path: updating the answer restarts the debounced
+    // effect above and cancels the prior browser request.
+    setPromptHints(nextPromptHints)
     setIsHintsLoading(true)
-    const excludedQuestions = buildExcludedHintQuestions(nextPromptHints, answeredHints)
-
-    void fetchPromptHints({
-      draftText: trimmedDraft,
-      answeredHints,
-      excludedQuestions,
-      maxHints: 1,
-    })
-      .then((payload) => {
-        setHintMode(payload.mode)
-        setPromptHints((currentHints) => {
-          const currentWithoutAnswered = currentHints.filter((currentHint) => currentHint.id !== hint.id)
-          const replacement = payload.hints[0]
-          if (!replacement) {
-            return currentWithoutAnswered
-          }
-
-          const nextHints = [...currentWithoutAnswered]
-          const boundedIndex = Math.min(index, nextHints.length)
-          nextHints.splice(boundedIndex, 0, replacement)
-          return nextHints
-        })
-      })
-      .catch(() => {
-        setPromptHints(nextPromptHints)
-        setHintMode('fallback')
-      })
-      .finally(() => {
-        setIsHintsLoading(false)
-      })
   }
 
   async function handleAdminGrantCredits(event: FormEvent<HTMLFormElement>) {
@@ -1481,6 +1464,9 @@ async function fetchPromptHints({
     if (!trimmedDraft || isSending) {
       return
     }
+
+    activeHintRequestControllerRef.current?.abort()
+    activeHintRequestControllerRef.current = null
 
     const nextMessages = [
       ...messages,

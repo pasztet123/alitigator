@@ -135,6 +135,10 @@ AVAILABLE_MODELS = list(
     )
 )
 HINTS_MODEL = os.getenv("LEGAL_HINTS_MODEL", DEFAULT_MODEL)
+HINTS_REQUEST_TIMEOUT_SECONDS = min(
+    25.0,
+    max(5.0, float(os.getenv("ALITIGATOR_HINTS_REQUEST_TIMEOUT_SECONDS", "15"))),
+)
 CHAT_MAX_TOKENS = max(1024, MODEL_GATEWAY_CONFIG.max_output_tokens)
 MODEL_CHAT_TIMEOUT_SECONDS = min(
     180.0,
@@ -1042,13 +1046,16 @@ async def request_prompt_hints(
 
     try:
         gateway = create_model_gateway(MODEL_GATEWAY_CONFIG)
-        model_output = await gateway.generate_structured(
-            response_model=ModelPromptHints,
-            input=user_prompt,
-            system_prompt=system_prompt,
-            model=HINTS_MODEL,
-            reasoning_effort="low",
-            max_output_tokens=600,
+        model_output = await asyncio.wait_for(
+            gateway.generate_structured(
+                response_model=ModelPromptHints,
+                input=user_prompt,
+                system_prompt=system_prompt,
+                model=HINTS_MODEL,
+                reasoning_effort="low",
+                max_output_tokens=600,
+            ),
+            timeout=HINTS_REQUEST_TIMEOUT_SECONDS,
         )
         hints = [
             build_hint(item.question, [option.label for option in item.options])
@@ -1067,7 +1074,7 @@ async def request_prompt_hints(
         if not hints:
             raise RuntimeError("Hint model returned no parseable hints")
         return PromptHintsResponse(hints=hints, model=HINTS_MODEL, mode="live")
-    except (ModelGatewayError, ValueError):
+    except (asyncio.TimeoutError, ModelGatewayError, ValueError):
         return PromptHintsResponse(
             hints=fallback_prompt_hints(
                 draft,

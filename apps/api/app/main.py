@@ -123,7 +123,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.3"
+API_VERSION = "2.0.5"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -303,7 +303,7 @@ def schedule_legal_rag_v2_shadow(question: str) -> None:
     task.add_done_callback(_shadow_tasks.discard)
 CHAT_REQUEST_DEADLINE_SECONDS = min(
     180.0,
-    max(30.0, float(os.getenv("ALITIGATOR_CHAT_REQUEST_DEADLINE_SECONDS", "50"))),
+    max(30.0, float(os.getenv("ALITIGATOR_CHAT_REQUEST_DEADLINE_SECONDS", "120"))),
 )
 
 SYSTEM_PROMPT = """

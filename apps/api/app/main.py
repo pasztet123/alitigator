@@ -116,12 +116,14 @@ from app.supabase_rag import (
     reindex_corpus_to_supabase,
     search_chunks_supabase,
 )
+from app.rag_diagnostics import collect_corpus_health
+from app.rag_runtime import resolve_rag_runtime
 from app.supabase_client import get_supabase_service_client, is_supabase_configured
 
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.0"
+API_VERSION = "2.0.1"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -168,7 +170,7 @@ def legal_runtime_debug(*, controlled_pipeline_used: bool = False) -> dict[str, 
     return {
         "pipeline_mode": mode,
         "retrieval_mode": "issue_scoped_bidirectional" if mode in {"model_rag_model", "legal_rag_v2"} else get_legal_retrieval_mode(),
-        "rag_backend": os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite"),
+        "rag_backend": resolve_rag_runtime().read_backend,
         "planner_mode": "model_first" if mode in {"model_rag_model", "legal_rag_v2"} else "legacy_rules",
         "authority_extractor_mode": "model_structured" if mode in {"model_rag_model", "legal_rag_v2"} else "heuristic_or_disabled",
         "answer_provider": MODEL_GATEWAY_CONFIG.provider,
@@ -633,6 +635,7 @@ class RagSearchRequest(BaseModel):
     query: str = Field(min_length=3, max_length=4000)
     limit: Optional[int] = Field(default=None, ge=1, le=30)
     source_types: Optional[list[Literal["interpretation", "statute", "judgment", "commentary"]]] = None
+    tax_domains: Optional[list[str]] = Field(default=None, max_length=20)
 
 
 class RagSearchHit(BaseModel):
@@ -2773,6 +2776,20 @@ def health() -> HealthResponse:
     )
 
 
+@app.get("/api/admin/rag/corpus-health")
+def admin_rag_corpus_health(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    """Read-only corpus health; no connection details or document text."""
+    if not is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Tylko admin moze odczytac stan korpusu RAG.")
+    report = collect_corpus_health(get_rag_config())
+    if os.getenv("RAG_REQUIRE_COMPLETE_CORPUS", "false").strip().lower() in {"1", "true", "yes"}:
+        if report["status"] != "healthy":
+            raise HTTPException(status_code=503, detail="Aktywny korpus RAG jest niekompletny.")
+    return report
+
+
 @app.get("/api/models", response_model=ModelsResponse)
 def list_models() -> ModelsResponse:
     return ModelsResponse(
@@ -3608,7 +3625,7 @@ async def chat(
                 *retrieved_chunks,
                 *[chunk for chunk in fallback_chunks if chunk.chunk_id not in seen],
             ]
-    if not retrieved_chunks and os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() == "sqlite":
+    if not retrieved_chunks and resolve_rag_runtime().fallback_backend == "supabase":
         retrieved_chunks = search_chunks_supabase(effective_user_prompt)
     source_plan = build_legal_source_plan(
         effective_user_prompt,
@@ -4002,8 +4019,9 @@ async def chat(
 @app.post("/api/rag/search", response_model=RagSearchResponse)
 def rag_search(request: RagSearchRequest) -> RagSearchResponse:
     source_types = set(request.source_types or []) or None
-    inspection = inspect_search(request.query, limit=request.limit, source_types=source_types)
-    chunks = search_chunks(request.query, limit=request.limit, source_types=source_types)
+    tax_domains = set(request.tax_domains or []) or None
+    inspection = inspect_search(request.query, limit=request.limit, source_types=source_types, tax_domains=tax_domains)
+    chunks = search_chunks(request.query, limit=request.limit, source_types=source_types, tax_domains=tax_domains)
     if source_types is None or "statute" in source_types:
         chunks = add_primary_source_fallback_chunks(request.query, chunks)
     axis_coverage = [
@@ -4057,7 +4075,34 @@ def rag_search(request: RagSearchRequest) -> RagSearchResponse:
             allowed_provision_references=allowed_provision_references,
             axis_coverage=axis_coverage,
         ),
-        hits=[RagSearchHit(**hit) for hit in inspection.hits],
+        hits=[
+            RagSearchHit(
+                rank=rank,
+                chunk_id=chunk.chunk_id,
+                document_id=chunk.document_id,
+                chunk_index=chunk.chunk_index,
+                score=chunk.score,
+                subject=chunk.subject,
+                signature=chunk.signature,
+                published_date=chunk.published_date,
+                source_url=chunk.source_url,
+                canonical_source_id=None,
+                evidence_role=chunk.evidence_role or None,
+                category=chunk.category,
+                source=chunk.source,
+                source_type=chunk.source_type,
+                source_subtype=chunk.source_subtype,
+                authority=chunk.authority,
+                publication=chunk.publication,
+                legal_state_date=chunk.legal_state_date,
+                source_pages=chunk.source_pages,
+                legal_provisions=chunk.legal_provisions,
+                chunk_chars=len(chunk.chunk_text),
+                preview=chunk.chunk_text[:280].strip(),
+                selected_for_context=True,
+            )
+            for rank, chunk in enumerate(chunks, start=1)
+        ],
     )
 
 

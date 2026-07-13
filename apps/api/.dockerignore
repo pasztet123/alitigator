@@ -8,5 +8,6 @@ __pycache__
 *.pyo
 *.pyd
 data/raw
+data/
 data/**/*.log
 data/**/*.md

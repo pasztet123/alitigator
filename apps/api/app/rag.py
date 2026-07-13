@@ -14,6 +14,8 @@ from typing import Any, Iterable, Optional
 
 import httpx
 
+from app.rag_runtime import iter_configured_corpus_sources, resolve_rag_runtime
+
 
 APP_DIR = Path(__file__).resolve().parent
 API_DIR = APP_DIR.parent
@@ -4067,6 +4069,14 @@ def build_document_payload(record: dict[str, Any], config: RagConfig) -> tuple[d
     document_payload = {
         "source": record.get("source") or "eureka",
         "source_type": record.get("source_type") or "interpretation",
+        "source_subtype": derive_source_subtype(record),
+        "authority": record.get("authority") or "",
+        "jurisdiction": record.get("jurisdiction") or "PL",
+        "act_title": record.get("act_title") or "",
+        "publication": record.get("publication") or "",
+        "legal_state_date": record.get("legal_state_date") or "",
+        "source_pages": [int(page) for page in record.get("source_pages") or [] if str(page).isdigit()],
+        "tax_domain": build_structured_profile(record)["tax_domain"],
         "document_id": document_id,
         "index_name": record.get("index") or document_id,
         "version_id": record.get("version_id"),
@@ -4717,10 +4727,15 @@ def index_record(connection: sqlite3.Connection, record: dict[str, Any], config:
 
 
 def reindex_corpus(*, limit: Optional[int] = None, force: bool = False) -> dict[str, Any]:
-    if os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}:
+    runtime = resolve_rag_runtime()
+    if runtime.write_backend == "mysql":
         from app.mysql_rag import reindex_corpus_mysql
 
         return reindex_corpus_mysql(limit=limit, force=force)
+    if runtime.write_backend == "supabase":
+        from app.supabase_rag import reindex_corpus_to_supabase
+
+        return reindex_corpus_to_supabase(limit=limit, force=force)
     config = get_rag_config()
     if not config.processed_path.exists():
         raise FileNotFoundError(f"Processed corpus not found: {config.processed_path}")
@@ -4736,7 +4751,7 @@ def reindex_corpus(*, limit: Optional[int] = None, force: bool = False) -> dict[
 
     connection = get_connection(config.db_path)
     try:
-        source_paths = (config.processed_path, *config.additional_source_paths)
+        source_paths = [source.path for source in iter_configured_corpus_sources(config)]
         for source_path in source_paths:
             for record in iter_processed_records(source_path):
                 if limit is not None and processed >= limit:
@@ -5204,8 +5219,7 @@ def build_legal_source_plan(
     include_interpretations: bool = True,
     include_judgments: Optional[bool] = None,
 ) -> LegalSourcePlan:
-    judgment_requested_by_query = bool(JUDGMENT_INTENT_RE.search(query) or extract_judgment_signatures(query))
-    effective_include_judgments = judgment_requested_by_query if include_judgments is None else include_judgments
+    effective_include_judgments = True if include_judgments is None else include_judgments
     secondary_source_types: list[str] = []
     if include_interpretations:
         secondary_source_types.append("interpretation")
@@ -8003,7 +8017,7 @@ def retrieve_deterministic_statute_chunks(
     limit: Optional[int] = None,
     config: Optional[RagConfig] = None,
 ) -> list[RagChunk]:
-    if os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}:
+    if resolve_rag_runtime().read_backend == "mysql":
         from app.mysql_rag import retrieve_deterministic_statute_chunks_mysql
 
         return retrieve_deterministic_statute_chunks_mysql(query, plan=plan, limit=limit)
@@ -8688,7 +8702,8 @@ def search_chunks(
         direct_statutes = add_primary_source_fallback_chunks(query, [])
         if direct_statutes:
             return direct_statutes[: limit or get_rag_config().retrieval_limit]
-    if os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}:
+    runtime = resolve_rag_runtime()
+    if runtime.read_backend == "mysql":
         from app.mysql_rag import search_chunks_mysql
 
         return search_chunks_mysql(
@@ -8698,6 +8713,9 @@ def search_chunks(
             enforce_query_domain=enforce_query_domain,
             tax_domains=tax_domains,
         )
+    if runtime.read_backend == "supabase":
+        from app.supabase_rag import search_chunks_supabase
+        return search_chunks_supabase(query, limit=limit, source_types=source_types, tax_domains=tax_domains)
     axis_chunks, axes = _search_chunks_by_legal_axes(
         query,
         limit=limit,
@@ -8736,7 +8754,7 @@ def search_chat_chunks(
         direct_statutes = add_primary_source_fallback_chunks(query, [])
         if direct_statutes:
             return direct_statutes[: limit or get_rag_config().retrieval_limit]
-    if os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}:
+    if resolve_rag_runtime().read_backend == "mysql":
         from app.mysql_rag import search_chat_chunks_mysql
 
         return search_chat_chunks_mysql(
@@ -8745,6 +8763,14 @@ def search_chat_chunks(
             include_interpretations=include_interpretations,
             include_judgments=include_judgments,
         )
+    if resolve_rag_runtime().read_backend == "supabase":
+        from app.supabase_rag import search_chunks_supabase
+        source_types = {"statute"}
+        if include_interpretations:
+            source_types.add("interpretation")
+        if include_judgments is not False:
+            source_types.add("judgment")
+        return search_chunks_supabase(query, limit=limit, source_types=source_types)
     """Retrieve complementary authority types for an application answer.
 
     A factual interpretation and the applicable provision answer different
@@ -8756,7 +8782,7 @@ def search_chat_chunks(
     effective_limit = limit or config.retrieval_limit
     expanded_query = expand_search_query(query)
     judgment_requested_by_query = bool(JUDGMENT_INTENT_RE.search(query) or extract_judgment_signatures(query))
-    include_judgments = judgment_requested_by_query if include_judgments is None else include_judgments
+    include_judgments = True if include_judgments is None else include_judgments
     source_plan = build_legal_source_plan(
         query,
         include_interpretations=include_interpretations,
@@ -9216,7 +9242,7 @@ def inspect_search(
             chunks=chunks,
             raw_candidate_pool=[],
         )
-    if os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}:
+    if resolve_rag_runtime().read_backend == "mysql":
         from app.mysql_rag import inspect_search_mysql
 
         return inspect_search_mysql(
@@ -9440,7 +9466,7 @@ def build_document_context_from_rows(
 
 
 def fetch_document_contexts(document_ids: list[str], *, seed_chunks: list[RagChunk]) -> list[RagDocumentContext]:
-    if os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}:
+    if resolve_rag_runtime().read_backend == "mysql":
         from app.mysql_rag import fetch_document_contexts_mysql
 
         return fetch_document_contexts_mysql(document_ids, seed_chunks=seed_chunks)
@@ -9602,7 +9628,7 @@ def list_citations(chunks: list[RagChunk]) -> str:
 
 
 def index_exists() -> bool:
-    if os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}:
+    if resolve_rag_runtime().read_backend == "mysql":
         from app.mysql_rag import index_exists_mysql
 
         return index_exists_mysql()
@@ -9620,7 +9646,7 @@ def local_index_needs_refresh() -> bool:
     except OSError:
         return True
 
-    source_paths = (config.processed_path, *config.additional_source_paths)
+    source_paths = [source.path for source in iter_configured_corpus_sources(config)]
     for path in source_paths:
         try:
             if path.exists() and path.stat().st_mtime > db_mtime:

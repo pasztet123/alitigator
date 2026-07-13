@@ -1,0 +1,96 @@
+{
+  "runtime": {
+    "read_backend": "mysql",
+    "write_backend": "mysql",
+    "fallback_backend": null
+  },
+  "backend": {
+    "backend": "mysql",
+    "available": true,
+    "documents": 5896,
+    "chunks": 98776,
+    "by_type_subtype": {
+      "interpretation:individual": 2275,
+      "statute:codified_text": 418,
+      "statute:consolidated_text": 3203
+    },
+    "samples": [
+      {
+        "document_id": "673351",
+        "source_type": "interpretation",
+        "source_subtype": "individual",
+        "signature": "0115-KDIT3.4011.876.2025.2.RS"
+      },
+      {
+        "document_id": "673352",
+        "source_type": "interpretation",
+        "source_subtype": "individual",
+        "signature": "0113-KDIPT1-2.4012.1132.2025.1.KC"
+      },
+      {
+        "document_id": "673374",
+        "source_type": "interpretation",
+        "source_subtype": "individual",
+        "signature": "0112-KDSL1-1.4011.672.2025.2.DS"
+      },
+      {
+        "document_id": "673375",
+        "source_type": "interpretation",
+        "source_subtype": "individual",
+        "signature": "0115-KDIT3.4011.888.2025.1.KP"
+      },
+      {
+        "document_id": "673376",
+        "source_type": "interpretation",
+        "source_subtype": "individual",
+        "signature": "0112-KDIL1-3.4012.798.2025.2.KK"
+      },
+      {
+        "document_id": "673386",
+        "source_type": "interpretation",
+        "source_subtype": "individual",
+        "signature": "0111-KDIB3-1.4012.915.2025.1.IK"
+      },
+      {
+        "document_id": "673409",
+        "source_type": "interpretation",
+        "source_subtype": "individual",
+        "signature": "0113-KDIPT1-3.4012.1066.2025.1.KAK"
+      },
+      {
+        "document_id": "673410",
+        "source_type": "interpretation",
+        "source_subtype": "individual",
+        "signature": "0111-KDIB3-2.4012.832.2025.2.ASZ"
+      },
+      {
+        "document_id": "673415",
+        "source_type": "interpretation",
+        "source_subtype": "individual",
+        "signature": "0114-KDIP1-2.4012.715.2025.1.AP"
+      },
+      {
+        "document_id": "673421",
+        "source_type": "interpretation",
+        "source_subtype": "individual",
+        "signature": "0111-KDIB3-2.4012.868.2025.2.AR"
+      },
+      {
+        "document_id": "673424",
+        "source_type": "interpretation",
+        "source_subtype": "individual",
+        "signature": "0111-KDIB2-3.4014.594.2025.1.ASZ"
+      },
+      {
+        "document_id": "673425",
+        "source_type": "interpretation",
+        "source_subtype": "individual",
+        "signature": "0111-KDIB3-2.4012.844.2025.2.MGO"
+      }
+    ]
+  },
+  "status": "degraded",
+  "missing_required_source_types": [
+    "judgment"
+  ]
+}

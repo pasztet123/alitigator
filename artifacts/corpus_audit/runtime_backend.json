@@ -1,0 +1,27 @@
+{
+  "git_commit": "123c7d6d17eea6897bf98c064f9a34c12d9adfba",
+  "api_version": "2.0.0",
+  "deployment_environment": "Cloud Run production (Dockerfile default inspected; live health endpoint verified previously)",
+  "rag_backend_env": "mysql",
+  "resolved_read_backend": "mysql",
+  "resolved_write_backend": "mysql (normal reindex); Supabase sync is disabled",
+  "supabase_search_enabled": false,
+  "supabase_sync_enabled": false,
+  "mysql_enabled": true,
+  "sqlite_db_path": "apps/api/data/processed/eureka_rag.sqlite3",
+  "processed_path": "apps/api/data/processed/eureka_interpretations.jsonl",
+  "additional_source_paths": [
+    "apps/api/data/laws/processed/*.jsonl",
+    "apps/api/data/processed/cbosa_nsa_fsk_judgments.jsonl"
+  ],
+  "supabase_schema": "public",
+  "supabase_documents_table": "eureka_interpretations",
+  "supabase_chunks_table": "eureka_chunks",
+  "supabase_search_function": "search_eureka_chunks",
+  "warnings": [
+    "MySQL contains statutes and interpretations but zero judgments.",
+    "The API Dockerfile does not copy data or data/laws into the image.",
+    "Supabase backfill currently iterates only processed_path and its search adapter omits filters and metadata.",
+    "The production environment has not been mutated during this audit."
+  ]
+}

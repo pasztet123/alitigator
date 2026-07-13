@@ -1,0 +1,729 @@
+{
+  "sources": [
+    {
+      "path": "/Users/stas/alitigator/apps/api/data/processed/eureka_interpretations.jsonl",
+      "source_id": "eureka_interpretations",
+      "expected_source_types": [
+        "interpretation"
+      ],
+      "exists": true,
+      "readable": true,
+      "file_size": 4370840355,
+      "sha256": "d67685af4d87366581c232f759d9f758a4c39ed806d646458aab1c8ef325330c",
+      "line_count": 11425,
+      "valid_json_count": 11425,
+      "invalid_json_count": 0,
+      "unique_document_count": 10864,
+      "source_type_distribution": {
+        "interpretation": 11425
+      },
+      "source_subtype_distribution": {
+        "individual": 6346
+      },
+      "signature_count": 11425,
+      "records_with_content": 11424,
+      "records_without_content": 1,
+      "records_with_legal_provisions": 11425,
+      "samples": [
+        {
+          "document_id": "693699",
+          "source_type": "interpretation",
+          "source_subtype": null,
+          "signature": "0114-KDIP1-1.4012.354.2026.1.MM",
+          "subject": "Brak prawa do odliczenia podatku naliczonego (lub jego części) wynikającego z faktur dokumentujących nabycie towarów i usług w związku z realizacją Inwestycji."
+        },
+        {
+          "document_id": "696354",
+          "source_type": "interpretation",
+          "source_subtype": null,
+          "signature": "0111-KDIB3-1.4012.336.2026.5.ICZ",
+          "subject": "Przeniesienie praw do dysponowania usługami zawodnika, w zamian za określony ekwiwalent (wynagrodzenie) – stanowi odpłatne świadczenie usług na gruncie ustawy o VAT, w rozumieniu art. 8 ust. 1 ustawy o VAT w związku z art. 5 ust. 1 ustawy o VAT, korzystające ze zwolnienia na podstawie art. 43 ust. 1 pkt 32 ustawy o VAT."
+        },
+        {
+          "document_id": "696450",
+          "source_type": "interpretation",
+          "source_subtype": null,
+          "signature": "0111-KDIB2-3.4015.155.2026.4.BZ",
+          "subject": "Nabycie tytułem darowizny przez zięcia od teściowej, podlega opodatkowaniu na zasadach ogólnych przewidzianych dla I grupy podatników, z uwzględnieniem kwoty wolnej od podatku, skali podatkowej oraz obowiązku kumulacji nabyć określonej w cyt. przepisie art. 9 ust. 2 ustawy o podatku od spadków i darowizn. Nabycie takie powinno być zgłoszone w zeznaniu podatkowym o nabyciu rzeczy lub praw majątkowych – formularz SD-3. Obowiązek zgłoszenia nie występuje, jeżeli wartość rynkowa przedmiotu nabycia m.in. tytułem darowizny mieści się w kwocie wolnej od podatku z uwzględnieniem zasady kumulacji."
+        }
+      ]
+    },
+    {
+      "path": "/Users/stas/alitigator/apps/api/data/laws/processed/excise_act_DU_2026_412.jsonl",
+      "source_id": "excise_act_DU_2026_412",
+      "expected_source_types": [
+        "statute"
+      ],
+      "exists": true,
+      "readable": true,
+      "file_size": 1200709,
+      "sha256": "2f8c44c4f5cc5c1285367b2a63081059bccc4cb46778ec9d642993463138009b",
+      "line_count": 456,
+      "valid_json_count": 456,
+      "invalid_json_count": 0,
+      "unique_document_count": 456,
+      "source_type_distribution": {
+        "statute": 456
+      },
+      "source_subtype_distribution": {
+        "consolidated_text": 456
+      },
+      "signature_count": 0,
+      "records_with_content": 456,
+      "records_without_content": 0,
+      "records_with_legal_provisions": 456,
+      "samples": [
+        {
+          "document_id": "pl-ustawa-o-podatku-akcyzowym-2026-412-art.-1",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku akcyzowym - art. 1"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatku-akcyzowym-2026-412-art.-2-part-1",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku akcyzowym - art. 2"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatku-akcyzowym-2026-412-art.-2-part-2",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku akcyzowym - art. 2"
+        }
+      ]
+    },
+    {
+      "path": "/Users/stas/alitigator/apps/api/data/laws/processed/vat_act_DU_2025_775_codified_2026-05-05.jsonl",
+      "source_id": "vat_act_DU_2025_775_codified_2026-05-05",
+      "expected_source_types": [
+        "statute"
+      ],
+      "exists": true,
+      "readable": true,
+      "file_size": 1311628,
+      "sha256": "cd4d94a6d29057bd2bac768fb403f50059b9c5e88c740ac1ff1b1a49766d02a5",
+      "line_count": 418,
+      "valid_json_count": 418,
+      "invalid_json_count": 0,
+      "unique_document_count": 418,
+      "source_type_distribution": {
+        "statute": 418
+      },
+      "source_subtype_distribution": {
+        "codified_text": 418
+      },
+      "signature_count": 0,
+      "records_with_content": 418,
+      "records_without_content": 0,
+      "records_with_legal_provisions": 418,
+      "samples": [
+        {
+          "document_id": "pl-ustawa-o-podatku-od-towarow-i-uslug-2025-775-ujednolicony-2026-05-05-art.-1",
+          "source_type": "statute",
+          "source_subtype": "codified_text",
+          "signature": null,
+          "subject": "O podatku od towarów i usług - art. 1"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatku-od-towarow-i-uslug-2025-775-ujednolicony-2026-05-05-art.-2",
+          "source_type": "statute",
+          "source_subtype": "codified_text",
+          "signature": null,
+          "subject": "O podatku od towarów i usług - art. 2"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatku-od-towarow-i-uslug-2025-775-ujednolicony-2026-05-05-art.-2a",
+          "source_type": "statute",
+          "source_subtype": "codified_text",
+          "signature": null,
+          "subject": "O podatku od towarów i usług - art. 2a"
+        }
+      ]
+    },
+    {
+      "path": "/Users/stas/alitigator/apps/api/data/laws/processed/vat_act_DU_2025_775.jsonl",
+      "source_id": "vat_act_DU_2025_775",
+      "expected_source_types": [
+        "statute"
+      ],
+      "exists": true,
+      "readable": true,
+      "file_size": 1408542,
+      "sha256": "c36cd474876a0168b06c309e12f5f26e2a6fefab9e851137b5039faea2e1ec2b",
+      "line_count": 550,
+      "valid_json_count": 550,
+      "invalid_json_count": 0,
+      "unique_document_count": 550,
+      "source_type_distribution": {
+        "statute": 550
+      },
+      "source_subtype_distribution": {
+        "consolidated_text": 550
+      },
+      "signature_count": 0,
+      "records_with_content": 550,
+      "records_without_content": 0,
+      "records_with_legal_provisions": 550,
+      "samples": [
+        {
+          "document_id": "pl-ustawa-o-podatku-od-towarow-i-uslug-2025-775-art.-1",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku od towarów i usług - art. 1"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatku-od-towarow-i-uslug-2025-775-art.-2",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku od towarów i usług - art. 2"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatku-od-towarow-i-uslug-2025-775-art.-2a",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku od towarów i usług - art. 2a"
+        }
+      ]
+    },
+    {
+      "path": "/Users/stas/alitigator/apps/api/data/laws/processed/cit_act_DU_2026_554.jsonl",
+      "source_id": "cit_act_DU_2026_554",
+      "expected_source_types": [
+        "statute"
+      ],
+      "exists": true,
+      "readable": true,
+      "file_size": 1222527,
+      "sha256": "dfa929b38138a5f35709cf0a6d7642fe391a30905b4cb4cb1985db97c03fd2db",
+      "line_count": 400,
+      "valid_json_count": 400,
+      "invalid_json_count": 0,
+      "unique_document_count": 400,
+      "source_type_distribution": {
+        "statute": 400
+      },
+      "source_subtype_distribution": {
+        "consolidated_text": 400
+      },
+      "signature_count": 0,
+      "records_with_content": 400,
+      "records_without_content": 0,
+      "records_with_legal_provisions": 400,
+      "samples": [
+        {
+          "document_id": "pl-ustawa-o-podatku-dochodowym-od-osob-prawnych-2026-554-art.-1-part-1",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku dochodowym od osób prawnych - art. 1"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatku-dochodowym-od-osob-prawnych-2026-554-art.-1-part-2",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku dochodowym od osób prawnych - art. 1"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatku-dochodowym-od-osob-prawnych-2026-554-art.-1-part-3",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku dochodowym od osób prawnych - art. 1"
+        }
+      ]
+    },
+    {
+      "path": "/Users/stas/alitigator/apps/api/data/laws/processed/pit_act_DU_2025_163.jsonl",
+      "source_id": "pit_act_DU_2025_163",
+      "expected_source_types": [
+        "statute"
+      ],
+      "exists": true,
+      "readable": true,
+      "file_size": 5439829,
+      "sha256": "506e41f4ab79dac2edf68515c2528ae9d9d89b98e54a9f3b42ac5fcf2638a576",
+      "line_count": 452,
+      "valid_json_count": 452,
+      "invalid_json_count": 0,
+      "unique_document_count": 452,
+      "source_type_distribution": {
+        "statute": 452
+      },
+      "source_subtype_distribution": {
+        "consolidated_text": 452
+      },
+      "signature_count": 0,
+      "records_with_content": 452,
+      "records_without_content": 0,
+      "records_with_legal_provisions": 452,
+      "samples": [
+        {
+          "document_id": "pl-ustawa-o-podatku-dochodowym-od-osob-fizycznych-2025-163-art.-1",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku dochodowym od osób fizycznych - art. 1"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatku-dochodowym-od-osob-fizycznych-2025-163-art.-1a",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku dochodowym od osób fizycznych - art. 1a"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatku-dochodowym-od-osob-fizycznych-2025-163-art.-2-part-1",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku dochodowym od osób fizycznych - art. 2"
+        }
+      ]
+    },
+    {
+      "path": "/Users/stas/alitigator/apps/api/data/laws/processed/pit_act_DU_2026_592.jsonl",
+      "source_id": "pit_act_DU_2026_592",
+      "expected_source_types": [
+        "statute"
+      ],
+      "exists": true,
+      "readable": true,
+      "file_size": 1373168,
+      "sha256": "6e06c770a178cd3d60bbb73f6ecc1641e6071b31658c6ba8f7de7dec75f6452a",
+      "line_count": 454,
+      "valid_json_count": 454,
+      "invalid_json_count": 0,
+      "unique_document_count": 454,
+      "source_type_distribution": {
+        "statute": 454
+      },
+      "source_subtype_distribution": {
+        "consolidated_text": 454
+      },
+      "signature_count": 0,
+      "records_with_content": 454,
+      "records_without_content": 0,
+      "records_with_legal_provisions": 454,
+      "samples": [
+        {
+          "document_id": "pl-ustawa-o-podatku-dochodowym-od-osob-fizycznych-2026-592-art.-1",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku dochodowym od osób fizycznych - art. 1"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatku-dochodowym-od-osob-fizycznych-2026-592-art.-1a",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku dochodowym od osób fizycznych - art. 1a"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatku-dochodowym-od-osob-fizycznych-2026-592-art.-2-part-1",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku dochodowym od osób fizycznych - art. 2"
+        }
+      ]
+    },
+    {
+      "path": "/Users/stas/alitigator/apps/api/data/laws/processed/pcc_act_DU_2026_191.jsonl",
+      "source_id": "pcc_act_DU_2026_191",
+      "expected_source_types": [
+        "statute"
+      ],
+      "exists": true,
+      "readable": true,
+      "file_size": 62688,
+      "sha256": "175159bb37a934b94ccffc1402056304a8072bbe5c8284722475836b4d090fb9",
+      "line_count": 22,
+      "valid_json_count": 22,
+      "invalid_json_count": 0,
+      "unique_document_count": 22,
+      "source_type_distribution": {
+        "statute": 22
+      },
+      "source_subtype_distribution": {
+        "consolidated_text": 22
+      },
+      "signature_count": 0,
+      "records_with_content": 22,
+      "records_without_content": 0,
+      "records_with_legal_provisions": 22,
+      "samples": [
+        {
+          "document_id": "pl-ustawa-o-podatku-od-czynnosci-cywilnoprawnych-2026-191-art.-1-part-1",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku od czynności cywilnoprawnych - art. 1"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatku-od-czynnosci-cywilnoprawnych-2026-191-art.-1-part-2",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku od czynności cywilnoprawnych - art. 1"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatku-od-czynnosci-cywilnoprawnych-2026-191-art.-1a",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku od czynności cywilnoprawnych - art. 1a"
+        }
+      ]
+    },
+    {
+      "path": "/Users/stas/alitigator/apps/api/data/laws/processed/inheritance_gift_tax_act_DU_2026_478.jsonl",
+      "source_id": "inheritance_gift_tax_act_DU_2026_478",
+      "expected_source_types": [
+        "statute"
+      ],
+      "exists": true,
+      "readable": true,
+      "file_size": 79842,
+      "sha256": "e7a14fc8addc08e82e7d3b37f62ce2fc1dc1e3703127c5618c7d36a258896845",
+      "line_count": 34,
+      "valid_json_count": 34,
+      "invalid_json_count": 0,
+      "unique_document_count": 34,
+      "source_type_distribution": {
+        "statute": 34
+      },
+      "source_subtype_distribution": {
+        "consolidated_text": 34
+      },
+      "signature_count": 0,
+      "records_with_content": 34,
+      "records_without_content": 0,
+      "records_with_legal_provisions": 34,
+      "samples": [
+        {
+          "document_id": "pl-ustawa-o-podatku-od-spadkow-i-darowizn-2026-478-art.-1",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku od spadków i darowizn - art. 1"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatku-od-spadkow-i-darowizn-2026-478-art.-1a",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku od spadków i darowizn - art. 1a"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatku-od-spadkow-i-darowizn-2026-478-art.-2",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatku od spadków i darowizn - art. 2"
+        }
+      ]
+    },
+    {
+      "path": "/Users/stas/alitigator/apps/api/data/laws/processed/tax_ordinance_DU_2026_622.jsonl",
+      "source_id": "tax_ordinance_DU_2026_622",
+      "expected_source_types": [
+        "statute"
+      ],
+      "exists": true,
+      "readable": true,
+      "file_size": 1516105,
+      "sha256": "23f7de896882598ad0162a99b81835093a0cb28b07384965fd4834cb1c6f13b1",
+      "line_count": 786,
+      "valid_json_count": 786,
+      "invalid_json_count": 0,
+      "unique_document_count": 786,
+      "source_type_distribution": {
+        "statute": 786
+      },
+      "source_subtype_distribution": {
+        "consolidated_text": 786
+      },
+      "signature_count": 0,
+      "records_with_content": 786,
+      "records_without_content": 0,
+      "records_with_legal_provisions": 786,
+      "samples": [
+        {
+          "document_id": "pl-ordynacja-podatkowa-2026-622-art.-1",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "Ordynacja podatkowa - art. 1"
+        },
+        {
+          "document_id": "pl-ordynacja-podatkowa-2026-622-art.-1a",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "Ordynacja podatkowa - art. 1a"
+        },
+        {
+          "document_id": "pl-ordynacja-podatkowa-2026-622-art.-2",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "Ordynacja podatkowa - art. 2"
+        }
+      ]
+    },
+    {
+      "path": "/Users/stas/alitigator/apps/api/data/laws/processed/local_taxes_act_DU_2025_707.jsonl",
+      "source_id": "local_taxes_act_DU_2025_707",
+      "expected_source_types": [
+        "statute"
+      ],
+      "exists": true,
+      "readable": true,
+      "file_size": 122895,
+      "sha256": "fc92c7b89f9ef6f87c9172cd06289f145efa745ab9edf9660fda1159d9b2ba6e",
+      "line_count": 49,
+      "valid_json_count": 49,
+      "invalid_json_count": 0,
+      "unique_document_count": 49,
+      "source_type_distribution": {
+        "statute": 49
+      },
+      "source_subtype_distribution": {
+        "consolidated_text": 49
+      },
+      "signature_count": 0,
+      "records_with_content": 49,
+      "records_without_content": 0,
+      "records_with_legal_provisions": 49,
+      "samples": [
+        {
+          "document_id": "pl-ustawa-o-podatkach-i-oplatach-lokalnych-2025-707-art.-1",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatkach i opłatach lokalnych - art. 1"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatkach-i-oplatach-lokalnych-2025-707-art.-1a-part-1",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatkach i opłatach lokalnych - art. 1a"
+        },
+        {
+          "document_id": "pl-ustawa-o-podatkach-i-oplatach-lokalnych-2025-707-art.-1a-part-2",
+          "source_type": "statute",
+          "source_subtype": "consolidated_text",
+          "signature": null,
+          "subject": "O podatkach i opłatach lokalnych - art. 1a"
+        }
+      ]
+    },
+    {
+      "path": "/Users/stas/alitigator/apps/api/data/laws/processed/tax_treaties_core.jsonl",
+      "source_id": "tax_treaties_core",
+      "expected_source_types": [
+        "statute"
+      ],
+      "exists": true,
+      "readable": true,
+      "file_size": 792716,
+      "sha256": "4e4e00867bee1c15b734518babc2c29a2988bb03a5fdb347df933ae3c70d09bd",
+      "line_count": 351,
+      "valid_json_count": 351,
+      "invalid_json_count": 0,
+      "unique_document_count": 351,
+      "source_type_distribution": {
+        "statute": 351
+      },
+      "source_subtype_distribution": {
+        "tax_treaty": 351
+      },
+      "signature_count": 0,
+      "records_with_content": 351,
+      "records_without_content": 0,
+      "records_with_legal_provisions": 351,
+      "samples": [
+        {
+          "document_id": "pl-upo-austria-umowa-art.-1",
+          "source_type": "statute",
+          "source_subtype": "tax_treaty",
+          "signature": null,
+          "subject": "UPO Polska - Austria - art. 1"
+        },
+        {
+          "document_id": "pl-upo-austria-umowa-art.-2",
+          "source_type": "statute",
+          "source_subtype": "tax_treaty",
+          "signature": null,
+          "subject": "UPO Polska - Austria - art. 2"
+        },
+        {
+          "document_id": "pl-upo-austria-umowa-art.-3",
+          "source_type": "statute",
+          "source_subtype": "tax_treaty",
+          "signature": null,
+          "subject": "UPO Polska - Austria - art. 3"
+        }
+      ]
+    },
+    {
+      "path": "/Users/stas/alitigator/apps/api/data/laws/processed/ksef_2_0_current_bundle.jsonl",
+      "source_id": "ksef_2_0_current_bundle",
+      "expected_source_types": [
+        "statute"
+      ],
+      "exists": true,
+      "readable": true,
+      "file_size": 10371,
+      "sha256": "e99a168a68b352466328a8753e2d30aa14e79070d7a3df8bb3d64ce760874489",
+      "line_count": 4,
+      "valid_json_count": 4,
+      "invalid_json_count": 0,
+      "unique_document_count": 4,
+      "source_type_distribution": {
+        "statute": 4
+      },
+      "source_subtype_distribution": {
+        "official_ksef_2_0_bundle": 1,
+        "official_ksef_2_0_guidance": 3
+      },
+      "signature_count": 0,
+      "records_with_content": 4,
+      "records_without_content": 0,
+      "records_with_legal_provisions": 4,
+      "samples": [
+        {
+          "document_id": "ksef-2-0-current-law-dzu-2025-1203-transition",
+          "source_type": "statute",
+          "source_subtype": "official_ksef_2_0_bundle",
+          "signature": null,
+          "subject": "KSeF 2.0 - aktualny bundle: Dz.U. 2025 poz. 1203, terminy, limit 10 000 zl, sankcje"
+        },
+        {
+          "document_id": "ksef-2-0-offline24-operational-modes",
+          "source_type": "statute",
+          "source_subtype": "official_ksef_2_0_guidance",
+          "signature": null,
+          "subject": "KSeF 2.0 - offline24, niedostepnosc, awaria KSeF, awaria calkowita, awaria podatnika"
+        },
+        {
+          "document_id": "ksef-2-0-scope-fixed-establishment-and-foreign-buyers",
+          "source_type": "statute",
+          "source_subtype": "official_ksef_2_0_guidance",
+          "signature": null,
+          "subject": "KSeF 2.0 - zakres obowiazku, SMPD, nabywca zagraniczny, B2C, miejsce swiadczenia"
+        }
+      ]
+    },
+    {
+      "path": "/Users/stas/alitigator/apps/api/data/laws/processed/family_foundation_primary_bundle.jsonl",
+      "source_id": "family_foundation_primary_bundle",
+      "expected_source_types": [
+        "statute"
+      ],
+      "exists": true,
+      "readable": true,
+      "file_size": 7960,
+      "sha256": "73df9c06c3ba541c53f12d3db6a4e60533127146afe173b334b1282763013971",
+      "line_count": 4,
+      "valid_json_count": 4,
+      "invalid_json_count": 0,
+      "unique_document_count": 4,
+      "source_type_distribution": {
+        "statute": 4
+      },
+      "source_subtype_distribution": {
+        "primary_family_foundation_bundle": 4
+      },
+      "signature_count": 0,
+      "records_with_content": 4,
+      "records_without_content": 0,
+      "records_with_legal_provisions": 4,
+      "samples": [
+        {
+          "document_id": "family-foundation-primary-ufr-art-5-27-29",
+          "source_type": "statute",
+          "source_subtype": "primary_family_foundation_bundle",
+          "signature": null,
+          "subject": "Fundacja rodzinna - UFR art. 5, art. 27-29: katalog dozwolonej dzialalnosci i proporcja mienia"
+        },
+        {
+          "document_id": "family-foundation-primary-cit-24q-24r",
+          "source_type": "statute",
+          "source_subtype": "primary_family_foundation_bundle",
+          "signature": null,
+          "subject": "Fundacja rodzinna - CIT art. 24q i 24r: swiadczenia, ukryte zyski, 25% CIT od dochodu"
+        },
+        {
+          "document_id": "family-foundation-primary-pit-beneficiary-rates",
+          "source_type": "statute",
+          "source_subtype": "primary_family_foundation_bundle",
+          "signature": null,
+          "subject": "Fundacja rodzinna - PIT beneficjenta, fundatora, grupa zerowa, stawki 10% i 15%"
+        }
+      ]
+    },
+    {
+      "path": "/Users/stas/alitigator/apps/api/data/processed/cbosa_nsa_fsk_judgments.jsonl",
+      "source_id": "cbosa_nsa_fsk_judgments",
+      "expected_source_types": [
+        "judgment"
+      ],
+      "exists": true,
+      "readable": true,
+      "file_size": 196077407,
+      "sha256": "b045a44659c3dcd54d81ee2772f2cf5a5d3bf3fe9f453fcd850d685de8aa3ed7",
+      "line_count": 2365,
+      "valid_json_count": 2365,
+      "invalid_json_count": 0,
+      "unique_document_count": 2365,
+      "source_type_distribution": {
+        "judgment": 2365
+      },
+      "source_subtype_distribution": {
+        "nsa": 2365
+      },
+      "signature_count": 2365,
+      "records_with_content": 2365,
+      "records_without_content": 0,
+      "records_with_legal_provisions": 1176,
+      "samples": [
+        {
+          "document_id": "cbosa:E524CE542D",
+          "source_type": "judgment",
+          "source_subtype": "nsa",
+          "signature": "II FSK 944/23 - Wyrok NSA z 2026-06-26",
+          "subject": "II FSK 944/23 - Wyrok NSA z 2026-06-26 - Centralna Baza Orzeczeń Sądów Administracyjnych"
+        },
+        {
+          "document_id": "cbosa:ECD2D8A485",
+          "source_type": "judgment",
+          "source_subtype": "nsa",
+          "signature": "II FSK 838/25 - Wyrok NSA z 2026-06-26",
+          "subject": "II FSK 838/25 - Wyrok NSA z 2026-06-26 - Centralna Baza Orzeczeń Sądów Administracyjnych"
+        },
+        {
+          "document_id": "cbosa:9C0DD6B5AA",
+          "source_type": "judgment",
+          "source_subtype": "nsa",
+          "signature": "II FSK 581/23 - Wyrok NSA z 2026-06-25",
+          "subject": "II FSK 581/23 - Wyrok NSA z 2026-06-25 - Centralna Baza Orzeczeń Sądów Administracyjnych"
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "source_count": 15,
+    "valid_json_count": 17770
+  }
+}

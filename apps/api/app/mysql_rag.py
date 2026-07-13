@@ -100,7 +100,8 @@ _MYSQL_SEARCH_SCHEMA_READY = False
 
 
 def is_mysql_rag_enabled() -> bool:
-    return os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower() in {"mysql", "mariadb"}
+    from app.rag_runtime import resolve_rag_runtime
+    return resolve_rag_runtime().read_backend == "mysql"
 
 
 def is_mysql_rag_configured() -> bool:
@@ -541,7 +542,8 @@ def reindex_corpus_mysql(*, limit: Optional[int] = None, force: bool = False) ->
 
     with mysql_connection() as connection:
         ensure_schema(connection)
-        source_paths = (config.processed_path, *config.additional_source_paths)
+        from app.rag_runtime import iter_configured_corpus_sources
+        source_paths = [source.path for source in iter_configured_corpus_sources(config)]
         pending_writes = 0
         for source_path in source_paths:
             for record in iter_processed_records(source_path):
@@ -1195,7 +1197,7 @@ def search_chat_chunks_mysql(
     effective_limit = limit or config.retrieval_limit
     expanded_query = expand_search_query(query)
     judgment_requested_by_query = bool(JUDGMENT_INTENT_RE.search(query) or extract_judgment_signatures(query))
-    include_judgments = judgment_requested_by_query if include_judgments is None else include_judgments
+    include_judgments = True if include_judgments is None else include_judgments
     source_plan = build_legal_source_plan(
         query,
         include_interpretations=include_interpretations,

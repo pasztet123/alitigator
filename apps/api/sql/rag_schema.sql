@@ -64,6 +64,17 @@ alter table if exists public.eureka_chunks add column if not exists embedding do
 alter table if exists public.eureka_chunks add column if not exists embedding_norm double precision not null default 0;
 alter table if exists public.eureka_chunks add column if not exists embedding_model text not null default 'alitigator-hash-v1';
 
+-- Additive migration: existing rows/tables are retained.  These attributes
+-- are stored on the document because source classification is document-wide.
+alter table if exists public.eureka_interpretations add column if not exists source_subtype text not null default '';
+alter table if exists public.eureka_interpretations add column if not exists authority text not null default '';
+alter table if exists public.eureka_interpretations add column if not exists jurisdiction text not null default 'PL';
+alter table if exists public.eureka_interpretations add column if not exists act_title text not null default '';
+alter table if exists public.eureka_interpretations add column if not exists publication text not null default '';
+alter table if exists public.eureka_interpretations add column if not exists legal_state_date text not null default '';
+alter table if exists public.eureka_interpretations add column if not exists source_pages jsonb not null default '[]'::jsonb;
+alter table if exists public.eureka_interpretations add column if not exists tax_domain text not null default '';
+
 create index if not exists eureka_chunks_document_id_idx on public.eureka_chunks(document_id);
 create index if not exists eureka_chunks_search_vector_idx on public.eureka_chunks using gin(search_vector);
 
@@ -224,6 +235,56 @@ as $$
 $$;
 
 create extension if not exists pgcrypto;
+
+-- Filter-aware overload.  Every predicate is applied before the candidate
+-- limit, so a request for a source type cannot be crowded out by another.
+create or replace function public.search_eureka_chunks(
+    search_query text,
+    match_count integer,
+    query_embedding double precision[],
+    lexical_weight real,
+    semantic_weight real,
+    p_source_types text[] default null,
+    p_source_subtypes text[] default null,
+    p_tax_domains text[] default null,
+    p_document_ids text[] default null,
+    p_signatures text[] default null,
+    p_legal_provisions text[] default null
+)
+returns table (
+    chunk_id text, document_id text, chunk_index integer, chunk_text text,
+    subject text, signature text, published_date timestamptz, source_url text,
+    category text, source text, source_type text, source_subtype text,
+    authority text, publication text, legal_state_date text, source_pages jsonb,
+    legal_provisions jsonb, jurisdiction text, score real
+)
+language sql stable as $$
+    with filtered as (
+      select c.*, d.source, d.source_type, d.source_subtype, d.authority,
+             d.publication, d.legal_state_date, d.source_pages, d.legal_provisions,
+             d.jurisdiction, d.tax_domain
+      from public.eureka_chunks c join public.eureka_interpretations d using (document_id)
+      where (p_source_types is null or d.source_type = any(p_source_types))
+        and (p_source_subtypes is null or d.source_subtype = any(p_source_subtypes))
+        and (p_tax_domains is null or d.tax_domain = any(p_tax_domains))
+        and (p_document_ids is null or c.document_id = any(p_document_ids))
+        and (p_signatures is null or c.signature = any(p_signatures))
+        and (p_legal_provisions is null or d.legal_provisions ?| p_legal_provisions)
+    ), ranked as (
+      select f.*, ts_rank_cd(f.search_vector, websearch_to_tsquery('simple', search_query)) lexical_score
+      from filtered f
+      where f.search_vector @@ websearch_to_tsquery('simple', search_query)
+      order by ts_rank_cd(f.search_vector, websearch_to_tsquery('simple', search_query)) desc,
+               f.published_date desc nulls last, f.chunk_index asc
+      limit greatest(match_count, 1)
+    )
+    select chunk_id, document_id, chunk_index, chunk_text, subject, signature,
+           published_date, source_url, category, source, source_type,
+           nullif(source_subtype, ''), nullif(authority, ''), nullif(publication, ''),
+           nullif(legal_state_date, ''), source_pages, legal_provisions,
+           jurisdiction, lexical_score::real
+    from ranked order by lexical_score desc, published_date desc nulls last, chunk_index asc;
+$$;
 
 create table if not exists public.chat_threads (
     id uuid primary key default gen_random_uuid(),

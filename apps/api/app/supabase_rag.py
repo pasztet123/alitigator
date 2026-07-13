@@ -16,6 +16,7 @@ from app.rag import (
     get_rag_config,
     iter_processed_records,
 )
+from app.rag_runtime import corpus_manifest_hash, iter_configured_corpus_sources
 
 
 def is_supabase_rag_enabled() -> bool:
@@ -382,18 +383,22 @@ def reindex_corpus_to_supabase(
     reverse_order: bool = False,
 ) -> dict[str, Any]:
     config = get_rag_config()
-    if not config.processed_path.exists():
-        raise FileNotFoundError(f"Processed corpus not found: {config.processed_path}")
-
+    sources = iter_configured_corpus_sources(config)
+    missing = [source.path for source in sources if source.required and not source.path.exists()]
+    if missing:
+        raise FileNotFoundError(f"Configured corpus not found: {missing[0]}")
     state_path = config.supabase_state_path
     persisted_state = {} if force or limit is not None else load_sync_state(state_path)
-    persisted_status = str(persisted_state.get("status") or "").lower()
-    if persisted_status == "completed":
-        resume_from = int(persisted_state.get("processed") or 0)
-    else:
-        resume_from = 0
-
-    batch: list[dict[str, Any]] = []
+    # v1 stored one global cursor.  Never let that cursor skip sources added
+    # later: it is only migrated to the primary source, all others start at 0.
+    source_state = dict(persisted_state.get("sources") or {})
+    if not source_state and persisted_state:
+        source_state = {sources[0].source_id: {"processed": int(persisted_state.get("processed") or 0), "status": persisted_state.get("status")}} if sources else {}
+    manifest_hash = corpus_manifest_hash(sources)
+    if persisted_state.get("schema_version") == 2 and persisted_state.get("manifest_hash") != manifest_hash:
+        # Source bytes or configured paths changed. Restart cursors; upserts
+        # remain idempotent and no remote rows are deleted as part of backfill.
+        source_state = {}
     processed = 0
     indexed = 0
     skipped = 0
@@ -402,102 +407,44 @@ def reindex_corpus_to_supabase(
     effective_batch_size = max(1, batch_size or config.supabase_batch_size)
     effective_chunk_batch_size = max(1, chunk_batch_size or config.supabase_chunk_batch_size)
 
-    if emit_progress:
-        print(
-            f"[supabase-backfill] start processed={resume_from} limit={limit or 'all'} batch_size={effective_batch_size} chunk_batch_size={effective_chunk_batch_size}",
-            flush=True,
-        )
-
-    for record_index, record in enumerate(iter_processed_records(config.processed_path, reverse=reverse_order)):
-        if record_index < resume_from:
-            continue
-        if limit is not None and processed >= limit:
-            break
-        batch.append(record)
-        processed += 1
-        if len(batch) >= effective_batch_size:
-            if emit_progress:
-                print(
-                    f"[supabase-backfill] batch_start processed={resume_from + processed} docs={len(batch)} last_document_id={batch[-1].get('document_id') or ''}",
-                    flush=True,
-                )
-            result = upsert_records_to_supabase(
-                batch,
-                force=force or not compare_remote_hashes,
-                chunk_batch_size=effective_chunk_batch_size,
-            )
-            indexed += int(result["indexed"])
-            skipped += int(result["skipped"])
-            chunk_count += int(result["chunk_count"])
-            indexed_document_ids.extend(result["indexed_document_ids"])
-            if limit is None:
-                write_sync_state(
-                    state_path,
-                    {
-                        "status": "running",
-                        "processed": resume_from + processed,
-                        "indexed": indexed,
-                        "skipped": skipped,
-                        "chunk_count": chunk_count,
-                        "last_document_id": str(batch[-1].get("document_id") or ""),
-                    },
-                )
-            if emit_progress:
-                print(
-                    f"[supabase-backfill] batch_done processed={resume_from + processed} indexed={indexed} skipped={skipped} chunks={chunk_count}",
-                    flush=True,
-                )
+    for source in sources:
+        prior = source_state.get(source.source_id, {})
+        resume_from = 0 if force else int(prior.get("processed") or 0)
+        batch: list[dict[str, Any]] = []
+        source_processed = 0
+        for record_index, record in enumerate(iter_processed_records(source.path, reverse=reverse_order)):
+            if record_index < resume_from: continue
+            if limit is not None and processed >= limit: break
+            batch.append(record); processed += 1; source_processed += 1
+            if len(batch) < effective_batch_size: continue
+            result = upsert_records_to_supabase(batch, force=force or not compare_remote_hashes, chunk_batch_size=effective_chunk_batch_size)
+            indexed += int(result["indexed"]); skipped += int(result["skipped"]); chunk_count += int(result["chunk_count"]); indexed_document_ids.extend(result["indexed_document_ids"])
+            source_state[source.source_id] = {"path": str(source.path), "processed": resume_from + source_processed, "status": "running", "last_document_id": str(batch[-1].get("document_id") or "")}
+            if limit is None: write_sync_state(state_path, {"schema_version": 2, "manifest_hash": manifest_hash, "status": "running", "sources": source_state})
             batch = []
-
-    if batch:
-        if emit_progress:
-            print(
-                f"[supabase-backfill] batch_start processed={resume_from + processed} docs={len(batch)} last_document_id={batch[-1].get('document_id') or ''}",
-                flush=True,
-            )
-        result = upsert_records_to_supabase(
-            batch,
-            force=force or not compare_remote_hashes,
-            chunk_batch_size=effective_chunk_batch_size,
-        )
-        indexed += int(result["indexed"])
-        skipped += int(result["skipped"])
-        chunk_count += int(result["chunk_count"])
-        indexed_document_ids.extend(result["indexed_document_ids"])
-        if limit is None:
-            write_sync_state(
-                state_path,
-                {
-                    "status": "running",
-                    "processed": resume_from + processed,
-                    "indexed": indexed,
-                    "skipped": skipped,
-                    "chunk_count": chunk_count,
-                    "last_document_id": str(batch[-1].get("document_id") or ""),
-                },
-            )
-        if emit_progress:
-            print(
-                f"[supabase-backfill] batch_done processed={resume_from + processed} indexed={indexed} skipped={skipped} chunks={chunk_count}",
-                flush=True,
-            )
-
-    total_processed = resume_from + processed
+        if batch:
+            result = upsert_records_to_supabase(batch, force=force or not compare_remote_hashes, chunk_batch_size=effective_chunk_batch_size)
+            indexed += int(result["indexed"]); skipped += int(result["skipped"]); chunk_count += int(result["chunk_count"]); indexed_document_ids.extend(result["indexed_document_ids"])
+        source_state[source.source_id] = {"path": str(source.path), "processed": resume_from + source_processed, "status": "completed" if limit is None else "partial", "last_document_id": indexed_document_ids[-1] if indexed_document_ids else None}
+        if limit is not None and processed >= limit: break
     if limit is None:
         write_sync_state(
             state_path,
             {
+                "schema_version": 2,
+                "manifest_hash": manifest_hash,
                 "status": "completed",
-                "processed": total_processed,
+                "processed": processed,
                 "indexed": indexed,
                 "skipped": skipped,
                 "chunk_count": chunk_count,
                 "last_document_id": indexed_document_ids[-1] if indexed_document_ids else None,
+                "sources": source_state,
             },
         )
 
     return {
-        "processed": total_processed,
+        "processed": processed,
         "indexed": indexed,
         "skipped": skipped,
         "chunk_count": chunk_count,
@@ -508,7 +455,17 @@ def reindex_corpus_to_supabase(
     }
 
 
-def search_chunks_supabase(query: str, *, limit: Optional[int] = None) -> list[RagChunk]:
+def search_chunks_supabase(
+    query: str,
+    *,
+    limit: Optional[int] = None,
+    source_types: Optional[set[str]] = None,
+    source_subtypes: Optional[set[str]] = None,
+    tax_domains: Optional[set[str]] = None,
+    document_ids: Optional[set[str]] = None,
+    signatures: Optional[set[str]] = None,
+    legal_provisions: Optional[set[str]] = None,
+) -> list[RagChunk]:
     if not is_supabase_rag_enabled() or not is_supabase_rag_configured():
         return []
 
@@ -532,6 +489,13 @@ def search_chunks_supabase(query: str, *, limit: Optional[int] = None) -> list[R
                 "query_embedding": query_embedding,
                 "lexical_weight": config.hybrid_lexical_weight,
                 "semantic_weight": config.hybrid_semantic_weight,
+                # RPC applies these predicates before candidate limits.
+                "p_source_types": sorted(source_types) if source_types else None,
+                "p_source_subtypes": sorted(source_subtypes) if source_subtypes else None,
+                "p_tax_domains": sorted(tax_domains) if tax_domains else None,
+                "p_document_ids": sorted(document_ids) if document_ids else None,
+                "p_signatures": sorted(signatures) if signatures else None,
+                "p_legal_provisions": sorted(legal_provisions) if legal_provisions else None,
             },
         )
         response.raise_for_status()
@@ -549,6 +513,14 @@ def search_chunks_supabase(query: str, *, limit: Optional[int] = None) -> list[R
             published_date=str(row.get("published_date") or "") or None,
             source_url=str(row.get("source_url") or "") or None,
             category=str(row.get("category") or "") or None,
+            source=str(row.get("source") or ""),
+            source_type=str(row.get("source_type") or "interpretation"),
+            source_subtype=str(row.get("source_subtype") or "") or None,
+            authority=str(row.get("authority") or "") or None,
+            publication=str(row.get("publication") or "") or None,
+            legal_state_date=str(row.get("legal_state_date") or "") or None,
+            source_pages=[int(value) for value in (row.get("source_pages") or []) if str(value).isdigit()],
+            legal_provisions=[str(value) for value in (row.get("legal_provisions") or [])],
         )
         for row in rows
         if row.get("document_id") and row.get("chunk_text")

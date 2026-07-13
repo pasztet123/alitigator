@@ -118,7 +118,10 @@ def retrieve_housing_authorities(
     jobs: list[tuple[ControlledAuthorityIssue, str, int, str]] = []
     for issue in HOUSING_AUTHORITY_ISSUES:
         authority_query = _issue_query(query, issue)
-        for source_type, limit in (("interpretation", 4), ("judgment", 3)):
+        # Candidate generation is intentionally recall-first.  A long factual
+        # query must never be the sole chance to surface an authority indexed
+        # chiefly by its provision or signature.
+        for source_type, limit in (("interpretation", 12), ("judgment", 12)):
             queries.append(
                 {
                     "issue_id": issue.issue_id,
@@ -131,6 +134,7 @@ def retrieve_housing_authorities(
                 }
             )
             jobs.append((issue, source_type, limit, authority_query))
+            jobs.append((issue, source_type, limit, issue.query_suffix))
 
     # Search each issue-source pair independently.  Parallel reads keep the
     # stricter retrieval design from multiplying user-visible latency.
@@ -276,7 +280,7 @@ def _select_candidate(
         provision_score < 1.0
         or issue_score < 0.34
         or material_fact_score < 0.34
-        or holding_relevance < 0.5
+        or holding_relevance < 0.34
     ):
         return None
     score = round(
@@ -347,7 +351,7 @@ def _select_candidate_with_trace(
             "full_text": chunk.chunk_text,
         }.items()
     }
-    thresholds = {"provision": 1.0, "issue": .34, "material_fact": .34, "holding": .5}
+    thresholds = {"provision": 1.0, "issue": .34, "material_fact": .34, "holding": .34}
     rejection = ""
     if _is_wrong_neighbor(transaction_type, event_type, issue): rejection = "wrong_neighbor"
     elif holding is None or not holding_section: rejection = "missing_holding"
@@ -457,6 +461,13 @@ def _extract_complete_holding(chunk: RagChunk) -> tuple[str | None, dict[str, in
         for sentence, offset_start, offset_end in _complete_sentences(segment):
             if _holding_sentence_is_relevant(sentence):
                 return sentence, {"start": start + offset_start, "end": start + offset_end}, section_name
+    # Historical authorities and older interpretations often lack the newer
+    # editorial heading.  A complete, mechanism-relevant sentence is still
+    # usable secondary authority, but is labelled rather than treated as
+    # current-law proof.
+    for sentence, start, end in _complete_sentences(text):
+        if _holding_sentence_is_relevant(sentence):
+            return sentence, {"start": start, "end": end}, "historical_or_unheaded"
     return None, None, None
 
 
@@ -535,6 +546,35 @@ def _active_judgment_index_count() -> tuple[int, str | None]:
         return 0, f"index_count_error:{type(exc).__name__}"
 
 
+def _judgment_metadata_coverage() -> dict[str, object]:
+    """Diagnostic-only completeness report; empty metadata is never mismatch."""
+    backend = os.getenv("ALITIGATOR_RAG_BACKEND", "sqlite").strip().lower()
+    fields = ("signature", "authority", "published_date", "legal_provisions", "source_subtype", "source_url")
+    try:
+        if backend in {"mysql", "mariadb"}:
+            from app.mysql_rag import get_mysql_target, mysql_connection
+            table, _ = get_mysql_target()
+            with mysql_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT COUNT(*) total, "
+                        "SUM(signature IS NOT NULL AND signature <> '') signature, "
+                        "SUM(authority <> '') authority, SUM(published_date IS NOT NULL AND published_date <> '') published_date, "
+                        "SUM(legal_provisions_json <> '[]') legal_provisions, SUM(source_subtype <> '') source_subtype, "
+                        "SUM(source_url IS NOT NULL AND source_url <> '') source_url "
+                        "FROM `%s` WHERE source_type = 'judgment'" % table
+                    )
+                    row = cursor.fetchone() or {}
+        else:
+            with sqlite3.connect(get_rag_config().db_path) as connection:
+                row = connection.execute("SELECT COUNT(*) total, SUM(signature <> '') signature, SUM(authority <> '') authority, SUM(published_date <> '') published_date, SUM(legal_provisions_json <> '[]') legal_provisions, SUM(source_subtype <> '') source_subtype, SUM(source_url <> '') source_url FROM documents WHERE source_type='judgment'").fetchone()
+                row = dict(zip(("total", *fields), row))
+        total = int(row.get("total") or 0)
+        return {"total": total, "fields": {field: int(row.get(field) or 0) for field in fields}, "missing_metadata_is_unknown": True}
+    except Exception as exc:
+        return {"error": type(exc).__name__, "missing_metadata_is_unknown": True}
+
+
 def audit_judgment_corpus(
     *,
     candidate_count: int,
@@ -571,6 +611,10 @@ def audit_judgment_corpus(
         "local_source_document_count": corpus_count,
         "corpus_available": corpus_available,
         "backend_document_count": indexed_count,
+        # Compatibility aliases; presentation uses the explicit names above.
+        "corpus_count": corpus_count,
+        "indexed_count": indexed_count,
         "index_count_error": index_error,
         "zero_candidates_root_cause": root_cause,
+        "metadata_coverage": _judgment_metadata_coverage(),
     }

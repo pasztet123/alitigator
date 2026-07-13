@@ -67,11 +67,15 @@ class ControlledHousingAuthorityRetrievalTests(unittest.TestCase):
             context_fetcher=lambda document_ids, *, seed_chunks: [],
         )
 
-        self.assertEqual(len(calls), 8)
+        # Each issue/source lane uses both factual and provision-first recall.
+        self.assertEqual(len(calls), 16)
         issued_queries = outcome["authority_queries"]
         self.assertTrue(outcome["authority_queries_per_issue"])
         self.assertFalse(outcome["generic_housing_relief_pool_reused_for_all_claims"])
         self.assertTrue(outcome["authority_provision_match_scored"])
+        self.assertTrue(outcome["interpretation_lane_executed"])
+        self.assertTrue(outcome["interpretation_candidates_before_filters_recorded"])
+        self.assertTrue(outcome["interpretation_lane"]["candidate_waterfall"])
         self.assertTrue(any("art. 21 ust. 30a" in item["query"] for item in issued_queries))
         self.assertTrue(any("art. 21 ust. 25a" in item["query"] for item in issued_queries))
         self.assertEqual(len(cards), 1)

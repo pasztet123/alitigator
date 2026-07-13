@@ -812,7 +812,33 @@ def select_wht_primary_bundle(chunks: list[RagChunk], query: str) -> list[RagChu
 def dedupe_wht_primary_statute_units(chunks: list[RagChunk], query: str) -> list[RagChunk]:
     """Preserve distinct statutory units needed to answer a multi-part WHT case."""
     if not query_targets_wht_pay_and_refund_services(query):
-        return dedupe_chunks_by_canonical_source(chunks)
+        query_tokens = {
+            token.lower()
+            for token in QUERY_TOKEN_RE.findall(query or "")
+            if len(token) >= 4
+        }
+
+        def unit_score(chunk: RagChunk) -> tuple[int, int, int]:
+            text = re.sub(
+                r"\s+",
+                " ",
+                f"{chunk.subject or ''} {chunk.chunk_text or ''}",
+            ).lower()
+            overlap = sum(1 for token in query_tokens if token in text)
+            substantive = int(len(re.sub(r"\s+", " ", chunk.chunk_text or "").strip()) >= 80)
+            return overlap, substantive, -chunk.chunk_index
+
+        best_by_source: dict[str, RagChunk] = {}
+        source_order: list[str] = []
+        for chunk in chunks:
+            source_id = chunk_canonical_source_id(chunk)
+            if source_id not in best_by_source:
+                best_by_source[source_id] = chunk
+                source_order.append(source_id)
+                continue
+            if unit_score(chunk) > unit_score(best_by_source[source_id]):
+                best_by_source[source_id] = chunk
+        return [best_by_source[source_id] for source_id in source_order]
     deduped: list[RagChunk] = []
     seen: set[str] = set()
     for chunk in chunks:

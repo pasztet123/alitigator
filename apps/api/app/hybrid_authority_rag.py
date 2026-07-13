@@ -33,8 +33,13 @@ from app.rag import (
     normalize_whitespace,
     prioritize_legal_rules_for_query,
     resolve_statute_tax_domains,
+    query_targets_wht_pay_and_refund_services,
     search_chat_chunks,
     select_diverse_chunks,
+)
+from app.mysql_rag import (
+    is_mysql_rag_configured,
+    retrieve_deterministic_statute_chunks_mysql,
 )
 
 
@@ -703,43 +708,92 @@ def build_primary_queries(issue: IssueNode, query: str, fact_graph: FactGraph) -
     return tuple(query_item for query_item in queries if query_item["query"])
 
 
-def run_primary_lane(issue: IssueNode, query: str, fact_graph: FactGraph, *, config: HybridAuthorityConfig) -> PrimaryLaneResult:
+def retrieve_deterministic_wht_primary_bundle(
+    query: str,
+    *,
+    config: HybridAuthorityConfig,
+) -> tuple[RagChunk, ...]:
+    """Reuse the MySQL statutory fast path in the hybrid retrieval mode.
+
+    Hybrid retrieval previously sent each issue only through broad FULLTEXT.
+    That bypassed the deterministic statute lookup used by the baseline and
+    could leave the final claim gate with no primary-law rules at all.
+    """
+    if not query_targets_wht_pay_and_refund_services(query) or not is_mysql_rag_configured():
+        return ()
+    source_plan = build_legal_source_plan(
+        query,
+        include_interpretations=False,
+        include_judgments=False,
+    )
+    chunks = retrieve_deterministic_statute_chunks_mysql(
+        query,
+        plan=source_plan,
+        limit=max(20, config.primary_limit_per_issue),
+    )
+    return tuple(chunks[: max(20, config.primary_limit_per_issue)])
+
+
+def run_primary_lane(
+    issue: IssueNode,
+    query: str,
+    fact_graph: FactGraph,
+    *,
+    config: HybridAuthorityConfig,
+    deterministic_primary_chunks: tuple[RagChunk, ...] = (),
+) -> PrimaryLaneResult:
     target_date = _target_date_from_query(query)
     chunks: list[RagChunk] = []
     inspections: list[dict[str, Any]] = []
-    for query_item in build_primary_queries(issue, query, fact_graph):
-        if config.fast_sql_primary_candidates:
-            found_chunks, hits = _fast_sql_authority_candidates(
-                query_item["query"],
-                issue=issue,
-                source_types={"statute"},
-                limit=config.primary_limit_per_issue,
-            )
-            retrieved_count = len(found_chunks)
-            match_query = "fast_sql_primary"
-        else:
-            inspection = inspect_search(
-                query_item["query"],
-                limit=config.primary_limit_per_issue,
-                source_types={"statute"},
-                enforce_query_domain=bool(issue.tax),
-                tax_domains={issue.tax} if issue.tax and issue.tax != "TAX" else None,
-            )
-            found_chunks = inspection.chunks
-            hits = inspection.hits[: config.primary_limit_per_issue]
-            retrieved_count = inspection.retrieved_count
-            match_query = inspection.match_query
+    primary_queries = build_primary_queries(issue, query, fact_graph)
+    if deterministic_primary_chunks:
+        chunks.extend(deterministic_primary_chunks)
         inspections.append(
             {
-                "family": query_item["family"],
-                "query": query_item["query"],
-                "match_query": match_query,
-                "retrieved_count": retrieved_count,
-                "hits": hits,
+                "family": "deterministic_primary_law",
+                "query": query,
+                "match_query": "mysql_statute_targets",
+                "retrieved_count": len(deterministic_primary_chunks),
+                "hits": [],
             }
         )
-        chunks.extend(found_chunks)
-    deduped = _dedupe_chunks(chunks)
+    else:
+        for query_item in primary_queries:
+            if config.fast_sql_primary_candidates:
+                found_chunks, hits = _fast_sql_authority_candidates(
+                    query_item["query"],
+                    issue=issue,
+                    source_types={"statute"},
+                    limit=config.primary_limit_per_issue,
+                )
+                retrieved_count = len(found_chunks)
+                match_query = "fast_sql_primary"
+            else:
+                inspection = inspect_search(
+                    query_item["query"],
+                    limit=config.primary_limit_per_issue,
+                    source_types={"statute"},
+                    enforce_query_domain=bool(issue.tax),
+                    tax_domains={issue.tax} if issue.tax and issue.tax != "TAX" else None,
+                )
+                found_chunks = inspection.chunks
+                hits = inspection.hits[: config.primary_limit_per_issue]
+                retrieved_count = inspection.retrieved_count
+                match_query = inspection.match_query
+            inspections.append(
+                {
+                    "family": query_item["family"],
+                    "query": query_item["query"],
+                    "match_query": match_query,
+                    "retrieved_count": retrieved_count,
+                    "hits": hits,
+                }
+            )
+            chunks.extend(found_chunks)
+    deduped = _dedupe_chunks(
+        chunks,
+        preserve_statute_units=bool(deterministic_primary_chunks),
+    )
     controlling = tuple(chunk for chunk in deduped if _chunk_is_temporally_current(chunk, target_date))
     historical = tuple(
         {"document_id": chunk.document_id, "signature": chunk.signature, "date": chunk.published_date or chunk.legal_state_date}
@@ -749,7 +803,7 @@ def run_primary_lane(issue: IssueNode, query: str, fact_graph: FactGraph, *, con
     return PrimaryLaneResult(
         issue_id=issue.issue_id,
         target_date=target_date,
-        queries=build_primary_queries(issue, query, fact_graph),
+        queries=primary_queries,
         controlling_provisions=controlling[: config.primary_limit_per_issue],
         dependency_provisions=(),
         exception_provisions=(),
@@ -853,8 +907,18 @@ def run_hybrid_authority_retrieval(
     timings["planning_ms"] = _elapsed_ms(started)
 
     primary_start = time.perf_counter()
+    deterministic_primary_chunks = retrieve_deterministic_wht_primary_bundle(
+        retrieval_query,
+        config=config,
+    )
     primary_results = tuple(
-        run_primary_lane(issue, retrieval_query, fact_graph, config=config)
+        run_primary_lane(
+            issue,
+            retrieval_query,
+            fact_graph,
+            config=config,
+            deterministic_primary_chunks=deterministic_primary_chunks,
+        )
         for issue in issue_graph
     )
     timings["primary_retrieval_ms"] = _elapsed_ms(primary_start)
@@ -932,6 +996,11 @@ def run_hybrid_authority_retrieval(
         config=config,
     )
     selected_chunks = _select_hybrid_chunks(primary_results, scored_by_issue, evidence_bundles)
+    if deterministic_primary_chunks:
+        selected_chunks = _dedupe_chunks(
+            [*deterministic_primary_chunks, *selected_chunks],
+            preserve_statute_units=True,
+        )
     timings["reranking_ms"] = _elapsed_ms(rerank_start)
     timings["total_ms"] = _elapsed_ms(started)
 
@@ -2037,11 +2106,19 @@ def _chunk_is_temporally_current(chunk: RagChunk, target_date: str) -> bool:
     return status != "historical"
 
 
-def _dedupe_chunks(chunks: Iterable[RagChunk]) -> tuple[RagChunk, ...]:
+def _dedupe_chunks(
+    chunks: Iterable[RagChunk],
+    *,
+    preserve_statute_units: bool = False,
+) -> tuple[RagChunk, ...]:
     deduped: list[RagChunk] = []
     seen: set[str] = set()
     for chunk in chunks:
-        key = chunk_canonical_source_id(chunk)
+        key = (
+            f"statute-unit:{chunk.chunk_id}"
+            if preserve_statute_units and str(chunk.source_type or "").lower() == "statute"
+            else chunk_canonical_source_id(chunk)
+        )
         if key in seen:
             continue
         seen.add(key)

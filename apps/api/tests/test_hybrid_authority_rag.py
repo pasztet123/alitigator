@@ -528,6 +528,61 @@ class HybridAuthorityIntegrationTests(unittest.TestCase):
         self.assertTrue(bundle.controlling_provisions)
         self.assertIn("supporting_authority", bundle.missing_source_requirements)
 
+    def test_wht_hybrid_reuses_deterministic_mysql_primary_bundle(self) -> None:
+        deterministic = [
+            chunk(
+                chunk_id="cit-21-1",
+                document_id="cit-21",
+                source_type="statute",
+                source_subtype="consolidated_text",
+                subject="Ustawa o CIT art. 21",
+                text="art. 21 ust. 1 pkt 1 Odsetki i należności licencyjne.",
+                provisions=["[CIT] Ustawa o CIT-art. 21-ust. 1-pkt 1"],
+            ),
+            chunk(
+                chunk_id="cit-21-2a",
+                document_id="cit-21",
+                source_type="statute",
+                source_subtype="consolidated_text",
+                subject="Ustawa o CIT art. 21",
+                text="art. 21 ust. 1 pkt 2a Usługi zarządzania i kontroli.",
+                provisions=["[CIT] Ustawa o CIT-art. 21-ust. 1-pkt 2a"],
+            ),
+            chunk(
+                chunk_id="cit-26-2e",
+                document_id="cit-26",
+                source_type="statute",
+                source_subtype="consolidated_text",
+                subject="Ustawa o CIT art. 26",
+                text="art. 26 ust. 2e Próg 2 000 000 zł i pobór podatku.",
+                provisions=["[CIT] Ustawa o CIT-art. 26-ust. 2e"],
+            ),
+        ]
+        query = (
+            "Polska spółka wypłaca niemieckiej GmbH odsetki i licencje; "
+            "próg 2 000 000 zł, pay and refund oraz podatek u źródła."
+        )
+
+        with patch("app.hybrid_authority_rag.is_mysql_rag_configured", return_value=True), patch(
+            "app.hybrid_authority_rag.retrieve_deterministic_statute_chunks_mysql",
+            return_value=deterministic,
+        ), patch(
+            "app.hybrid_authority_rag.inspect_search",
+            side_effect=AssertionError("WHT must not fall back to broad primary FULLTEXT"),
+        ):
+            result = run_hybrid_authority_retrieval(
+                query,
+                include_interpretations=False,
+                include_judgments=False,
+                config=HybridAuthorityConfig(authority_card_cache_enabled=False),
+            )
+
+        self.assertEqual([item.chunk_id for item in result.selected_chunks], [item.chunk_id for item in deterministic])
+        self.assertTrue(all(primary.controlling_provisions for primary in result.primary_results))
+        self.assertTrue(
+            all(primary.inspections[0]["match_query"] == "mysql_statute_targets" for primary in result.primary_results)
+        )
+
     def test_missing_primary_law_is_explicit_in_bundle(self) -> None:
         authority = chunk(document_id="auth")
 

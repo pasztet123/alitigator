@@ -484,28 +484,8 @@ def render_answer(payload: RendererPayload, *, compact: bool = False) -> str:
             "candidates_not_selected": "żaden kandydat nie spełnił kryteriów wyboru",
             "retrieval_error": "wyszukiwanie nie zakończyło się poprawnie",
         }.get(empty_reason, empty_reason)
-        sources.append(
-            "- Orzeczenia: wyszukiwanie wykonane; "
-            f"kandydaci: {candidate_count}; wybrane: {selected_count}."
-            + (f" Powód braku wyboru: {reason_text}." if reason_text else "")
-        )
-        if "corpus_count" in payload.judgment_lane_outcome:
-            corpus_count = int(payload.judgment_lane_outcome.get("corpus_count") or 0)
-            indexed_count = int(payload.judgment_lane_outcome.get("indexed_count") or 0)
-            filtered_count = int(payload.judgment_lane_outcome.get("filtered_count") or 0)
-            root_cause = str(payload.judgment_lane_outcome.get("zero_candidates_root_cause") or "")
-            root_cause_text = {
-                "judgment_corpus_not_indexed_in_active_backend": "plik korpusu nie został zindeksowany w aktywnym backendzie",
-                "active_backend_has_no_judgment_corpus": "aktywny backend nie zawiera korpusu orzeczeń",
-                "no_issue_matching_judgment_candidates": "brak kandydatów odpowiadających temu zagadnieniu",
-                "judgment_candidates_failed_quality_filters": "kandydaci nie przeszli filtrów jakości",
-                "judgment_retrieval_error": "błąd wyszukiwania orzeczeń",
-            }.get(root_cause, root_cause)
-            sources.append(
-                "- Audit orzeczeń: "
-                f"korpus: {corpus_count}; zindeksowane: {indexed_count}; odrzucone przez filtry: {filtered_count}."
-                + (f" Diagnoza: {root_cause_text}." if root_cause_text else "")
-            )
+        if selected_count == 0:
+            sources.append("- Orzeczenia: nie znaleziono dostatecznie relewantnego orzeczenia dla tego zagadnienia.")
     risks = [f"- {claim.text}" for claim in payload.conditional_claims] or [
         "- Brak warunkowych twierdzeń wymagających dodatkowego faktu."
     ]

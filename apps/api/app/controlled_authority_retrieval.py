@@ -112,6 +112,7 @@ def retrieve_housing_authorities(
     candidate_counts = {"interpretation": 0, "judgment": 0}
     filtered_counts = {"interpretation": 0, "judgment": 0}
     selected_counts = {"interpretation": 0, "judgment": 0}
+    waterfalls: dict[str, list[dict[str, object]]] = {"interpretation": [], "judgment": []}
     seen: set[tuple[str, str, str]] = set()
 
     jobs: list[tuple[ControlledAuthorityIssue, str, int, str]] = []
@@ -147,7 +148,8 @@ def retrieve_housing_authorities(
                 continue
             candidate_counts[source_type] += len(candidates)
             for chunk in _hydrate_document_contexts(candidates, context_fetcher=context_fetcher):
-                selection = _select_candidate(chunk, issue)
+                selection, waterfall = _select_candidate_with_trace(chunk, issue)
+                waterfalls[source_type].append(waterfall)
                 if selection is None:
                     filtered_counts[source_type] += 1
                     continue
@@ -179,6 +181,18 @@ def retrieve_housing_authorities(
         "outcome": "no_high_quality_authorities" if not cards else "high_quality_authorities_found",
         "errors": errors,
         "judgment_lane": judgment_audit,
+        "interpretation_lane": {
+            "executed": True,
+            "candidates_before_filters": candidate_counts["interpretation"],
+            "candidates_after_filters": candidate_counts["interpretation"] - filtered_counts["interpretation"],
+            "selected_count": selected_counts["interpretation"],
+            "candidate_waterfall": waterfalls["interpretation"],
+        },
+        "judgment_filter_waterfall": waterfalls["judgment"],
+        "interpretation_lane_executed": True,
+        "interpretation_candidates_before_filters_recorded": True,
+        "interpretation_candidates_after_filters_recorded": True,
+        "interpretation_selected_count_recorded": True,
         "judgment_lane_executed": True,
         "judgment_candidate_count_recorded": True,
         "judgment_selected_count_recorded": True,
@@ -309,6 +323,41 @@ def _select_candidate(
             for claim_id in issue.claim_ids
         ],
     }
+
+
+def _select_candidate_with_trace(
+    chunk: RagChunk, issue: ControlledAuthorityIssue,
+) -> tuple[dict[str, object] | None, dict[str, object]]:
+    """Keep every quality decision observable; unknown metadata is not mismatch."""
+    text = _source_text(chunk)
+    transaction_type, event_type = _classify_transaction(text)
+    holding, _, holding_section = _extract_complete_holding(chunk)
+    scores = {
+        "provision": _provision_match_score(text, issue.required_provision),
+        "issue": _issue_match_score(text, issue),
+        "material_fact": _material_fact_match_score(text, issue),
+        "holding": _holding_relevance_score(holding or "", issue),
+    }
+    metadata = {
+        name: "match" if value else "unknown"
+        for name, value in {
+            "signature": chunk.signature, "authority": chunk.authority,
+            "published_date": chunk.published_date, "legal_provisions": chunk.legal_provisions,
+            "source_subtype": chunk.source_subtype, "source_url": chunk.source_url,
+            "full_text": chunk.chunk_text,
+        }.items()
+    }
+    thresholds = {"provision": 1.0, "issue": .34, "material_fact": .34, "holding": .5}
+    rejection = ""
+    if _is_wrong_neighbor(transaction_type, event_type, issue): rejection = "wrong_neighbor"
+    elif holding is None or not holding_section: rejection = "missing_holding"
+    else:
+        rejection = next((key for key, threshold in thresholds.items() if scores[key] < threshold), "")
+    trace = {"document_id": chunk.document_id, "source_type": chunk.source_type,
+             "scores": scores, "thresholds": thresholds, "metadata": metadata,
+             "first_rejection_reason": rejection or None,
+             "result": "selected" if not rejection else "rejected"}
+    return (_select_candidate(chunk, issue) if not rejection else None), trace
 
 
 def _source_text(chunk: RagChunk) -> str:
@@ -519,9 +568,9 @@ def audit_judgment_corpus(
         "selected_count": selected_count,
         "filtered_count": filtered_count,
         "empty_result_reason": empty_reason,
-        "corpus_count": corpus_count,
+        "local_source_document_count": corpus_count,
         "corpus_available": corpus_available,
-        "indexed_count": indexed_count,
+        "backend_document_count": indexed_count,
         "index_count_error": index_error,
         "zero_candidates_root_cause": root_cause,
     }

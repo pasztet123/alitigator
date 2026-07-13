@@ -235,6 +235,26 @@ class HousingReliefPipelineTests(unittest.TestCase):
             self.assertNotIn(forbidden, result.answer)
         self.assertLess(result.render_validation.thesis_analysis_duplicate_ratio, 0.35)
 
+    def test_authority_holding_may_cite_neighbouring_provision(self) -> None:
+        result = run_housing_relief_pipeline(
+            HOUSING_RELIEF_BENCHMARK_QUERY,
+            authority_cards=(
+                {
+                    "source_type": "interpretation",
+                    "label": "0115-KDIT3.4011.123.2026.1.AK",
+                    "holding": (
+                        "Organ wyjaśnił również zastosowanie art. 21 ust. 25 pkt 1 "
+                        "ustawy PIT w indywidualnym stanie faktycznym."
+                    ),
+                    "source_url": "https://example.test/interpretation",
+                },
+            ),
+        )
+
+        self.assertTrue(result.render_validation.passed)
+        self.assertEqual(result.render_validation.unknown_provision_ids, ())
+        self.assertIn("art. 21 ust. 25 pkt 1", result.answer)
+
     def test_authority_lane_statuses_distinguish_no_match_from_timeout(self) -> None:
         completed = run_housing_relief_pipeline(
             HOUSING_RELIEF_BENCHMARK_QUERY,

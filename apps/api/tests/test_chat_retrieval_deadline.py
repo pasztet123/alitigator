@@ -118,3 +118,33 @@ class ChatRetrievalDeadlineTests(unittest.IsolatedAsyncioTestCase):
             response.analysis_trace["authority_retrieval"]["interpretation_lane"]["selected_count"],
             1,
         )
+
+    async def test_housing_reply_survives_authority_card_render_failure(self) -> None:
+        outcome = {
+            "outcome": "high_quality_authorities_found",
+            "interpretation_lane": {"executed": True, "status": "completed", "selected_count": 1},
+            "judgment_lane": {"executed": True, "status": "completed", "selected_count": 0},
+        }
+        request = ChatRequest(
+            messages=[ChatMessage(role="user", content=HOUSING_RELIEF_BENCHMARK_QUERY)]
+        )
+        user = AuthenticatedUser(id="user", email=None, full_name=None)
+
+        from app.housing_relief_pipeline import run_housing_relief_pipeline as actual_pipeline
+
+        def fail_only_with_cards(*args, **kwargs):
+            if kwargs.get("authority_cards"):
+                raise RuntimeError("invalid authority card")
+            return actual_pipeline(*args, **kwargs)
+
+        with (
+            patch("app.main.ensure_profile"),
+            patch("app.main.is_chat_storage_available", return_value=False),
+            patch("app.main.is_model_gateway_configured", return_value=False),
+            patch("app.main.retrieve_housing_authorities", return_value=([{"label": "bad"}], outcome)),
+            patch("app.main.run_housing_relief_pipeline", side_effect=fail_only_with_cards),
+        ):
+            response = await chat(request, current_user=user)
+
+        self.assertIn("Teza", response.reply)
+        self.assertIn("Interpretacje: wyszukiwanie nie zostało ukończone", response.reply)

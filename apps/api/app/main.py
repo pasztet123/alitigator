@@ -123,7 +123,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.7"
+API_VERSION = "2.0.8"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -3528,11 +3528,39 @@ async def chat(
                 judgment_lane_outcome=dict(authority_outcome["judgment_lane"]),
             )
         except Exception as exc:
-            logger.exception("Housing-relief controlled pipeline failed")
-            raise HTTPException(
-                status_code=502,
-                detail="Kontrolowany pipeline ulgi mieszkaniowej nie ukończył analizy.",
-            ) from exc
+            # Authorities are secondary evidence.  A malformed or overly broad
+            # quoted holding must not suppress a deterministic calculation based
+            # on primary law.  Retry without cards, retain an explicit lane
+            # status in the answer and preserve the original failure in logs.
+            logger.exception(
+                "Housing-relief rendering with authority cards failed; retrying without cards trace=%s",
+                request_trace_id,
+            )
+            fallback_interpretation_lane = dict(authority_outcome["interpretation_lane"])
+            fallback_judgment_lane = dict(authority_outcome["judgment_lane"])
+            for lane in (fallback_interpretation_lane, fallback_judgment_lane):
+                lane["status"] = "completed_with_errors"
+                lane["selected_count"] = 0
+                lane["empty_result_reason"] = "authority_rendering_error"
+            try:
+                controlled_result = run_housing_relief_pipeline(
+                    effective_user_prompt,
+                    authority_cards=(),
+                    interpretation_lane_outcome=fallback_interpretation_lane,
+                    judgment_lane_outcome=fallback_judgment_lane,
+                )
+            except Exception as fallback_exc:
+                logger.exception(
+                    "Housing-relief controlled pipeline fallback failed trace=%s",
+                    request_trace_id,
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Kontrolowany pipeline ulgi mieszkaniowej nie ukończył analizy. "
+                        f"Trace diagnostyczny: {request_trace_id}."
+                    ),
+                ) from fallback_exc
         controlled_reply = controlled_result.answer
         persisted_assistant_message = None
         if model_configured:

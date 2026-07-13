@@ -527,7 +527,25 @@ def validate_rendered_answer(
     placeholders = len(PLACEHOLDER_RE.findall(answer))
     sources_text = answer.partition("\n\nŹródła\n")[2].partition("\n\nRyzyka i luki\n")[0]
     known_provisions = {item["display_reference"] for item in payload.provisions}
-    referenced = set(re.findall(r"art\.\s*[0-9a-z]+(?:\s+(?:ust\.|pkt|§)\s*[0-9a-z]+)*[^,\n.)]*", answer, re.I))
+    # A holding quoted in the Sources section can refer to a neighbouring
+    # provision from the authority's own reasoning.  That is evidence, not an
+    # application claim.  Primary-law validation must therefore cover the
+    # thesis, analysis and risks, while authority quotations remain subject to
+    # their separate binding/provenance checks below.
+    source_start = answer.find("\n\nŹródła\n")
+    source_end = answer.find("\n\nRyzyka i luki\n", source_start) if source_start >= 0 else -1
+    answer_for_primary_law_validation = (
+        answer[:source_start] + answer[source_end:]
+        if source_start >= 0 and source_end >= 0
+        else answer
+    )
+    referenced = set(
+        re.findall(
+            r"art\.\s*[0-9a-z]+(?:\s+(?:ust\.|pkt|§)\s*[0-9a-z]+)*[^,\n.)]*",
+            answer_for_primary_law_validation,
+            re.I,
+        )
+    )
     unknown = tuple(sorted(
         item.strip()
         for item in referenced

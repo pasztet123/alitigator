@@ -123,7 +123,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.5"
+API_VERSION = "2.0.6"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -304,6 +304,10 @@ def schedule_legal_rag_v2_shadow(question: str) -> None:
 CHAT_REQUEST_DEADLINE_SECONDS = min(
     180.0,
     max(30.0, float(os.getenv("ALITIGATOR_CHAT_REQUEST_DEADLINE_SECONDS", "120"))),
+)
+RETRIEVAL_STAGE_TIMEOUT_SECONDS = min(
+    75.0,
+    max(20.0, float(os.getenv("ALITIGATOR_RETRIEVAL_STAGE_TIMEOUT_SECONDS", "45"))),
 )
 
 SYSTEM_PROMPT = """
@@ -3474,7 +3478,43 @@ async def chat(
         )
 
     if can_run_housing_relief_pipeline(effective_user_prompt):
-        authority_cards, authority_outcome = retrieve_housing_authorities(effective_user_prompt)
+        authority_timeout = min(
+            RETRIEVAL_STAGE_TIMEOUT_SECONDS,
+            max(5.0, remaining_request_seconds(reserve_seconds=20.0)),
+        )
+        try:
+            authority_cards, authority_outcome = await asyncio.wait_for(
+                asyncio.to_thread(retrieve_housing_authorities, effective_user_prompt),
+                timeout=authority_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Housing authority retrieval exceeded its request budget trace=%s timeout_seconds=%.1f",
+                request_trace_id,
+                authority_timeout,
+            )
+            authority_cards = []
+            authority_outcome = {
+                "authority_lane_executed": True,
+                "outcome": "retrieval_deadline_exceeded",
+                "errors": ["retrieval_deadline_exceeded"],
+                "candidate_counts": {"interpretation": 0, "judgment": 0},
+                "filtered_counts": {"interpretation": 0, "judgment": 0},
+                "selected_counts": {"interpretation": 0, "judgment": 0},
+                "interpretation_lane": {
+                    "executed": True,
+                    "candidates_before_filters": 0,
+                    "candidates_after_filters": 0,
+                    "selected_count": 0,
+                    "candidate_waterfall": [],
+                },
+                "judgment_lane": {
+                    "candidate_count": 0,
+                    "selected_count": 0,
+                    "filtered_count": 0,
+                    "zero_candidates_root_cause": "request_deadline_exceeded",
+                },
+            }
         try:
             controlled_result = run_housing_relief_pipeline(
                 effective_user_prompt,
@@ -3587,27 +3627,55 @@ async def chat(
     )
     retrieval_mode = get_legal_retrieval_mode()
     hybrid_result: Optional[HybridAuthorityResult] = None
+    retrieval_timeout = min(
+        RETRIEVAL_STAGE_TIMEOUT_SECONDS,
+        max(5.0, remaining_request_seconds(reserve_seconds=20.0)),
+    )
     if retrieval_mode == "hybrid_authority":
         try:
-            hybrid_result = run_hybrid_authority_retrieval(
-                effective_user_prompt,
-                include_interpretations=include_interpretations,
-                include_judgments=include_judgments,
-                clarifier_enabled=clarifier_enabled_from_env(),
+            hybrid_result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    run_hybrid_authority_retrieval,
+                    effective_user_prompt,
+                    include_interpretations=include_interpretations,
+                    include_judgments=include_judgments,
+                    clarifier_enabled=clarifier_enabled_from_env(),
+                ),
+                timeout=retrieval_timeout,
             )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Hybrid retrieval exceeded its request budget trace=%s timeout_seconds=%.1f",
+                request_trace_id,
+                retrieval_timeout,
+            )
+            retrieved_chunks = []
         except Exception as exc:
             logger.exception("Hybrid authority retrieval failed")
             raise HTTPException(
                 status_code=502,
                 detail="Eksperymentalny hybrid authority retrieval nie ukończył analizy.",
             ) from exc
-        retrieved_chunks = list(hybrid_result.selected_chunks)
+        else:
+            retrieved_chunks = list(hybrid_result.selected_chunks)
     else:
-        retrieved_chunks = search_chat_chunks(
-            effective_user_prompt,
-            include_interpretations=include_interpretations,
-            include_judgments=include_judgments,
-        )
+        try:
+            retrieved_chunks = await asyncio.wait_for(
+                asyncio.to_thread(
+                    search_chat_chunks,
+                    effective_user_prompt,
+                    include_interpretations=include_interpretations,
+                    include_judgments=include_judgments,
+                ),
+                timeout=retrieval_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Baseline retrieval exceeded its request budget trace=%s timeout_seconds=%.1f",
+                request_trace_id,
+                retrieval_timeout,
+            )
+            retrieved_chunks = []
     retrieved_chunks = add_primary_source_fallback_chunks(effective_user_prompt, retrieved_chunks)
     if query_mentions_ksef(effective_user_prompt):
         has_current_ksef_source = any(

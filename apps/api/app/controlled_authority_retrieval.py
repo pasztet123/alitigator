@@ -117,11 +117,12 @@ def retrieve_housing_authorities(
 
     jobs: list[tuple[ControlledAuthorityIssue, str, int, str]] = []
     for issue in HOUSING_AUTHORITY_ISSUES:
-        authority_query = _issue_query(query, issue)
-        # Candidate generation is intentionally recall-first.  A long factual
-        # query must never be the sole chance to surface an authority indexed
-        # chiefly by its provision or signature.
-        for source_type, limit in (("interpretation", 12), ("judgment", 12)):
+        # Use the compact, provision-anchored issue query as the single recall
+        # query.  The former pair of broad factual and provision-first queries
+        # doubled expensive MySQL work without improving the later factual
+        # selection stage, which already scores the full document text.
+        authority_query = issue.query_suffix
+        for source_type, limit in (("interpretation", 8), ("judgment", 6)):
             queries.append(
                 {
                     "issue_id": issue.issue_id,
@@ -131,10 +132,10 @@ def retrieve_housing_authorities(
                     "required_provision": issue.required_provision,
                     "transaction_type": issue.transaction_type,
                     "event_type": issue.event_type,
+                    "query_variant": "provision_anchored",
                 }
             )
             jobs.append((issue, source_type, limit, authority_query))
-            jobs.append((issue, source_type, limit, issue.query_suffix))
 
     # Search each issue-source pair independently.  Parallel reads keep the
     # stricter retrieval design from multiplying user-visible latency.

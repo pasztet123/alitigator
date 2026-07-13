@@ -67,8 +67,8 @@ class ControlledHousingAuthorityRetrievalTests(unittest.TestCase):
             context_fetcher=lambda document_ids, *, seed_chunks: [],
         )
 
-        # Each issue/source lane uses both factual and provision-first recall.
-        self.assertEqual(len(calls), 16)
+        # Each issue/source lane makes one compact provision-anchored query.
+        self.assertEqual(len(calls), 8)
         issued_queries = outcome["authority_queries"]
         self.assertTrue(outcome["authority_queries_per_issue"])
         self.assertFalse(outcome["generic_housing_relief_pool_reused_for_all_claims"])

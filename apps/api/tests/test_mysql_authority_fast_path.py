@@ -9,8 +9,17 @@ from app.mysql_rag import (
     authority_citation_targets,
     authority_metadata_citation_patterns,
     fetch_candidate_rows_mysql,
+    fetch_statute_rows_by_targets_mysql,
+    select_wht_primary_bundle,
+    statute_target_metadata_patterns,
 )
-from app.rag import extract_normalized_provision_references
+from app.rag import (
+    LegalRetrievalAxis,
+    RagChunk,
+    build_legal_source_plan,
+    chunk_has_substantive_axis_preferred_target,
+    extract_normalized_provision_references,
+)
 
 
 def _row(*, chunk_id: str = "683317:42", document_id: str = "683317") -> dict[str, object]:
@@ -22,6 +31,17 @@ def _row(*, chunk_id: str = "683317:42", document_id: str = "683317") -> dict[st
 
 
 class MysqlAuthorityFastPathTests(unittest.TestCase):
+    def test_polish_german_inflection_routes_to_treaty_primary_law(self) -> None:
+        plan = build_legal_source_plan(
+            "Polska spółka wypłaca odsetki niemieckiej GmbH; "
+            "oceń umowę polsko-niemiecką oraz podatek u źródła."
+        )
+
+        self.assertIn(("CIT", "11"), plan.statute_targets)
+        self.assertTrue(
+            any(axis.axis_id == "poland_germany_treaty" for axis in plan.axes)
+        )
+
     def test_extracts_exact_citation_only_for_authority_scopes(self) -> None:
         query = "art. 21 ust. 30a ustawy PIT spłata kredytu"
         self.assertEqual(
@@ -103,6 +123,110 @@ class MysqlAuthorityFastPathTests(unittest.TestCase):
         sql_calls = [str(call.args[0]) for call in cursor.execute.call_args_list]
         self.assertEqual(rows[0]["document_id"], "historical")
         self.assertEqual(sum("MATCH(c.search_text" in sql for sql in sql_calls), 1)
+
+    def test_statute_lookup_uses_substantive_chunks_and_both_metadata_forms(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchall.return_value = []
+        connection = MagicMock()
+        connection.cursor.return_value.__enter__.return_value = cursor
+
+        with patch("app.mysql_rag.mysql_connection", return_value=nullcontext(connection)), patch(
+            "app.mysql_rag.get_mysql_target", return_value=("documents", "chunks")
+        ):
+            rows = fetch_statute_rows_by_targets_mysql([("CIT", "26")])
+
+        self.assertEqual(rows, [])
+        self.assertIn('%"art. 26"%', statute_target_metadata_patterns("26"))
+        self.assertIn("%art. 26-%", statute_target_metadata_patterns("26"))
+        statement = next(
+            str(call.args[0])
+            for call in cursor.execute.call_args_list
+            if "FROM `chunks`" in str(call.args[0])
+        )
+        self.assertIn("CHAR_LENGTH(TRIM(c.chunk_text)) >= 40", statement)
+        self.assertNotIn("c.chunk_index = 0", statement)
+
+    def test_heading_does_not_count_as_substantive_primary_law(self) -> None:
+        axis = LegalRetrievalAxis(
+            axis_id="wht_interest",
+            label="WHT",
+            query="WHT",
+            source_types={"statute"},
+            tax_domains={"CIT"},
+            preferred_targets=(("CIT", "21"),),
+        )
+        common = {
+            "document_id": "cit-21",
+            "chunk_index": 0,
+            "score": 1.0,
+            "subject": "O podatku dochodowym od osób prawnych - art. 21",
+            "signature": None,
+            "published_date": "2026-01-01",
+            "source_url": None,
+            "category": None,
+            "source_type": "statute",
+            "legal_provisions": ["art. 21"],
+        }
+        heading = RagChunk(chunk_id="cit-21:0", chunk_text="art. 21", **common)
+        rule = RagChunk(
+            chunk_id="cit-21:2",
+            chunk_text=(
+                "Art. 21 ust. 1 pkt 1: odsetki oraz należności licencyjne "
+                "podlegają zryczałtowanemu podatkowi dochodowemu."
+            ),
+            **common,
+        )
+
+        self.assertFalse(chunk_has_substantive_axis_preferred_target(axis, heading))
+        self.assertTrue(chunk_has_substantive_axis_preferred_target(axis, rule))
+
+    def test_wht_bundle_keeps_separate_controlling_statute_units(self) -> None:
+        def chunk(chunk_id: str, subject: str, text: str) -> RagChunk:
+            return RagChunk(
+                chunk_id=chunk_id,
+                document_id=chunk_id.split(":")[0],
+                chunk_index=0,
+                chunk_text=text,
+                score=1.0,
+                subject=subject,
+                signature=None,
+                published_date="2026-01-01",
+                source_url=None,
+                category=None,
+                source_type="statute",
+                legal_provisions=[],
+            )
+
+        cit = "O podatku dochodowym od osób prawnych - art. "
+        vat = "O podatku od towarów i usług - art. "
+        chunks = [
+            chunk("cit21-1", f"{cit}21", "art. 21 ust. 1 pkt 1 Odsetki i należności licencyjne."),
+            chunk("cit21-2a", f"{cit}21", "art. 21 ust. 1 pkt 2a Usługi zarządzania i kontroli."),
+            chunk("cit26-2e", f"{cit}26", "art. 26 ust. 2e Próg 2 000 000 zł."),
+            chunk("cit26-7a", f"{cit}26", "art. 26 ust. 7a Art. 26. 7a. Przepisu ust. 2e nie stosuje się."),
+            chunk("cit26b", f"{cit}26b", "art. 26b ust. 1 Opinia o stosowaniu preferencji."),
+            chunk("cit28b", f"{cit}28b", "art. 28b ust. 1 Zwrot podatku pobranego zgodnie z art. 26 ust. 2e."),
+            chunk("upo11", "UPO Polska - Niemcy - art. 11", "Art. 11 Odsetki."),
+            chunk("upo12", "UPO Polska - Niemcy - art. 12", "Art. 12 Należności licencyjne."),
+            chunk("upo7", "UPO Polska - Niemcy - art. 7", "Art. 7 Zyski przedsiębiorstw."),
+            chunk("vat28b", f"{vat}28b", "art. 28b ust. 1 Miejsce świadczenia usług."),
+            chunk("vat17", f"{vat}17", "art. 17 ust. 1 pkt 4 Import usług."),
+            chunk("vat43", f"{vat}43", "art. 43 ust. 1 pkt 38 Usługi udzielania pożyczek."),
+        ]
+        query = (
+            "Niemiecka GmbH otrzymuje odsetki, licencje i usługi zarządzania; "
+            "WHT, 2 000 000 zł, UPO polsko-niemiecka i VAT."
+        )
+
+        selected = select_wht_primary_bundle(chunks, query)
+
+        self.assertEqual(
+            [item.chunk_id for item in selected[:12]],
+            [
+                "cit21-1", "cit21-2a", "cit26-2e", "cit26-7a", "cit26b", "cit28b",
+                "upo11", "upo12", "upo7", "vat28b", "vat17", "vat43",
+            ],
+        )
 
 
 if __name__ == "__main__":

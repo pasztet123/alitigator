@@ -3017,6 +3017,8 @@ def build_wht_pay_and_refund_service_statute_targets(query: str) -> list[tuple[s
         ("CIT", "21"),
         ("CIT", "22"),
         ("CIT", "26"),
+        ("CIT", "26b"),
+        ("CIT", "28b"),
         ("CIT", "22c"),
         ("CIT", "22a"),
     ]
@@ -3026,6 +3028,10 @@ def build_wht_pay_and_refund_service_statute_targets(query: str) -> list[tuple[s
         preferred_targets.extend([("CIT", "21"), ("CIT", "26")])
     if re.search(r"\b(zarządz\w*|zarzadz\w*|usług\w* zarządz\w*|uslug\w* zarzadz\w*|doradcz\w*)\b", normalized):
         preferred_targets.extend([("CIT", "21"), ("CIT", "26")])
+    if re.search(r"\bvat\b|podatek od towar", normalized):
+        # Cross-border B2B services are a separate VAT lane.  They must not be
+        # inferred from the WHT rules merely because the recipient is the same.
+        preferred_targets.extend([("VAT", "28b"), ("VAT", "17"), ("VAT", "43"), ("VAT", "86")])
 
     deduped_targets: list[tuple[str, str]] = []
     seen_targets: set[tuple[str, str]] = set()
@@ -3301,7 +3307,10 @@ def query_targets_poland_spain_treaty(query: str) -> bool:
 
 def query_targets_poland_germany_treaty(query: str) -> bool:
     normalized = normalize_whitespace(query or "").lower()
-    has_germany_marker = bool(re.search(r"\b(niemc\w*|germany|german|niemcy)\b", normalized))
+    # Polish declension uses the stem "niemie-" (e.g. "niemieckiej GmbH"),
+    # not only "niemc-".  Missing that form silently skipped the dedicated
+    # Poland–Germany treaty retrieval lane in otherwise explicit WHT queries.
+    has_germany_marker = bool(re.search(r"\b(niemc\w*|niemie\w*|germany|german|niemcy)\b", normalized))
     has_treaty_marker = bool(
         re.search(
             r"\b(upo|umow\w* o unikaniu podwójnego opodatkowania|"
@@ -3381,16 +3390,18 @@ def build_poland_germany_treaty_statute_targets(query: str) -> list[tuple[str, s
         return []
 
     normalized = normalize_whitespace(query or "").lower()
+    preferred_targets: list[tuple[str, str]] = []
     if re.search(r"\b(dywidend\w*|dividend\w*|udział\w*)\b", normalized):
-        preferred_targets: list[tuple[str, str]] = [("CIT", "10"), ("CIT", "26"), ("CIT", "7"), ("CIT", "23"), ("CIT", "4")]
-    elif re.search(r"\b(odset(?:k|ek|e?k)\w*|interest\w*)\b", normalized):
-        preferred_targets = [("CIT", "11"), ("CIT", "26"), ("CIT", "7"), ("CIT", "23"), ("CIT", "4")]
-    elif re.search(r"\b(należno\w* licencyjn\w*|nalezn\w* licencyjn\w*|royalt(?:y|ies))\b", normalized):
-        preferred_targets = [("CIT", "12"), ("CIT", "26"), ("CIT", "7"), ("CIT", "23"), ("CIT", "4")]
-    elif re.search(r"\b(zakład\w*|zaklad\w*|business profits|stał\w* miejsce)\b", normalized):
-        preferred_targets = [("CIT", "7"), ("CIT", "5"), ("CIT", "4"), ("CIT", "10"), ("CIT", "11"), ("CIT", "12"), ("CIT", "26")]
-    else:
-        preferred_targets = [("CIT", "7"), ("CIT", "10"), ("CIT", "11"), ("CIT", "12"), ("CIT", "26"), ("CIT", "4"), ("CIT", "23")]
+        preferred_targets.append(("CIT", "10"))
+    if re.search(r"\b(odset(?:k|ek|e?k)\w*|interest\w*)\b", normalized):
+        preferred_targets.append(("CIT", "11"))
+    if re.search(r"\b(należno\w* licencyjn\w*|nalezn\w* licencyjn\w*|royalt(?:y|ies))\b", normalized):
+        preferred_targets.append(("CIT", "12"))
+    if re.search(r"\b(zakład\w*|zaklad\w*|business profits|stał\w* miejsce|zarządz\w*|zarzadz\w*)\b", normalized):
+        preferred_targets.extend([("CIT", "7"), ("CIT", "5")])
+    if not preferred_targets:
+        preferred_targets.extend([("CIT", "7"), ("CIT", "10"), ("CIT", "11"), ("CIT", "12")])
+    preferred_targets.extend([("CIT", "26"), ("CIT", "4"), ("CIT", "23")])
 
     deduped_targets: list[tuple[str, str]] = []
     seen_targets: set[tuple[str, str]] = set()
@@ -7563,6 +7574,19 @@ def chunk_has_axis_preferred_target(axis: LegalRetrievalAxis, chunk: RagChunk) -
     return False
 
 
+def chunk_has_substantive_axis_preferred_target(
+    axis: LegalRetrievalAxis,
+    chunk: RagChunk,
+) -> bool:
+    """Require an operative unit, rather than a split-statute heading, for fallback coverage."""
+    if not chunk_has_axis_preferred_target(axis, chunk):
+        return False
+    text = normalize_whitespace(chunk.chunk_text or "")
+    if len(text) < 80:
+        return False
+    return not bool(re.fullmatch(r"art\.\s*\d+[a-z]?(?:\s*\.)?", text, re.IGNORECASE))
+
+
 def chunk_is_direct_axis_source(axis: LegalRetrievalAxis, chunk: RagChunk) -> bool:
     subject = normalize_whitespace(chunk.subject or "").lower()
     document_id = str(chunk.document_id or "")
@@ -8167,7 +8191,7 @@ def add_primary_source_fallback_chunks(query: str, chunks: list[RagChunk]) -> li
             target
             for target in axis.preferred_targets
             if not any(
-                chunk_has_axis_preferred_target(
+                chunk_has_substantive_axis_preferred_target(
                     replace(axis, source_types={"statute"}, preferred_targets=(target,)),
                     chunk,
                 )

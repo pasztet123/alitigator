@@ -672,6 +672,168 @@ def authority_metadata_citation_patterns(citations: Iterable[str]) -> list[str]:
     return patterns
 
 
+def statute_target_metadata_patterns(article_key: str) -> list[str]:
+    """Match both plain and hierarchy-style provision declarations."""
+    normalized = str(article_key or "").strip().lower()
+    if not normalized:
+        return []
+    return list(
+        dict.fromkeys(
+            (
+                f'%"art. {normalized}"%',
+                f"%art. {normalized}-%",
+                f"%-art. {normalized}%",
+            )
+        )
+    )
+
+
+def prioritize_wht_primary_chunks(chunks: list[RagChunk], query: str) -> list[RagChunk]:
+    """Keep the operative WHT units ahead of article headings and foreign UPO noise."""
+    if not query_targets_wht_pay_and_refund_services(query):
+        return chunks
+
+    wants_germany_treaty = query_targets_poland_germany_treaty(query)
+
+    def sort_key(chunk: RagChunk) -> tuple[int, int, str, int, str]:
+        subject = str(chunk.subject or "").lower()
+        if wants_germany_treaty and subject.startswith("upo polska") and "niemcy" not in subject:
+            return (0, 0, subject, -chunk.chunk_index, chunk.document_id)
+
+        unit = re.sub(r"\s+", " ", chunk.chunk_text).lower()
+        text = f"{subject} {unit}"
+        score = 0
+        if "o podatku dochodowym od osób prawnych" in subject:
+            score += 20
+        if re.match(r"art\.\s*26\s+ust\.\s*2e\b", unit):
+            score += 120
+        if re.match(r"art\.\s*21\s+ust\.\s*1\s+pkt\s*1\b", unit):
+            score += 115
+        if re.match(r"art\.\s*21\s+ust\.\s*1\s+pkt\s*2a\b", unit):
+            score += 110
+        if re.match(r"art\.\s*21\s+ust\.\s*3\b", unit):
+            score += 105
+        if "rzeczywistym właścicielem" in text:
+            score += 100
+        if "należytą staranność" in text or "nalezyta starannosc" in text:
+            score += 98
+        if re.match(r"art\.\s*26\s+ust\.\s*7a\b", unit):
+            score += 95
+        if "opinii o stosowaniu preferencji" in text or "art. 26b" in text:
+            score += 90
+        if "art. 28b" in text and "zwrot" in text:
+            score += 88
+        if subject.startswith("upo polska - niemcy") and re.search(r"art\.\s*(?:7|11|12)\b", text):
+            score += 85
+        if "art. 28b" in text and "towarów i usług" in subject:
+            score += 80
+        if "art. 17" in text and "towarów i usług" in subject:
+            score += 75
+        if "art. 43" in text and "towarów i usług" in subject:
+            score += 70
+        if "art. 22c" in text:
+            score += 65
+        return (score, len(chunk.chunk_text), subject, -chunk.chunk_index, chunk.document_id)
+
+    return sorted(chunks, key=sort_key, reverse=True)
+
+
+def select_wht_primary_bundle(chunks: list[RagChunk], query: str) -> list[RagChunk]:
+    """Place one controlling unit for every WHT/VAT/treaty issue before fillers."""
+    if not query_targets_wht_pay_and_refund_services(query):
+        return chunks
+
+    def normalized(chunk: RagChunk) -> tuple[str, str]:
+        return (
+            str(chunk.subject or "").lower(),
+            re.sub(r"\s+", " ", chunk.chunk_text).lower(),
+        )
+
+    def cit(pattern: str) -> Any:
+        return lambda chunk: (
+            "dochodowym od osób prawnych" in normalized(chunk)[0]
+            and bool(re.match(pattern, normalized(chunk)[1]))
+        )
+
+    requirements: list[Any] = [
+        cit(r"art\.\s*21\s+ust\.\s*1\s+pkt\s*1\b"),
+        cit(r"art\.\s*21\s+ust\.\s*1\s+pkt\s*2a\b"),
+        cit(r"art\.\s*21\s+ust\.\s*3\b(?!\s+pkt)"),
+        cit(r"art\.\s*21\s+ust\.\s*3\s+pkt\s*2\b"),
+        cit(r"art\.\s*21\s+ust\.\s*3\s+pkt\s*3\s+lit\.\s*b\b"),
+        cit(r"art\.\s*21\s+ust\.\s*3\s+pkt\s*4\b"),
+        cit(r"art\.\s*21\s+ust\.\s*3b\b"),
+        cit(r"art\.\s*21\s+ust\.\s*3c\b"),
+        cit(r"art\.\s*21\s+ust\.\s*4\b"),
+        cit(r"art\.\s*26\s+ust\.\s*2e\b"),
+        cit(r"art\.\s*26\s+ust\.\s*7a\b(?!\s+pkt)"),
+        cit(r"art\.\s*26b\s+ust\.\s*1\b"),
+        cit(r"art\.\s*28b\s+ust\.\s*1\b"),
+    ]
+    if query_targets_poland_germany_treaty(query):
+        requirements.extend(
+            [
+                lambda chunk: "upo polska - niemcy - art. 11" in normalized(chunk)[0],
+                lambda chunk: "upo polska - niemcy - art. 12" in normalized(chunk)[0],
+                lambda chunk: "upo polska - niemcy - art. 7" in normalized(chunk)[0],
+            ]
+        )
+    query_text = query.lower()
+    if "vat" in query_text or "podatek od towar" in query_text:
+        requirements.extend(
+            [
+                lambda chunk: (
+                    "towarów i usług" in normalized(chunk)[0]
+                    and bool(re.match(r"art\.\s*28b\s+ust\.\s*1\b", normalized(chunk)[1]))
+                ),
+                lambda chunk: (
+                    "towarów i usług" in normalized(chunk)[0]
+                    and bool(re.match(r"art\.\s*17\s+ust\.\s*1\s+pkt\s*4\b", normalized(chunk)[1]))
+                ),
+                lambda chunk: (
+                    "towarów i usług" in normalized(chunk)[0]
+                    and bool(re.match(r"art\.\s*43\s+ust\.\s*1\s+pkt\s*38\b", normalized(chunk)[1]))
+                ),
+            ]
+        )
+
+    selected: list[RagChunk] = []
+    selected_ids: set[str] = set()
+    for predicate in requirements:
+        candidate = next((chunk for chunk in chunks if chunk.chunk_id not in selected_ids and predicate(chunk)), None)
+        if candidate is None:
+            continue
+        selected.append(candidate)
+        selected_ids.add(candidate.chunk_id)
+    selected.extend(chunk for chunk in chunks if chunk.chunk_id not in selected_ids)
+    return selected
+
+
+def dedupe_wht_primary_statute_units(chunks: list[RagChunk], query: str) -> list[RagChunk]:
+    """Preserve distinct statutory units needed to answer a multi-part WHT case."""
+    if not query_targets_wht_pay_and_refund_services(query):
+        return dedupe_chunks_by_canonical_source(chunks)
+    deduped: list[RagChunk] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        key = (
+            f"statute-unit:{chunk.chunk_id}"
+            if str(chunk.source_type or "").lower() == "statute"
+            else chunk_canonical_source_id(chunk)
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(chunk)
+    return deduped
+
+
+def primary_statute_selection_key(chunk: RagChunk, query: str) -> str:
+    if query_targets_wht_pay_and_refund_services(query) and str(chunk.source_type or "").lower() == "statute":
+        return f"statute-unit:{chunk.chunk_id}"
+    return chunk_canonical_source_id(chunk)
+
+
 def _configure_search_statement_timeout(cursor: Any) -> None:
     """Bound MariaDB FULLTEXT fallbacks below the outer request deadline."""
     try:
@@ -866,13 +1028,25 @@ def fetch_statute_rows_by_targets_mysql(
 ) -> list[dict[str, Any]]:
     if not targets:
         return []
-    clauses = ["(UPPER(d.tax_domain) = %s AND d.legal_provisions_json LIKE %s)" for _ in targets]
+    clauses: list[str] = []
     values: list[Any] = []
     for domain, article_key in targets:
-        values.extend((domain.upper(), f'%\"art. {article_key}\"%'))
+        patterns = statute_target_metadata_patterns(article_key)
+        if not patterns:
+            continue
+        clauses.append(
+            "(UPPER(d.tax_domain) = %s AND ("
+            + " OR ".join("d.legal_provisions_json LIKE %s" for _ in patterns)
+            + "))"
+        )
+        values.append(domain.upper())
+        values.extend(patterns)
+    if not clauses:
+        return []
     documents_table, chunks_table = get_mysql_target()
     with mysql_connection() as connection:
         with connection.cursor() as cursor:
+            _configure_search_statement_timeout(cursor)
             cursor.execute(
                 f"""
                 SELECT
@@ -885,7 +1059,7 @@ def fetch_statute_rows_by_targets_mysql(
                 FROM `{chunks_table}` c
                 JOIN `{documents_table}` d ON d.document_id = c.document_id
                 WHERE d.source_type = 'statute'
-                  AND c.chunk_index = 0
+                  AND CHAR_LENGTH(TRIM(c.chunk_text)) >= 40
                   AND ({' OR '.join(clauses)})
                 ORDER BY d.published_date DESC, c.chunk_index ASC, c.chunk_id ASC
                 """,
@@ -945,9 +1119,11 @@ def retrieve_deterministic_statute_chunks_mysql(
         for row in rows
     ]
     ordered_chunks = order_chunks_by_statute_targets(ranked_chunks, list(source_plan.statute_targets))
+    ordered_chunks = prioritize_wht_primary_chunks(ordered_chunks, query)
+    ordered_chunks = select_wht_primary_bundle(ordered_chunks, query)
     return [
         annotate_chunk_evidence_role(chunk, "deterministic_primary_law")
-        for chunk in dedupe_chunks_by_canonical_source(ordered_chunks)
+        for chunk in dedupe_wht_primary_statute_units(ordered_chunks, query)
     ][:target_limit]
 
 
@@ -1384,6 +1560,14 @@ def search_chat_chunks_mysql(
         statute_limit = max(1, effective_limit - 1)
         interpretation_limit = 0
         judgment_limit = max(1, effective_limit - statute_limit)
+    elif query_targets_wht_pay_and_refund_services(query):
+        # A WHT case with pay-and-refund needs several distinct statutory units
+        # (charge, exemption, beneficial owner and art. 26 procedure).  The
+        # generic mixed-source allocation gave primary law one slot, which is
+        # often only an article heading in a split statute corpus.
+        statute_limit = min(22, max(20, effective_limit))
+        interpretation_limit = max(2, effective_limit // 2)
+        judgment_limit = max(1, effective_limit // 3)
     elif include_judgments:
         statute_limit = max(1, effective_limit // 4) if statute_domains else 1
         interpretation_limit = min(max(2, effective_limit // 2), max(effective_limit - statute_limit, 1))
@@ -1455,13 +1639,19 @@ def search_chat_chunks_mysql(
             enforce_query_domain=True,
             tax_domains=statute_domains,
         )
-        if statute_limit and not query_targets_ksef_foreign_sale(query)
+        if (
+            statute_limit
+            and not query_targets_ksef_foreign_sale(query)
+            and not query_targets_wht_pay_and_refund_services(query)
+        )
         else []
     )
     statutes = order_chunks_by_statute_targets(
-        dedupe_chunks_by_canonical_source([*deterministic_statutes, *statutes]),
+        dedupe_wht_primary_statute_units([*deterministic_statutes, *statutes], query),
         list(source_plan.statute_targets),
     )
+    statutes = prioritize_wht_primary_chunks(statutes, query)
+    statutes = select_wht_primary_bundle(statutes, query)
     direct_ksef_bundle_rows = fetch_rows_by_document_ids_mysql(
         KSEF_CURRENT_BUNDLE_DOCUMENT_IDS,
         source_type="statute",
@@ -1502,7 +1692,13 @@ def search_chat_chunks_mysql(
                 if target not in preferred_targets:
                     preferred_targets.append(target)
 
-    hinted_rows = fetch_statute_rows_by_targets_mysql(preferred_targets, limit=None if query_targets_ksef_current_law(query) else statute_limit) if statute_limit else []
+    hinted_rows = fetch_statute_rows_by_targets_mysql(
+        preferred_targets,
+        limit=None
+        if query_targets_ksef_current_law(query)
+        or query_targets_wht_pay_and_refund_services(query)
+        else statute_limit,
+    ) if statute_limit else []
     if direct_ksef_bundle_rows or direct_family_foundation_bundle_rows:
         hinted_rows = [*direct_ksef_bundle_rows, *direct_family_foundation_bundle_rows, *hinted_rows]
     hinted_statutes = (
@@ -1518,7 +1714,7 @@ def search_chat_chunks_mysql(
     merged_statutes: list[RagChunk] = []
     seen_statute_sources: set[str] = set()
     for chunk in statutes:
-        canonical_source_id = chunk_canonical_source_id(chunk)
+        canonical_source_id = primary_statute_selection_key(chunk, query)
         if canonical_source_id in seen_statute_sources:
             continue
         seen_statute_sources.add(canonical_source_id)
@@ -1537,7 +1733,7 @@ def search_chat_chunks_mysql(
     bundle_limit = min(bundle_cap, max(0, len(hinted_statutes)))
     bundle_statutes: list[RagChunk] = []
     for chunk in hinted_statutes:
-        canonical_source_id = chunk_canonical_source_id(chunk)
+        canonical_source_id = primary_statute_selection_key(chunk, query)
         if canonical_source_id in seen_statute_sources:
             continue
         seen_statute_sources.add(canonical_source_id)

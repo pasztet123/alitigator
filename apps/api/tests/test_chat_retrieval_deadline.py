@@ -160,6 +160,7 @@ class ChatRetrievalDeadlineTests(unittest.IsolatedAsyncioTestCase):
             patch("app.main.ensure_profile"),
             patch("app.main.is_chat_storage_available", return_value=False),
             patch("app.main.is_model_gateway_configured", return_value=False),
+            patch("app.main.get_legal_pipeline_mode", return_value="legacy"),
             patch("app.main.RETRIEVAL_STAGE_TIMEOUT_SECONDS", 0.01),
             patch("app.main.retrieve_housing_authorities", side_effect=slow_authority_retrieval),
         ):
@@ -243,6 +244,7 @@ class ChatRetrievalDeadlineTests(unittest.IsolatedAsyncioTestCase):
             patch("app.main.ensure_profile"),
             patch("app.main.is_chat_storage_available", return_value=False),
             patch("app.main.is_model_gateway_configured", return_value=False),
+            patch("app.main.get_legal_pipeline_mode", return_value="legacy"),
             patch("app.main.retrieve_housing_authorities", return_value=(cards, outcome)),
         ):
             response = await chat(request, current_user=user)
@@ -277,6 +279,7 @@ class ChatRetrievalDeadlineTests(unittest.IsolatedAsyncioTestCase):
             patch("app.main.ensure_profile"),
             patch("app.main.is_chat_storage_available", return_value=False),
             patch("app.main.is_model_gateway_configured", return_value=False),
+            patch("app.main.get_legal_pipeline_mode", return_value="legacy"),
             patch("app.main.retrieve_housing_authorities", return_value=([{"label": "bad"}], outcome)),
             patch("app.main.run_housing_relief_pipeline", side_effect=fail_only_with_cards),
         ):

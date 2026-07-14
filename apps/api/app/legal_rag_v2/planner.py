@@ -223,10 +223,15 @@ class LegacyFallbackPlanner:
         if legacy_questions:
             rules.append("legacy.heuristic_clarifier_questions")
 
+        # V2Schema trims string fields. Keep a full-question provenance span
+        # inside the non-whitespace bounds so its stored quote remains exactly
+        # equal to ``question[start:end]`` during deterministic validation.
+        full_span_start = len(question) - len(question.lstrip())
+        full_span_end = len(question.rstrip())
         full_span = SourceSpan(
-            start=0,
-            end=len(question),
-            quote=question,
+            start=full_span_start,
+            end=full_span_end,
+            quote=question[full_span_start:full_span_end],
             source_id="user_question",
         )
         inferred: list[Fact] = []

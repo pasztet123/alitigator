@@ -68,6 +68,25 @@ class FakePipeline:
 
 
 class LegalRagV2RoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_v2_is_the_safe_default_when_no_routing_variable_is_set(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(get_legal_pipeline_mode(), "legal_rag_v2")
+
+    async def test_fallback_plan_accepts_a_question_with_trailing_whitespace(self) -> None:
+        from app.legal_rag_v2.planner import LegacyFallbackPlanner
+
+        plan, _ = LegacyFallbackPlanner().plan(
+            "Podatnik sprzedaje lokal.\n",
+            reason="provider_unavailable",
+        )
+        for fact in plan.facts:
+            self.assertEqual(
+                fact.source_span.quote,
+                "Podatnik sprzedaje lokal.\n"[
+                    fact.source_span.start : fact.source_span.end
+                ],
+            )
+
     async def test_public_rag_mode_flag_maps_rag_v2_without_changing_legacy_alias(self) -> None:
         with patch.dict(os.environ, {"LEGAL_RAG_MODE": "rag_v2", "LEGAL_PIPELINE_MODE": "legacy"}):
             self.assertEqual(get_legal_pipeline_mode(), "legal_rag_v2")

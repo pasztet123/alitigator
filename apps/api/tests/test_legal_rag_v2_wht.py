@@ -54,6 +54,8 @@ class CrossborderWhtEnrichmentTests(unittest.TestCase):
         self.assertIn("wht_interest_pl_de_treaty", issue_ids)
         self.assertIn("wht_royalties_pl_de_treaty", issue_ids)
         self.assertIn("wht_services_pl_de_business_profits", issue_ids)
+        self.assertNotIn("wht_interest", issue_ids)
+        self.assertNotIn("poland_germany_treaty", issue_ids)
 
     def test_enrichment_creates_separate_treaty_vat_and_procedural_issues(self) -> None:
         enriched = enrich_crossborder_wht_plan(plan(), QUESTION)

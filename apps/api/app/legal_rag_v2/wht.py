@@ -49,8 +49,24 @@ def enrich_crossborder_wht_plan(
     if not is_poland_germany_wht_case(question):
         return plan
 
-    existing = {issue.issue_id for issue in plan.issues}
-    issues = list(plan.issues)
+    # The rule fallback emits broad WHT issues before this deterministic
+    # classifier runs. Keeping them alongside the issue-per-payment bundles
+    # doubles every primary/authority lane and can exhaust the request budget.
+    # The scoped bundles below fully replace those generic cross-border WHT
+    # questions, while unrelated issues remain intact.
+    replaced_generic_issue_ids = {
+        "wht_interest",
+        "wht_management_services",
+        "pay_and_refund",
+        "interest_royalties_exemption",
+        "beneficial_owner",
+        "poland_germany_treaty",
+    }
+    issues = [
+        issue for issue in plan.issues
+        if issue.issue_id not in replaced_generic_issue_ids
+    ]
+    existing = {issue.issue_id for issue in issues}
 
     def add(
         issue_id: str,

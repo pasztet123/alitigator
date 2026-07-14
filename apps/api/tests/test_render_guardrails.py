@@ -263,6 +263,14 @@ class ConditionalAnswerGuardrailTests(unittest.TestCase):
             diagnostics["after_sources_repair"]["sources_section_preview"],
         )
 
+    def test_user_facing_reply_has_no_diagnostic_trace_block(self) -> None:
+        reply = (
+            "Teza\nWniosek.\n\nAnaliza\nAnaliza.\n\n"
+            "Źródła\nart. 5 ust. 1 pkt 1.\n\nRyzyka i luki\nBrak."
+        )
+        self.assertNotIn("Dokładne oparcie w primary law", reply)
+        self.assertNotIn("Źródła zwrócone przez retrieval", reply)
+
     def test_final_validator_rejects_empty_legal_reference_slots(self) -> None:
         reply = (
             "Teza\nWniosek.\n\n"

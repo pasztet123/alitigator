@@ -60,6 +60,7 @@ from .schemas import (
     WriterSource,
 )
 from .trace import TraceWriter
+from .wht import WhtPayAndRefundCalculationEngine, enrich_crossborder_wht_plan
 
 
 PIPELINE_VERSION = "legal_rag_v2_1"
@@ -213,7 +214,7 @@ class LegalRagV2Pipeline:
         self.planner = planner
         self.retriever = retriever
         self.authority_extractor = authority_extractor
-        self.calculation_engine = calculation_engine or NoOpCalculationEngine()
+        self.calculation_engine = calculation_engine or WhtPayAndRefundCalculationEngine()
         self.config = config or LegalRagV2Config.from_env()
         self.trace_factory = trace_factory or (
             lambda run_id: TraceWriter(run_id, root=self.config.artifact_root)
@@ -303,7 +304,7 @@ class LegalRagV2Pipeline:
             force_fallback=force_planner_fallback,
         )
         timings["planner"] = _elapsed_ms(stage)
-        plan = planner_outcome.plan
+        plan = enrich_crossborder_wht_plan(planner_outcome.plan, question)
         trace.write_json("legal_research_plan.json", plan)
         trace.write_json("research_plan.json", plan)
         trace.write_json("clarification.json", plan.clarification)
@@ -346,7 +347,7 @@ class LegalRagV2Pipeline:
             )
             if augmented.fallback_trace.fallback_used:
                 planner_outcome = augmented
-                plan = augmented.plan
+                plan = enrich_crossborder_wht_plan(augmented.plan, question)
                 trace.write_json("legal_research_plan.json", plan)
                 trace.write_json("fallback_trace.json", augmented.fallback_trace)
                 trace.write_json("planner_fallback.json", augmented.fallback_trace)
@@ -1164,17 +1165,35 @@ def _build_evidence_bundles(
         authority_lane = authority_by_issue.get(issue.issue_id)
         if not authority_lane or not authority_lane.candidates:
             missing_sources.append("authority")
+        required_dependency_patterns = _required_wht_issue_dependency_patterns(issue.issue_id)
+        all_issue_provisions = (*controlling, *dependencies, *exceptions)
+        missing_dependencies = [
+            label
+            for label, pattern in required_dependency_patterns
+            if not any(re.search(pattern, item.citation, re.IGNORECASE) for item in all_issue_provisions)
+        ]
+        missing_sources.extend(f"required_primary:{item}" for item in missing_dependencies)
         retrieval_confidence = min(
             1.0,
             (0.65 if controlling else 0.0)
             + (0.25 if current_cards else 0.0)
             + (0.10 if dependencies or exceptions else 0.0),
         )
-        dependency_coverage = 1.0 if dependencies else (0.5 if controlling else 0.0)
+        dependency_coverage = (
+            round(
+                (len(required_dependency_patterns) - len(missing_dependencies))
+                / len(required_dependency_patterns),
+                2,
+            )
+            if required_dependency_patterns
+            else 1.0 if dependencies else (0.5 if controlling else 0.0)
+        )
         exception_coverage = 1.0 if exceptions else (0.5 if controlling else 0.0)
         coverage_status = (
             "complete"
-            if controlling and _all_active((*controlling, *dependencies, *exceptions))
+            if controlling
+            and not missing_dependencies
+            and _all_active((*controlling, *dependencies, *exceptions))
             else "partial" if controlling or current_cards else "missing"
         )
         bundles.append(
@@ -1200,6 +1219,31 @@ def _build_evidence_bundles(
             )
         )
     return bundles
+
+
+def _required_wht_issue_dependency_patterns(issue_id: str) -> tuple[tuple[str, str], ...]:
+    if issue_id == "wht_pay_and_refund_procedure":
+        return (
+            ("art_26_2e", r"art\.\s*26\s+ust\.\s*2e"),
+            ("art_26_2g", r"art\.\s*26\s+ust\.\s*2g"),
+            ("art_26_7a", r"art\.\s*26\s+ust\.\s*7a"),
+            ("art_26_7b", r"art\.\s*26\s+ust\.\s*7b"),
+            ("art_26_7c", r"art\.\s*26\s+ust\.\s*7c"),
+            ("art_26b", r"art\.\s*26b"),
+            ("art_28b", r"art\.\s*28b"),
+        )
+    if issue_id == "vat_interest_financial_service":
+        return (
+            ("vat_art_28b", r"art\.\s*28b"),
+            ("vat_art_17_1_4", r"art\.\s*17\s+ust\.\s*1\s+pkt\s*4"),
+            ("vat_financial_exemption", r"art\.\s*43\s+ust\.\s*1\s+pkt\s*38"),
+        )
+    if issue_id in {"vat_royalty_crossborder_service", "vat_management_crossborder_service"}:
+        return (
+            ("vat_art_28b", r"art\.\s*28b"),
+            ("vat_art_17_1_4", r"art\.\s*17\s+ust\.\s*1\s+pkt\s*4"),
+        )
+    return ()
 
 
 def _reference_specificity(reference: ProvisionReference) -> int:
@@ -1354,6 +1398,7 @@ def validate_claims(
         }
         for bundle in bundles
     }
+    bundle_by_issue = {item.issue_id: item for item in bundles}
     source_documents_by_issue = {
         bundle.issue_id: {
             item.document_id
@@ -1400,6 +1445,15 @@ def validate_claims(
             warnings.append(f"{claim.claim_id}:downgraded_for_missing_fact")
         if claim.claim_type == "calculation" and not claim.calculation_ids:
             claim_errors.append("numeric_claim_without_calculation")
+        bundle = bundle_by_issue.get(claim.issue_id)
+        if claim.status in {"approved", "conditional_missing_fact"} and bundle is not None:
+            missing_required = [
+                item for item in bundle.missing_sources
+                if item.startswith("required_primary:")
+            ]
+            if missing_required:
+                claim = claim.model_copy(update={"status": "blocked_incomplete_dependency_bundle"})
+                warnings.append(f"{claim.claim_id}:blocked_for_incomplete_issue_bundle")
         if claim_errors:
             errors.extend(f"{claim.claim_id}:{item}" for item in claim_errors)
             claim = claim.model_copy(update={"status": "blocked_invalid_provision"})

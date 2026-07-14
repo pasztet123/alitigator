@@ -193,6 +193,25 @@ class CorpusFtsBackend:
         values = raw if isinstance(raw, (list, tuple, set, frozenset)) else [raw]
         return sorted({str(value).upper() for value in values if str(value).strip()})
 
+    @staticmethod
+    def _domain_clause(
+        domains: list[str],
+        source_types: frozenset[str],
+        placeholder: str,
+    ) -> tuple[str, list[str]]:
+        """Keep tax treaties visible inside CIT/PIT issue lanes.
+
+        Treaty records are stored as statutes but carry the generic treaty tax
+        domain.  Filtering them out before reranking makes a PL-DE treaty lane
+        impossible even when the correct article is in the corpus.
+        """
+        if not domains:
+            return "", []
+        domain_filter = "UPPER(d.tax_domain) IN (" + ",".join(placeholder for _ in domains) + ")"
+        if "tax_treaty" in source_types:
+            return f"({domain_filter} OR LOWER(d.source_subtype) = 'tax_treaty')", domains
+        return domain_filter, domains
+
     def _search_sqlite(
         self,
         query: str,
@@ -221,9 +240,10 @@ class CorpusFtsBackend:
         if types:
             clauses.append("d.source_type IN (" + ",".join("?" for _ in types) + ")")
             values.extend(types)
-        if domains:
-            clauses.append("UPPER(d.tax_domain) IN (" + ",".join("?" for _ in domains) + ")")
-            values.extend(domains)
+        domain_clause, domain_values = self._domain_clause(domains, source_types, "?")
+        if domain_clause:
+            clauses.append(domain_clause)
+            values.extend(domain_values)
         values.append(limit)
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
@@ -238,9 +258,9 @@ class CorpusFtsBackend:
                 if types:
                     exact_clauses.append("d.source_type IN (" + ",".join("?" for _ in types) + ")")
                     exact_values.extend(types)
-                if domains:
-                    exact_clauses.append("UPPER(d.tax_domain) IN (" + ",".join("?" for _ in domains) + ")")
-                    exact_values.extend(domains)
+                if domain_clause:
+                    exact_clauses.append(domain_clause)
+                    exact_values.extend(domain_values)
                 exact_values.append(limit)
                 exact_rows = connection.execute(
                     """
@@ -311,9 +331,10 @@ class CorpusFtsBackend:
             if types:
                 exact_clauses.append("d.source_type IN (" + ",".join("%s" for _ in types) + ")")
                 exact_values.extend(types)
-            if domains:
-                exact_clauses.append("UPPER(d.tax_domain) IN (" + ",".join("%s" for _ in domains) + ")")
-                exact_values.extend(domains)
+            domain_clause, domain_values = self._domain_clause(domains, source_types, "%s")
+            if domain_clause:
+                exact_clauses.append(domain_clause)
+                exact_values.extend(domain_values)
             exact_sql = f"""
                 SELECT c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
                        c.display_reference, c.provision_id,
@@ -341,9 +362,10 @@ class CorpusFtsBackend:
         if types:
             clauses.append("d.source_type IN (" + ",".join("%s" for _ in types) + ")")
             values.extend(types)
-        if domains:
-            clauses.append("UPPER(d.tax_domain) IN (" + ",".join("%s" for _ in domains) + ")")
-            values.extend(domains)
+        domain_clause, domain_values = self._domain_clause(domains, source_types, "%s")
+        if domain_clause:
+            clauses.append(domain_clause)
+            values.extend(domain_values)
         sql = f"""
             SELECT c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
                    c.display_reference, c.provision_id,

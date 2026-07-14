@@ -2514,7 +2514,7 @@ def query_targets_wht_pay_and_refund_services(query: str) -> bool:
     has_wht_context = bool(re.search(r"\b(wht|podatek u źr[óo]dła|withholding|certyfikat\w* rezydencji|beneficial owner|rzeczywist\w* właściciel\w*)\b", normalized))
     has_pay_and_refund = bool(re.search(r"\b(pay and refund|2 mln|2 000 000|art\.\s*26\s*ust\.\s*2e|próg\w*|prog\w*|limit\w*)\b", normalized))
     has_service_or_distribution = bool(
-        re.search(r"\b(dywidend\w*|odsetk\w*|zarządz\w*|zarzadz\w*|usług\w* zarządz\w*|uslug\w* zarzadz\w*|doradcz\w*)\b", normalized)
+        re.search(r"\b(dywidend\w*|odsetk\w*|licencj\w*|należno\w* licencyjn\w*|royalt\w*|cash pool\w*|zarządz\w*|zarzadz\w*|usług\w* zarządz\w*|uslug\w* zarzadz\w*|doradcz\w*)\b", normalized)
     )
     return has_wht_context and has_pay_and_refund and has_service_or_distribution
 

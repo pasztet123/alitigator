@@ -766,7 +766,10 @@ def select_wht_primary_bundle(chunks: list[RagChunk], query: str) -> list[RagChu
         cit(r"art\.\s*21\s+ust\.\s*3c\b"),
         cit(r"art\.\s*21\s+ust\.\s*4\b"),
         cit(r"art\.\s*26\s+ust\.\s*2e\b"),
+        cit(r"art\.\s*26\s+ust\.\s*2g\b"),
         cit(r"art\.\s*26\s+ust\.\s*7a\b(?!\s+pkt)"),
+        cit(r"art\.\s*26\s+ust\.\s*7b\b"),
+        cit(r"art\.\s*26\s+ust\.\s*7c\b"),
         cit(r"art\.\s*26b\s+ust\.\s*1\b"),
         cit(r"art\.\s*28b\s+ust\.\s*1\b"),
     ]

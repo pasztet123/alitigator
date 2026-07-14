@@ -64,6 +64,23 @@ class CorpusFtsBackendTests(unittest.IsolatedAsyncioTestCase):
                     "", "art. 21", "ulga", "", "", "PIT",
                 ),
             )
+            connection.execute(
+                "INSERT INTO documents VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "upo-de-11", "UPO Polska - Niemcy - art. 11", "", "2025-01-01", "", "", "TAX_TREATY",
+                    "mf", "statute", "tax_treaty", "MF", "UPO Polska-Niemcy", "Dz.U.",
+                    "2025-01-01", '["art. 11"]', "[]",
+                ),
+            )
+            connection.execute(
+                "INSERT INTO chunks VALUES (?,?,?,?,?,?)",
+                ("upo-de-11:1", "upo-de-11", 0, "Art. 11 Odsetki: stawka 5%.", "art. 11", "upo-de-11"),
+            )
+            connection.execute("INSERT INTO chunk_citations VALUES (?,?)", ("upo-de-11:1", "art. 11"))
+            connection.execute(
+                "INSERT INTO chunks_fts(rowid, chunk_text, subject, signature, keywords, legal_provisions, issues, question_text, facts_text, tax_domain) VALUES (2,?,?,?,?,?,?,?,?,?)",
+                ("Art. 11 Odsetki stawka 5%", "UPO Polska Niemcy art. 11", "", "", "art. 11", "upo", "", "", "TAX_TREATY"),
+            )
             connection.commit()
             connection.close()
 
@@ -88,6 +105,15 @@ class CorpusFtsBackendTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(exact[0].metadata["provision_id"], "pit-21-30a")
             self.assertEqual(exact[0].text.splitlines()[0], "art. 21 ust. 30a")
+
+            treaty = await backend.search(
+                "UPO Polska Niemcy art. 11 odsetki",
+                limit=5,
+                source_types=frozenset({"tax_treaty"}),
+                metadata_filters={"tax_domains": ["CIT"]},
+            )
+            self.assertEqual([item.document_id for item in treaty], ["upo-de-11"])
+            self.assertEqual(treaty[0].source_type, "tax_treaty")
 
 
 if __name__ == "__main__":

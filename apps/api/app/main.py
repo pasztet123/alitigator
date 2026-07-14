@@ -123,7 +123,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.13"
+API_VERSION = "2.0.14"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -4132,9 +4132,6 @@ async def chat(
         )
         analysis_trace["render_validation"] = validation
         demo_reply = strip_render_completion_marker(demo_reply)
-        exact_trace_block = render_exact_primary_law_trace_block(list(analysis_trace.get("claim_source_traces") or []))
-        if exact_trace_block:
-            demo_reply = f"{demo_reply}\n\n{exact_trace_block}"
         structured_reply = parse_structured_reply(demo_reply)
         persisted_assistant_message = None
         if chat_storage_available:
@@ -4405,18 +4402,6 @@ async def chat(
     analysis_trace["render_validation"] = validation
     analysis_trace["render_attempts"] = render_attempts
     reply = strip_render_completion_marker(reply)
-    exact_trace_block = render_exact_primary_law_trace_block(list(analysis_trace.get("claim_source_traces") or []))
-    if exact_trace_block:
-        reply = f"{reply}\n\n{exact_trace_block}"
-
-    if retrieved_chunks:
-        reply = (
-            f"{reply}\n\n"
-            "Źródła zwrócone przez retrieval "
-            "(nie wszystkie muszą być relewantne ani wykorzystane w analizie)\n"
-            f"{list_citations(retrieved_chunks)}"
-        )
-
     structured_reply = parse_structured_reply(reply)
 
     request_id = str(uuid4())

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import hashlib
 import os
@@ -150,6 +151,8 @@ class LegalRagV2Config:
     allow_legacy_fallback: bool = True
     primary_candidates_per_issue: int = 8
     authority_candidates_per_issue: int = 8
+    authority_extraction_candidates_per_issue: int = 2
+    authority_extraction_concurrency: int = 4
     require_real_embeddings: bool = False
 
     @classmethod
@@ -185,6 +188,16 @@ class LegalRagV2Config:
             ),
             authority_candidates_per_issue=max(
                 1, int(os.getenv("LEGAL_RAG_V2_AUTHORITY_LIMIT_PER_ISSUE", "8"))
+            ),
+            # Authority cards are supporting evidence, never a reason to make
+            # the whole answer unavailable. Bound model extraction separately
+            # from retrieval so a multi-issue question cannot fan out into
+            # dozens of serial model calls.
+            authority_extraction_candidates_per_issue=max(
+                1, int(os.getenv("LEGAL_RAG_V2_AUTHORITY_EXTRACTION_LIMIT_PER_ISSUE", "2"))
+            ),
+            authority_extraction_concurrency=max(
+                1, int(os.getenv("LEGAL_RAG_V2_AUTHORITY_EXTRACTION_CONCURRENCY", "4"))
             ),
             require_real_embeddings=_env_bool(
                 "LEGAL_RAG_V2_REQUIRE_REAL_EMBEDDINGS", False
@@ -725,34 +738,50 @@ class LegalRagV2Pipeline:
                 )
             return cards, traces
 
-        for lane in retrieval.authorities:
-            issue_cards: list[AuthorityCard] = []
-            for candidate in lane.candidates[: self.config.authority_candidates_per_issue]:
-                try:
-                    extracted = await self.authority_extractor.extract(candidate)
-                except Exception as exc:
-                    traces.append(
-                        {
-                            "issue_id": lane.issue_id,
-                            "document_id": candidate.document_id,
-                            "extractor_error": type(exc).__name__,
-                        }
+        semaphore = asyncio.Semaphore(self.config.authority_extraction_concurrency)
+
+        async def extract_one(
+            issue_id: str,
+            candidate: RetrievalCandidate,
+        ) -> tuple[str, Optional[AuthorityCard], dict[str, Any]]:
+            try:
+                async with semaphore:
+                    # A missing authority card is non-fatal. The controlling
+                    # primary-law bundle remains available to the renderer.
+                    extracted = await asyncio.wait_for(
+                        self.authority_extractor.extract(candidate),
+                        timeout=12.0,
                     )
-                    continue
                 card = getattr(extracted, "card", extracted)
                 if not isinstance(card, AuthorityCard):
                     card = AuthorityCard.model_validate(card)
                 _validate_authority_spans(card, candidate)
-                issue_cards.append(card)
                 trace_payload = getattr(extracted, "trace", {})
-                traces.append(
-                    {
-                        "issue_id": lane.issue_id,
-                        "document_id": candidate.document_id,
-                        **dict(trace_payload or {}),
-                    }
-                )
-            cards[lane.issue_id] = issue_cards
+                return issue_id, card, {
+                    "issue_id": issue_id,
+                    "document_id": candidate.document_id,
+                    **dict(trace_payload or {}),
+                }
+            except Exception as exc:
+                return issue_id, None, {
+                    "issue_id": issue_id,
+                    "document_id": candidate.document_id,
+                    "extractor_error": type(exc).__name__,
+                }
+
+        tasks = []
+        for lane in retrieval.authorities:
+            for candidate in lane.candidates[: self.config.authority_extraction_candidates_per_issue]:
+                tasks.append(extract_one(lane.issue_id, candidate))
+
+        for lane in retrieval.authorities:
+            cards[lane.issue_id] = []
+
+        for issue_id, card, extraction_trace in await asyncio.gather(*tasks):
+            traces.append(extraction_trace)
+            if card is not None:
+                cards[issue_id].append(card)
+
         return cards, traces
 
     async def _synthesize_and_validate_claims(

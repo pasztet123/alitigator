@@ -44,6 +44,17 @@ def plan() -> LegalResearchPlan:
 
 
 class CrossborderWhtEnrichmentTests(unittest.TestCase):
+    def test_inflected_polish_wht_wording_starts_the_crossborder_bundle(self) -> None:
+        question = (
+            "Polska spółka wypłaca niemieckiej GmbH odsetki, licencje i usługi "
+            "zarządzania. Które płatności podlegają podatkowi u źródła?"
+        )
+        enriched = enrich_crossborder_wht_plan(plan(), question)
+        issue_ids = {item.issue_id for item in enriched.issues}
+        self.assertIn("wht_interest_pl_de_treaty", issue_ids)
+        self.assertIn("wht_royalties_pl_de_treaty", issue_ids)
+        self.assertIn("wht_services_pl_de_business_profits", issue_ids)
+
     def test_enrichment_creates_separate_treaty_vat_and_procedural_issues(self) -> None:
         enriched = enrich_crossborder_wht_plan(plan(), QUESTION)
         issues = {item.issue_id: item for item in enriched.issues}

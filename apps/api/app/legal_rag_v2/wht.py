@@ -19,7 +19,13 @@ from .schemas import (
 )
 
 
-_WHT_RE = re.compile(r"\b(wht|podatek u źr[óo]dła|withholding|pay and refund)\b", re.I)
+# Accept inflected Polish wording used in factual questions (for example
+# "podlegają podatkowi u źródła"), not only the dictionary form "podatek".
+_WHT_RE = re.compile(
+    r"\b(wht|podatk\w*\s+u\s+źr[óo]dła|withholding|pay and refund|"
+    r"art\.?(?:\s*)2[16]\s+ust\.?(?:\s*)[12])\b",
+    re.I,
+)
 _GERMANY_RE = re.compile(r"\b(niemc(?:y|zech|ami)|niemieck\w*|pl[- ]?de|polsko[- ]?niemieck\w*)\b", re.I)
 _INTEREST_RE = re.compile(r"\b(odsetk\w*|interest\w*)\b", re.I)
 _ROYALTY_RE = re.compile(r"\b(licencj\w*|należno\w* licencyjn\w*|royalt(?:y|ies))\b", re.I)

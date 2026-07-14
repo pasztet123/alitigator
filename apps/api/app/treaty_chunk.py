@@ -40,7 +40,13 @@ OCR_CACHE_DIR = REPO_ROOT / "apps/api/data/laws/ocr_cache"
 OCR_RENDER_SCALE = 1.5
 OCR_ENGINE: Any | None = None
 
-ARTICLE_RE = re.compile(r"Artyku[lł∏]\s+(\d+[A-Za-z]?)\b", re.IGNORECASE)
+# PDF text layers and OCR frequently confuse the final ``ł`` with ``l`` or
+# ``i`` (for example ``Artykui 7``). Treat these as article headings only when
+# immediately followed by a number, then canonicalize the rendered heading.
+ARTICLE_RE = re.compile(
+    r"\bArtyku(?:[lł∏it!])?[\s.°]*([0-9Iil]{1,2})(?![A-Za-z])",
+    re.IGNORECASE,
+)
 POLISH_KEEP_RE = re.compile(
     r"(artyku|umow|konwencj|podatk|dochod|maj[ąa]tk|zakres|zak[łl]ad|"
     r"dywidend|odset|nale[żz]no|zyski przedsi|miejsce zamieszkania|"
@@ -60,8 +66,11 @@ HEADER_RE = re.compile(
 )
 WHITESPACE_RE = re.compile(r"[ \t]+")
 BLANKS_RE = re.compile(r"\n{3,}")
-OCR_ARTICLE_WITH_NUMBER_RE = re.compile(r"\bArtyku[tłlI1|f]{1,3}\s*(\d+[A-Za-z]?)\b", re.IGNORECASE)
-OCR_ARTICLE_FIX_RE = re.compile(r"\bArtyku[tłlI1|f]{1,3}\b", re.IGNORECASE)
+OCR_ARTICLE_WITH_NUMBER_RE = re.compile(
+    r"\bArtyku(?:[tłlif|]{1,3})?[\s.°]*([0-9Iil]{1,2})(?![A-Za-z])",
+    re.IGNORECASE,
+)
+OCR_ARTICLE_FIX_RE = re.compile(r"\bArtyku[tłliI1|f]{1,3}\b", re.IGNORECASE)
 OCR_ZAKLAD_FIX_RE = re.compile(r"\bZak[tlI1|][a4][dtlI1|]\b", re.IGNORECASE)
 
 
@@ -310,7 +319,12 @@ def normalize_text(text: str) -> str:
 
 def normalize_ocr_line(text: str) -> str:
     text = normalize_text(text)
-    text = OCR_ARTICLE_WITH_NUMBER_RE.sub(r"Artykuł \1", text)
+
+    def normalize_article_heading(match: re.Match[str]) -> str:
+        value = match.group(1).translate(str.maketrans({"I": "1", "i": "1", "l": "1"}))
+        return f"Artykuł {value}"
+
+    text = OCR_ARTICLE_WITH_NUMBER_RE.sub(normalize_article_heading, text)
     text = OCR_ARTICLE_FIX_RE.sub("Artykuł", text)
     text = OCR_ZAKLAD_FIX_RE.sub("Zakład", text)
     text = re.sub(r"\bRzeczapospolit[ae]\b", "Rzeczpospolita", text, flags=re.IGNORECASE)
@@ -368,7 +382,34 @@ def read_cached_ocr_pages(source: TreatySource) -> list[dict[str, Any]] | None:
         return None
     if payload.get("pdf_path") != str(source.pdf_path):
         return None
-    return payload.get("pages")
+    raw_pages = payload.get("pages")
+    if not isinstance(raw_pages, list):
+        return None
+
+    # OCR caches predate the current normalization rules. Reusing their raw
+    # text used to bypass ``normalize_ocr_line`` entirely, so headings such as
+    # ``Artykut7`` were never converted to ``Artykuł 7`` and the article (and
+    # every continuation page) silently disappeared from the corpus. Normalize
+    # cached pages on every read; the transformation is idempotent and applies
+    # the repair globally to every locally stored UPO.
+    pages: list[dict[str, Any]] = []
+    for index, page in enumerate(raw_pages, start=1):
+        if not isinstance(page, dict):
+            continue
+        raw_text = str(page.get("text") or "")
+        lines = [normalize_ocr_line(line) for line in raw_text.splitlines()]
+        try:
+            number = int(page.get("number") or index)
+        except (TypeError, ValueError):
+            number = index
+        pages.append(
+            build_page(
+                number=number,
+                lines=lines,
+                raw_chars=int(page.get("raw_chars") or len(raw_text)),
+            )
+        )
+    return pages
 
 
 def write_cached_ocr_pages(source: TreatySource, pages: list[dict[str, Any]]) -> None:
@@ -415,6 +456,8 @@ def iter_article_records(source: TreatySource, pages: list[dict[str, Any]]) -> I
     article_lines: list[str] = []
     article_pages: list[int] = []
     article_number: str | None = None
+    previous_numeric_article: int | None = None
+    expected_dropped_ten: int | None = None
 
     def flush() -> Iterator[dict[str, Any]]:
         nonlocal article_lines, article_pages, article_number
@@ -430,16 +473,53 @@ def iter_article_records(source: TreatySource, pages: list[dict[str, Any]]) -> I
         article_pages = []
         article_number = None
 
+    def normalize_article_number(value: str) -> str:
+        # Embedded-font extraction often reads 10–19 as I0–I9. Article
+        # identifiers are numeric in treaties; preserve a trailing letter only
+        # for the rare alphanumeric editorial unit.
+        match = re.fullmatch(r"([0-9Iil]+)([A-Za-z]?)", value)
+        if not match:
+            return value.lower()
+        digits = match.group(1).translate(str.maketrans({"I": "1", "i": "1", "l": "1"}))
+        suffix = match.group(2).lower()
+        return f"{digits}{suffix}"
+
     for page in pages:
         if not page["text"]:
             continue
         for line in page["text"].splitlines():
-            match = ARTICLE_RE.search(line)
-            if match:
-                yield from flush()
-                article_number = match.group(1).lower()
-                article_lines = [line[match.start() :].strip()]
-                article_pages = [page["number"]]
+            matches = list(ARTICLE_RE.finditer(line))
+            if matches:
+                for index, match in enumerate(matches):
+                    yield from flush()
+                    detected_article = normalize_article_number(match.group(1))
+                    if detected_article.isdigit():
+                        numeric_article = int(detected_article)
+                        # Some OCR layers lose the leading 1 in one *ordered*
+                        # run (9, 0, 1, ... 9).  Repair only that exact run.
+                        # Do not use a generic monotonic rewrite: multi-column
+                        # PDFs legitimately emit headings as 8, 7, 9 and a
+                        # generic rule silently assigned them wrong articles.
+                        if numeric_article == 0 and previous_numeric_article == 9:
+                            numeric_article = 10
+                            expected_dropped_ten = 11
+                        elif (
+                            expected_dropped_ten is not None
+                            and numeric_article == expected_dropped_ten - 10
+                        ):
+                            numeric_article = expected_dropped_ten
+                            expected_dropped_ten += 1
+                        else:
+                            expected_dropped_ten = None
+                        previous_numeric_article = numeric_article
+                        article_number = str(numeric_article)
+                    else:
+                        article_number = detected_article
+                    next_start = matches[index + 1].start() if index + 1 < len(matches) else len(line)
+                    article_lines = [
+                        f"Artykuł {article_number}{line[match.end():next_start]}".strip()
+                    ]
+                    article_pages = [page["number"]]
                 continue
             if article_lines:
                 article_lines.append(line)
@@ -537,6 +617,62 @@ def min_article_count_for_ready(source: TreatySource) -> int:
     return 10
 
 
+def missing_numeric_articles(source: TreatySource, articles: list[dict[str, Any]]) -> list[int]:
+    """Return gaps only where a treaty has a sequential article structure.
+
+    Protocols amend selected provisions, so their cited article numbers are
+    deliberately non-contiguous and must not be treated as a parsing failure.
+    """
+    if source.variant.startswith("protokol"):
+        return []
+    numbers = {int(str(article["article"])) for article in articles if str(article["article"]).isdigit()}
+    if not numbers:
+        return []
+    return [number for number in range(1, max(numbers) + 1) if number not in numbers]
+
+
+def merge_article_layers(
+    primary: list[dict[str, Any]], secondary: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Fill only missing article units from a second extraction layer.
+
+    The PDF text layer remains authoritative when it produced an article.
+    OCR is the same official PDF, used strictly to restore headings or pages
+    that the embedded font/text layer failed to expose.
+    """
+    merged = _dedupe_article_records(primary)
+    for article in secondary:
+        key = str(article["article"])
+        existing = merged.get(key)
+        if existing is None or _article_quality(article) > _article_quality(existing):
+            merged[key] = article
+
+    return _sort_article_records(merged.values())
+
+
+def _article_quality(article: dict[str, Any]) -> tuple[int, int]:
+    text = str(article.get("text") or "")
+    return (len(POLISH_KEEP_RE.findall(text)), len(text))
+
+
+def _dedupe_article_records(articles: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Keep one strongest Polish extraction for each exact article heading."""
+    deduplicated: dict[str, dict[str, Any]] = {}
+    for article in articles:
+        key = str(article["article"])
+        existing = deduplicated.get(key)
+        if existing is None or _article_quality(article) > _article_quality(existing):
+            deduplicated[key] = article
+    return deduplicated
+
+def _sort_article_records(articles: Any) -> list[dict[str, Any]]:
+    def sort_key(article: dict[str, Any]) -> tuple[int, int | str]:
+        value = str(article["article"])
+        return (0, int(value)) if value.isdigit() else (1, value)
+
+    return sorted(articles, key=sort_key)
+
+
 def build_outputs(sources: list[TreatySource]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     records: list[dict[str, Any]] = []
     manifest: list[dict[str, Any]] = []
@@ -567,39 +703,42 @@ def build_outputs(sources: list[TreatySource]) -> tuple[list[dict[str, Any]], li
         pdf_path = source.pdf_path if source.pdf_path.is_absolute() else REPO_ROOT / source.pdf_path
         if pdf_path.exists():
             pages = extract_pdf_text_pages(source)
-            extracted_chars = sum(len(page["text"]) for page in pages)
-            treaty_articles: list[dict[str, Any]] = []
-            if extracted_chars >= 3000 and source.ready_without_ocr:
+            pdf_chars = sum(len(page["text"]) for page in pages)
+            pdf_articles = list(iter_article_records(source, pages)) if pdf_chars >= 3000 else []
+
+            # Do not stop at a superficially plausible count.  A missing
+            # article 7 is precisely how a treaty can look indexed yet be
+            # unavailable to the model.  Run OCR when the PDF text layer has
+            # gaps, and merge only absent units from the same official PDF.
+            needs_ocr = (
+                not source.ready_without_ocr
+                or pdf_chars < 3000
+                or bool(missing_numeric_articles(source, pdf_articles))
+                or len(pdf_articles) < min_article_count_for_ready(source)
+            )
+            ocr_candidate = ocr_pages(source) if needs_ocr else []
+            ocr_chars = sum(len(page["text"]) for page in ocr_candidate)
+            ocr_articles = list(iter_article_records(source, ocr_candidate)) if ocr_chars >= 3000 else []
+
+            if pdf_articles and ocr_articles:
+                treaty_articles = merge_article_layers(pdf_articles, ocr_articles)
+                extraction_method = "pdf_text+ocr_backfill"
+            elif pdf_articles:
+                treaty_articles = _sort_article_records(_dedupe_article_records(pdf_articles).values())
                 extraction_method = "pdf_text"
-                treaty_articles = list(iter_article_records(source, pages))
-                article_count = len(treaty_articles)
-                if article_count >= min_article_count_for_ready(source):
-                    status = "ready"
-                    for article in treaty_articles:
-                        records.append(build_record(source, article))
-                else:
-                    status = "partial_text_only"
-            if status != "ready":
-                ocr_candidate = ocr_pages(source)
-                ocr_chars = sum(len(page["text"]) for page in ocr_candidate)
-                if ocr_chars >= 3000:
-                    pages = ocr_candidate
-                    extracted_chars = ocr_chars
-                    extraction_method = "ocr"
-                    treaty_articles = list(iter_article_records(source, pages))
-                    article_count = len(treaty_articles)
-                    if article_count >= min_article_count_for_ready(source):
-                        status = "ready"
-                        for article in treaty_articles:
-                            records.append(build_record(source, article))
-                    else:
-                        status = "partial_text_only"
-                elif extracted_chars >= 3000 and not source.ready_without_ocr:
-                    status = "text_unavailable_in_pdf_layer"
-                elif extracted_chars > 0 or ocr_chars > 0:
-                    extraction_method = "ocr" if ocr_chars >= extracted_chars and ocr_chars > 0 else extraction_method
-                    extracted_chars = max(extracted_chars, ocr_chars)
-                    status = "partial_text_only"
+            else:
+                treaty_articles = _sort_article_records(_dedupe_article_records(ocr_articles).values())
+                extraction_method = "ocr" if ocr_articles else "none"
+
+            article_count = len(treaty_articles)
+            extracted_chars = max(pdf_chars, ocr_chars)
+            complete = not missing_numeric_articles(source, treaty_articles)
+            if article_count >= min_article_count_for_ready(source):
+                status = "ready" if complete else "partial_text_only"
+                for article in treaty_articles:
+                    records.append(build_record(source, article))
+            elif pdf_chars > 0 or ocr_chars > 0:
+                status = "partial_text_only"
         manifest.append(
             {
                 "country": source.country,
@@ -611,7 +750,10 @@ def build_outputs(sources: list[TreatySource]) -> tuple[list[dict[str, Any]], li
                 "extraction_method": extraction_method,
                 "extracted_chars": extracted_chars,
                 "article_count": article_count,
-                "included_in_jsonl": status == "ready",
+                # A partial source still contributes its verified article
+                # units; its gaps stay visible in the manifest and cannot be
+                # silently substituted by a guessed reference.
+                "included_in_jsonl": bool(treaty_articles),
             }
         )
 

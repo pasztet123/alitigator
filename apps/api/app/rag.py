@@ -4214,7 +4214,11 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(db_path)
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL")
+    # ``journal_mode`` returns a row.  Consume it before starting any write:
+    # leaving this cursor open can keep an internal SQLite statement active and
+    # make a subsequent FTS delete in the very same connection fail with
+    # ``database is locked`` during bulk reindexing.
+    connection.execute("PRAGMA journal_mode=WAL").fetchone()
     connection.execute("PRAGMA synchronous=NORMAL")
     ensure_schema(connection)
     return connection

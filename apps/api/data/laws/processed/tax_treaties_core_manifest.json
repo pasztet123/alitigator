@@ -19,8 +19,8 @@
     "source_url": "https://www.podatki.gov.pl/media/fu4nb3j0/czechy-nowa-umowa-pl.pdf",
     "status": "ready",
     "extraction_method": "ocr",
-    "extracted_chars": 19868,
-    "article_count": 26,
+    "extracted_chars": 19870,
+    "article_count": 27,
     "included_in_jsonl": true
   },
   {
@@ -30,9 +30,9 @@
     "pdf_path": "resources/upo/francja/umowa_pl.pdf",
     "source_url": "https://www.podatki.gov.pl/media/w2bhjz2p/19750620_francja_konwencja_tekst_pl_e.pdf",
     "status": "ready",
-    "extraction_method": "pdf_text",
-    "extracted_chars": 19729,
-    "article_count": 21,
+    "extraction_method": "pdf_text+ocr_backfill",
+    "extracted_chars": 22735,
+    "article_count": 30,
     "included_in_jsonl": true
   },
   {
@@ -43,8 +43,8 @@
     "source_url": "https://www.podatki.gov.pl/media/ln5hlbnt/irlandia-konwencja-tekst-polski.pdf",
     "status": "ready",
     "extraction_method": "ocr",
-    "extracted_chars": 24121,
-    "article_count": 21,
+    "extracted_chars": 24130,
+    "article_count": 30,
     "included_in_jsonl": true
   },
   {
@@ -54,8 +54,8 @@
     "pdf_path": "resources/upo/luksemburg/umowa_pl.pdf",
     "source_url": "https://www.podatki.gov.pl/media/ajkgmyrq/19950614_luksemburg_konwencja_tekst_pl_e.pdf",
     "status": "ready",
-    "extraction_method": "ocr",
-    "extracted_chars": 20287,
+    "extraction_method": "pdf_text+ocr_backfill",
+    "extracted_chars": 20619,
     "article_count": 31,
     "included_in_jsonl": true
   },
@@ -66,9 +66,9 @@
     "pdf_path": "resources/upo/luksemburg/protokol_2012_pl.pdf",
     "source_url": "https://www.podatki.gov.pl/media/3pzmp13g/20120607_luksemburg_tekst_pl_e.pdf",
     "status": "ready",
-    "extraction_method": "ocr",
-    "extracted_chars": 7987,
-    "article_count": 13,
+    "extraction_method": "pdf_text",
+    "extracted_chars": 6959,
+    "article_count": 5,
     "included_in_jsonl": true
   },
   {
@@ -79,8 +79,8 @@
     "source_url": "https://www.podatki.gov.pl/media/vmppgq1g/holandia-konwencja-tekst-polski-angielski.pdf",
     "status": "ready",
     "extraction_method": "ocr",
-    "extracted_chars": 31755,
-    "article_count": 26,
+    "extracted_chars": 31762,
+    "article_count": 33,
     "included_in_jsonl": true
   },
   {
@@ -91,8 +91,8 @@
     "source_url": "https://www.podatki.gov.pl/media/kr4pjone/protok%C3%B3%C5%82-tekst-polski.pdf",
     "status": "ready",
     "extraction_method": "ocr",
-    "extracted_chars": 20552,
-    "article_count": 15,
+    "extracted_chars": 20581,
+    "article_count": 29,
     "included_in_jsonl": true
   },
   {
@@ -103,8 +103,8 @@
     "source_url": "https://www.podatki.gov.pl/media/wdxllckt/niemcy-konwencja-tekst-polski-niemiecki.pdf",
     "status": "ready",
     "extraction_method": "ocr",
-    "extracted_chars": 34632,
-    "article_count": 25,
+    "extracted_chars": 34641,
+    "article_count": 33,
     "included_in_jsonl": true
   },
   {
@@ -113,10 +113,10 @@
     "variant": "umowa",
     "pdf_path": "resources/upo/szwajcaria/umowa_pl.pdf",
     "source_url": "https://www.podatki.gov.pl/media/fbol1ik4/19910902_konwencja_szwajcaria_pl_e.pdf",
-    "status": "ready",
-    "extraction_method": "pdf_text",
+    "status": "partial_text_only",
+    "extraction_method": "pdf_text+ocr_backfill",
     "extracted_chars": 22766,
-    "article_count": 12,
+    "article_count": 25,
     "included_in_jsonl": true
   },
   {
@@ -128,7 +128,7 @@
     "status": "ready",
     "extraction_method": "ocr",
     "extracted_chars": 14171,
-    "article_count": 13,
+    "article_count": 8,
     "included_in_jsonl": true
   },
   {
@@ -137,9 +137,9 @@
     "variant": "umowa_1974",
     "pdf_path": "resources/upo/usa/umowa_1974_pl.pdf",
     "source_url": "https://www.podatki.gov.pl/media/fygbbhi0/19741008_usa_konwencja_tekst_polski.pdf",
-    "status": "ready",
+    "status": "partial_text_only",
     "extraction_method": "ocr",
-    "extracted_chars": 22336,
+    "extracted_chars": 22337,
     "article_count": 25,
     "included_in_jsonl": true
   },
@@ -151,9 +151,9 @@
     "source_url": "https://www.podatki.gov.pl/media/uanpfvts/wlk-brytania-konwencja-tekst-polski.pdf",
     "status": "partial_text_only",
     "extraction_method": "ocr",
-    "extracted_chars": 28539,
-    "article_count": 7,
-    "included_in_jsonl": false
+    "extracted_chars": 28559,
+    "article_count": 27,
+    "included_in_jsonl": true
   },
   {
     "country": "Wielka Brytania",
@@ -173,7 +173,7 @@
     "variant": "umowa",
     "pdf_path": "resources/upo/hiszpania/umowa_pl.pdf",
     "source_url": "https://www.podatki.gov.pl/media/0yppho2i/hiszpania-konwencja-tekst-polski.pdf",
-    "status": "ready",
+    "status": "partial_text_only",
     "extraction_method": "ocr",
     "extracted_chars": 20584,
     "article_count": 24,
@@ -188,7 +188,7 @@
     "status": "ready",
     "extraction_method": "pdf_text",
     "extracted_chars": 41435,
-    "article_count": 40,
+    "article_count": 30,
     "included_in_jsonl": true
   }
 ]

@@ -68,9 +68,9 @@ class FakePipeline:
 
 
 class LegalRagV2RoutingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_v2_is_the_safe_default_when_no_routing_variable_is_set(self) -> None:
+    async def test_shadow_is_the_safe_default_when_no_routing_variable_is_set(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(get_legal_pipeline_mode(), "legal_rag_v2")
+            self.assertEqual(get_legal_pipeline_mode(), "shadow")
 
     async def test_fallback_plan_accepts_a_question_with_trailing_whitespace(self) -> None:
         from app.legal_rag_v2.planner import LegacyFallbackPlanner

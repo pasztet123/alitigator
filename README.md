@@ -248,17 +248,17 @@ backfillu ustaw tę samą wartość `--shard-count` i różne `--shard-index`.
 
 ## Model → RAG → Model
 
-Nowa architektura jest domyślną ścieżką produkcyjną i jest odwracalna jedną flagą:
+Nowa architektura jest wdrażana przez tryb shadow i jest odwracalna jedną flagą:
 
 ```text
-LEGAL_RAG_MODE=legal_rag_v2      # domyślna odpowiedź produkcyjna, evidence per issue
+LEGAL_RAG_MODE=legal_rag_v2      # jawny release evidence-per-issue
 LEGAL_RAG_MODE=legacy            # wyłącznie jawny rollback
 LEGAL_RAG_MODE=model_rag_model   # planner → RAG → evidence model → claims → writer
-LEGAL_RAG_MODE=shadow            # odpowiedź legacy, nowy pipeline zapisuje trace
+LEGAL_RAG_MODE=shadow            # domyślnie: odpowiedź legacy, nowy pipeline zapisuje trace
 ```
 
-Jeżeli żadna zmienna routingu nie jest ustawiona, aplikacja używa
-`legal_rag_v2`. V2 używa osobnych modeli konfigurowanych per etap:
+Jeżeli żadna zmienna routingu nie jest ustawiona, aplikacja używa `shadow`.
+V2 używa osobnych modeli konfigurowanych per etap:
 
 ```text
 LLM_PROVIDER=openai

@@ -123,7 +123,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.19"
+API_VERSION = "2.0.20"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -156,10 +156,12 @@ _shadow_semaphore = asyncio.Semaphore(
 def get_legal_pipeline_mode() -> str:
     # LEGAL_RAG_MODE is the public, deployment-facing switch.  Keep the old
     # variable as a compatibility alias for existing environments and tests.
-    # The issue-scoped pipeline is the production-safe default. Leaving the
-    # process without a routing variable must never silently fall back to the
-    # legacy answer path, which lacks mandatory per-issue evidence bundles.
-    raw = os.getenv("LEGAL_RAG_MODE") or os.getenv("LEGAL_PIPELINE_MODE", "legal_rag_v2")
+    # A v2 failure must never turn a user request into a 502. Until its
+    # production error budget is clean, the unset deployment default is
+    # shadow: legacy serves the answer while v2 runs asynchronously and keeps
+    # diagnostic artifacts. A direct legal_rag_v2 setting remains available
+    # only as an explicit release switch.
+    raw = os.getenv("LEGAL_RAG_MODE") or os.getenv("LEGAL_PIPELINE_MODE", "shadow")
     mode = raw.strip().lower()
     aliases = {
         "rag_v2": "legal_rag_v2",

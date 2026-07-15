@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import app.legal_rag_v2.pipeline as pipeline_module
 from app.legal_rag_v2.authority import AuthorityExtractionResult
+from app.model_gateway import ModelRequestError
 from app.legal_rag_v2.pipeline import (
     ClaimSet,
     LegalRagV2Config,
@@ -364,6 +365,93 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(final_validation.passed)
         self.assertIn("deterministic_render_revalidated", final_validation.warnings)
         self.assertEqual(2, calls)
+
+    async def test_large_synthesis_is_split_and_recovers_every_issue(self) -> None:
+        issues = [
+            LegalIssue(
+                issue_id=f"issue_{index}",
+                label=f"Zagadnienie {index}",
+                legal_mechanism="general",
+            )
+            for index in range(5)
+        ]
+        plan = LegalResearchPlan(
+            user_query="Wielowątkowy kazus podatkowy.",
+            intent=ResearchIntent(mode="mixed_analysis"),
+            issues=issues,
+            clarification=Clarification(),
+            confidence=0.9,
+        )
+        bundles = []
+        for index, issue in enumerate(issues):
+            provision = ProvisionReference(
+                provision_id=f"provision_{index}",
+                document_id=f"document_{index}",
+                citation=f"art. {index + 1}",
+                status="active",
+                source_span=DocumentSourceSpan(
+                    start=0,
+                    end=10,
+                    document_id=f"document_{index}",
+                ),
+            )
+            bundles.append(
+                EvidenceBundle(
+                    issue_id=issue.issue_id,
+                    controlling_provisions=[provision],
+                    coverage_status="complete",
+                )
+            )
+
+        class SizeRejectingGateway(FakeGateway):
+            async def generate_structured(self, *, response_model, input, **kwargs):
+                if response_model is not ClaimSet:
+                    return await super().generate_structured(
+                        response_model=response_model, input=input, **kwargs
+                    )
+                payload = pipeline_module.json.loads(input)
+                batch_issues = payload["plan"]["issues"]
+                if len(batch_issues) > 1:
+                    raise ModelRequestError("payload too large")
+                issue_id = batch_issues[0]["issue_id"]
+                bundle = next(
+                    item for item in bundles if item.issue_id == issue_id
+                )
+                provision = bundle.controlling_provisions[0]
+                return ClaimSet(
+                    claims=[
+                        LegalClaim(
+                            claim_id=f"claim_{issue_id}",
+                            issue_id=issue_id,
+                            claim_type="application",
+                            text="Zastosowanie przepisu wymaga oceny faktów.",
+                            status="conditional_missing_fact",
+                            result="Oś została przeanalizowana niezależnie.",
+                            controlling_provision_ids=[provision.provision_id],
+                            source_spans=[provision.source_span],
+                            confidence=0.8,
+                        )
+                    ]
+                )
+
+        gateway = SizeRejectingGateway()
+        pipeline = LegalRagV2Pipeline(
+            gateway=gateway,
+            planner=LegalQueryPlanner(gateway),
+            retriever=LegalRetriever(FakeBackend()),
+            config=LegalRagV2Config(),
+        )
+        claims, validation = await pipeline._synthesize_and_validate_claims(
+            plan.user_query,
+            plan,
+            bundles,
+            [],
+        )
+
+        self.assertTrue(validation.passed)
+        self.assertEqual({item.issue_id for item in issues}, {item.issue_id for item in claims})
+        self.assertTrue(all(item.status == "conditional_missing_fact" for item in claims))
+        self.assertTrue(any("batch_split_after:ModelRequestError" in item for item in validation.warnings))
 
     def test_writer_integrity_accepts_multiple_verified_citations_for_one_source_id(self) -> None:
         article_21 = ProvisionReference(

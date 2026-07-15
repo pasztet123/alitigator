@@ -67,6 +67,8 @@ from .wht import WhtPayAndRefundCalculationEngine, enrich_crossborder_wht_plan
 PIPELINE_VERSION = "legal_rag_v2_1"
 SYNTHESIS_PROMPT_VERSION = "legal_claim_synthesis_v1"
 ANSWER_PROMPT_VERSION = "legal_answer_writer_v1"
+SYNTHESIS_MAX_ISSUES_PER_BATCH = 3
+SYNTHESIS_BATCH_CONCURRENCY = 3
 
 GLOBAL_LEGAL_SYSTEM_RULES = """\
 You are a component in an evidence-gated Polish tax-law research pipeline.
@@ -835,37 +837,98 @@ class LegalRagV2Pipeline:
         bundles: list[EvidenceBundle],
         calculations: list[CalculationRecord],
     ) -> tuple[list[LegalClaim], ValidationRecord]:
-        payload = {
-            "prompt_version": SYNTHESIS_PROMPT_VERSION,
-            "question": question,
-            "plan": plan.model_dump(mode="json"),
-            "evidence_bundles": [item.model_dump(mode="json") for item in bundles],
-            "calculation_records": [item.model_dump(mode="json") for item in calculations],
-        }
-        try:
-            output = await self.gateway.generate_structured(
-                response_model=ClaimSet,
-                input=json.dumps(payload, ensure_ascii=False),
-                system_prompt=CLAIM_SYNTHESIS_RULES,
-                model=self.config.synthesis_model,
-                reasoning_effort="medium",
-                max_output_tokens=12000,
+        bundle_by_issue = {item.issue_id: item for item in bundles}
+        batches = [
+            plan.issues[index : index + SYNTHESIS_MAX_ISSUES_PER_BATCH]
+            for index in range(0, len(plan.issues), SYNTHESIS_MAX_ISSUES_PER_BATCH)
+        ]
+        semaphore = asyncio.Semaphore(SYNTHESIS_BATCH_CONCURRENCY)
+
+        def subplan(issues: list[Any]) -> LegalResearchPlan:
+            payload = plan.model_dump(mode="python")
+            payload["issues"] = issues
+            return LegalResearchPlan.model_validate(payload)
+
+        def batch_calculations(issue_ids: set[str]) -> list[CalculationRecord]:
+            return [
+                item
+                for item in calculations
+                if not item.dependencies or bool(issue_ids.intersection(item.dependencies))
+            ]
+
+        async def call_once(issues: list[Any]) -> list[LegalClaim]:
+            issue_ids = {item.issue_id for item in issues}
+            scoped_plan = subplan(issues)
+            scoped_bundles = [
+                bundle_by_issue[issue_id]
+                for issue_id in issue_ids
+                if issue_id in bundle_by_issue
+            ]
+            payload = {
+                "prompt_version": SYNTHESIS_PROMPT_VERSION,
+                "question": question,
+                "plan": scoped_plan.model_dump(mode="json"),
+                "evidence_bundles": [item.model_dump(mode="json") for item in scoped_bundles],
+                "calculation_records": [
+                    item.model_dump(mode="json")
+                    for item in batch_calculations(issue_ids)
+                ],
+            }
+            async with semaphore:
+                output = await self.gateway.generate_structured(
+                    response_model=ClaimSet,
+                    input=json.dumps(payload, ensure_ascii=False),
+                    system_prompt=CLAIM_SYNTHESIS_RULES,
+                    model=self.config.synthesis_model,
+                    reasoning_effort="medium",
+                    max_output_tokens=6000,
+                )
+            return [item for item in output.claims if item.issue_id in issue_ids]
+
+        async def synthesize_batch(
+            issues: list[Any],
+        ) -> tuple[list[LegalClaim], list[str], list[str]]:
+            try:
+                batch_claims = await call_once(issues)
+                if batch_claims:
+                    return batch_claims, [], []
+                error = "empty_issue_batch_claim_set"
+            except ModelGatewayError as exc:
+                error = type(exc).__name__
+
+            # A provider can reject a combined payload even though every
+            # individual issue is valid. Split the failed batch so one axis
+            # cannot erase the remaining legal analysis.
+            if len(issues) > 1:
+                children = await asyncio.gather(
+                    *(synthesize_batch([issue]) for issue in issues)
+                )
+                return (
+                    [claim for claims, _, _ in children for claim in claims],
+                    [item for _, errors, _ in children for item in errors],
+                    [
+                        f"batch_split_after:{error}",
+                        *(item for _, _, warnings in children for item in warnings),
+                    ],
+                )
+
+            scoped_plan = subplan(issues)
+            issue_ids = {item.issue_id for item in issues}
+            scoped_bundles = [
+                bundle_by_issue[issue_id]
+                for issue_id in issue_ids
+                if issue_id in bundle_by_issue
+            ]
+            return (
+                _blocked_claims(scoped_plan, scoped_bundles, reason=error),
+                [f"structured_claim_synthesis_failed:{issues[0].issue_id}"],
+                [f"{issues[0].issue_id}:{error}"],
             )
-            claims = output.claims
-        except ModelGatewayError as exc:
-            claims = _blocked_claims(plan, bundles, reason=type(exc).__name__)
-            claims, completion_warnings = _ensure_required_issue_claims(
-                claims,
-                plan=plan,
-                bundles=bundles,
-                calculations=calculations,
-            )
-            return claims, ValidationRecord(
-                stage="claim_validation",
-                passed=False,
-                errors=["structured_claim_synthesis_failed"],
-                warnings=[type(exc).__name__, *completion_warnings],
-            )
+
+        synthesized = await asyncio.gather(*(synthesize_batch(batch) for batch in batches))
+        claims = [claim for batch_claims, _, _ in synthesized for claim in batch_claims]
+        synthesis_errors = [item for _, errors, _ in synthesized for item in errors]
+        synthesis_warnings = [item for _, _, warnings in synthesized for item in warnings]
 
         claims, errors, warnings = validate_claims(
             claims,
@@ -873,6 +936,12 @@ class LegalRagV2Pipeline:
             bundles=bundles,
             calculations=calculations,
         )
+        errors = [*synthesis_errors, *errors]
+        warnings = [
+            f"issue_scoped_synthesis_batches:{len(batches)}",
+            *synthesis_warnings,
+            *warnings,
+        ]
         claims, completion_warnings = _ensure_required_issue_claims(
             claims,
             plan=plan,
@@ -1606,7 +1675,10 @@ def _blocked_claims(
                 claim_type="risk",
                 text=f"Nie można zatwierdzić materialnej konkluzji dla: {issue.label}.",
                 status=status,
-                result=f"Wniosek zablokowany ({reason}).",
+                result=(
+                    "Wniosek pozostaje zablokowany do czasu uzyskania kompletnego, "
+                    "zweryfikowanego łańcucha źródeł."
+                ),
                 controlling_provision_ids=[],
                 supporting_authority_ids=[],
                 contrary_authority_ids=[],

@@ -226,14 +226,38 @@ def _aggregate_payment_amount(question: str) -> int | None:
         normalized,
         re.I,
     )
-    if explicit_total:
+    # "Łączna suma ... przekroczyła 2 000 000 zł" describes a statutory
+    # threshold, not a factual aggregate.  Do not turn the legal limit into
+    # the tax base merely because it follows an aggregate phrase.
+    explicit_context = (
+        normalized[max(0, explicit_total.start() - 20) : explicit_total.end() + 55]
+        if explicit_total
+        else ""
+    )
+    if explicit_total and not re.search(r"przekrocz|próg|prog|limit", explicit_context, re.I):
         return _parse_amount(explicit_total.group("amount"))
+
+    eligible_amounts: list[int] = []
     amounts: list[int] = []
-    for match in _AMOUNT_RE.finditer(normalized):
+    amount_matches = list(_AMOUNT_RE.finditer(normalized))
+    for index, match in enumerate(amount_matches):
         amount = _parse_amount(match.group(1))
-        context = normalized[max(0, match.start() - 35) : match.end() + 35].lower()
-        if amount and not re.search(r"próg|prog|limit", context):
+        threshold_context = normalized[max(0, match.start() - 80) : match.end() + 35].lower()
+        next_amount_start = (
+            amount_matches[index + 1].start()
+            if index + 1 < len(amount_matches)
+            else len(normalized)
+        )
+        # A payment's legal label normally follows its amount.  Stop at the
+        # next amount so the preceding "odsetki" cannot incorrectly classify
+        # the following management-fee amount as WHT-threshold eligible.
+        payment_context = normalized[match.end() : next_amount_start].lower()
+        if amount and not re.search(r"próg|prog|limit|przekrocz", threshold_context):
             amounts.append(amount)
+            if re.search(r"odset\w*|licenc|royalt", payment_context, re.I):
+                eligible_amounts.append(amount)
+    if eligible_amounts:
+        return sum(eligible_amounts)
     if not amounts:
         return None
     # A stated aggregate is normally the largest monetary value; summing it

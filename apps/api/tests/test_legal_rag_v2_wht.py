@@ -17,6 +17,7 @@ from app.legal_rag_v2.pipeline import _ensure_required_issue_claims, validate_cl
 from app.legal_rag_v2.retrieval import LegalRetriever, RetrievalCandidate, RetrievalConfig
 from app.legal_rag_v2.wht import (
     WhtPayAndRefundCalculationEngine,
+    _aggregate_payment_amount,
     enrich_crossborder_wht_plan,
 )
 
@@ -45,6 +46,14 @@ def plan() -> LegalResearchPlan:
 
 
 class CrossborderWhtEnrichmentTests(unittest.TestCase):
+    def test_aggregate_uses_interest_and_licence_payments_not_the_statutory_threshold(self) -> None:
+        question = (
+            "Spółka wypłaciła 1 400 000 zł odsetek, 900 000 zł za usługi zarządzania "
+            "oraz 800 000 zł opłat licencyjnych. Łączna suma odsetek i licencji "
+            "przekroczyła 2 000 000 zł we wrześniu."
+        )
+        self.assertEqual(2_200_000, _aggregate_payment_amount(question))
+
     def test_inflected_polish_wht_wording_starts_the_crossborder_bundle(self) -> None:
         question = (
             "Polska spółka wypłaca niemieckiej GmbH odsetki, licencje i usługi "

@@ -406,6 +406,47 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
             validate_writer_output(output, answer_plan=pipeline_module.AnswerPlan(), bundles=bundles),
         )
 
+    def test_deterministic_renderer_removes_unbound_model_provision_labels(self) -> None:
+        provision = ProvisionReference(
+            provision_id="pit-art-10",
+            document_id="pit-act",
+            citation="art. 10 ust. 1",
+            status="active",
+            source_span=DocumentSourceSpan(start=0, end=1, document_id="pit-act"),
+        )
+        claim = LegalClaim(
+            claim_id="approved-claim",
+            issue_id="pit_sale",
+            claim_type="application",
+            text="Art. 30e ust. 1 ma zastosowanie do sprzedaży.",
+            result="Zastosuj art. 30e ust. 1 po weryfikacji faktów.",
+            status="approved",
+            controlling_provision_ids=[provision.provision_id],
+            source_spans=[provision.source_span],
+            confidence=0.8,
+        )
+        plan = research_plan()
+        bundles = [
+            EvidenceBundle(
+                issue_id="pit_sale",
+                controlling_provisions=[provision],
+                coverage_status="complete",
+            )
+        ]
+        answer_plan = pipeline_module._build_answer_plan(plan, [claim], [])
+        output = pipeline_module._deterministic_writer_output(
+            {
+                "validated_claims": [claim],
+                "legal_research_plan": plan,
+                "evidence_bundles": bundles,
+                "answer_plan": answer_plan,
+            }
+        )
+
+        self.assertIn("właściwy przepis", output.thesis)
+        self.assertNotIn("art. 30e", output.thesis.casefold())
+        self.assertEqual([], validate_writer_output(output, answer_plan=answer_plan, bundles=bundles))
+
 
 if __name__ == "__main__":
     unittest.main()

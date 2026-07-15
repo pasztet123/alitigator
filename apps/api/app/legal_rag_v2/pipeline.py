@@ -1995,7 +1995,25 @@ def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:
     answer_plan: AnswerPlan = payload["answer_plan"]
     allowed = set(answer_plan.allowed_claim_ids)
     selected = [item for item in claims if item.claim_id in allowed]
-    thesis = " ".join(item.result for item in selected) or (
+    provision_citations = {
+        provision.provision_id: provision.citation
+        for bundle in bundles
+        for provision in (
+            *bundle.controlling_provisions,
+            *bundle.dependency_provisions,
+            *bundle.exception_provisions,
+        )
+    }
+
+    def claim_text(claim: LegalClaim, value: str) -> str:
+        citations = [
+            provision_citations[provision_id]
+            for provision_id in claim.controlling_provision_ids
+            if provision_id in provision_citations
+        ]
+        return _remove_unbound_provision_references(value, citations)
+
+    thesis = " ".join(claim_text(item, item.result) for item in selected) or (
         "Brak materialnej konkluzji, która przeszła walidację źródeł."
     )
     sections = [
@@ -2003,7 +2021,7 @@ def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:
             section_id=f"analysis_{issue.issue_id}",
             title=issue.label,
             content="\n".join(
-                f"- {claim.text} {claim.result}"
+                f"- {claim_text(claim, claim.text)} {claim_text(claim, claim.result)}"
                 for claim in selected
                 if claim.issue_id == issue.issue_id
             )
@@ -2074,6 +2092,29 @@ def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:
         or ["Nie znaleziono dodatkowych luk poza oznaczonymi statusami claimów."],
         claim_ids_used=[item.claim_id for item in selected],
     )
+
+
+_RENDERED_PROVISION_RE = re.compile(
+    r"\bart\.\s*\d+[a-z]*(?:\s+ust\.\s*\d+[a-z]*)?(?:\s+pkt\s*\d+[a-z]*)?(?:\s+lit\.\s*[a-z])?",
+    re.I,
+)
+
+
+def _remove_unbound_provision_references(text: str, citations: Iterable[str]) -> str:
+    """Remove a model-invented provision label while retaining its claim text.
+
+    The deterministic renderer only receives claims already validated against
+    primary-law IDs.  A textual article label can nevertheless be invented by
+    the model.  It is safer to omit that label than to reject an otherwise
+    source-bound answer or silently expand its cited authority.
+    """
+    allowed = [_normalize_citation(value) for value in citations if value.strip()]
+
+    def replace(match: re.Match[str]) -> str:
+        reference = _normalize_citation(match.group(0))
+        return match.group(0) if any(reference in citation for citation in allowed) else "właściwy przepis"
+
+    return _RENDERED_PROVISION_RE.sub(replace, text)
 
 
 def render_structured_answer(output: WriterOutput) -> str:

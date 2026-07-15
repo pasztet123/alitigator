@@ -4,6 +4,7 @@ import unittest
 
 from app.treaty_chunk import (
     CORE_TREATY_SOURCES,
+    build_outputs,
     iter_article_records,
     load_structured_json_records,
     missing_numeric_articles,
@@ -23,6 +24,20 @@ class TreatyChunkingTests(unittest.TestCase):
         self.assertTrue({"7", "11", "12"}.issubset(articles))
         self.assertIn("Zyski", articles["7"]["text"])
         self.assertTrue(articles["7"]["pages"])
+
+    def test_german_article_11_override_restores_the_verified_treaty_rate(self) -> None:
+        source = next(
+            item
+            for item in CORE_TREATY_SOURCES
+            if item.slug == "niemcy" and item.variant == "umowa"
+        )
+        records, manifest = build_outputs([source])
+        article_11 = next(record for record in records if record["legal_provisions"] == ["art. 11"])
+
+        self.assertIn("5 procent kwoty brutto tych odsetek", article_11["content_text"])
+        self.assertEqual([10, 11], article_11["source_pages"])
+        self.assertEqual(source.source_url, article_11["source_url"])
+        self.assertIn("verified_article_overrides", manifest[0]["extraction_method"])
 
     def test_multi_column_order_does_not_relabel_headings(self) -> None:
         source = next(item for item in CORE_TREATY_SOURCES if item.slug == "niemcy")

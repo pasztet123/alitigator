@@ -118,7 +118,7 @@
     "pdf_path": "resources/upo/niemcy/umowa_pl_de.pdf",
     "source_url": "https://www.podatki.gov.pl/media/wdxllckt/niemcy-konwencja-tekst-polski-niemiecki.pdf",
     "status": "ready",
-    "extraction_method": "ocr",
+    "extraction_method": "ocr+verified_article_overrides",
     "extracted_chars": 34641,
     "article_count": 33,
     "expected_numeric_article_count": 33,

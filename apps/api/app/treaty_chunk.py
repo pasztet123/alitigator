@@ -88,6 +88,11 @@ class TreatySource:
     published_date: str
     ready_without_ocr: bool = True
     structured_json_path: Path | None = None
+    # A narrowly scoped, source-bound transcription for an article whose
+    # official PDF is image-only or whose OCR lost a material line.  Unlike a
+    # full structured text, this layer is merged with the PDF extraction and
+    # may replace only the affected article units.
+    article_overrides_path: Path | None = None
     expected_numeric_article_count: int | None = None
 
 
@@ -212,6 +217,7 @@ CORE_TREATY_SOURCES: tuple[TreatySource, ...] = (
         variant="umowa",
         pdf_path=Path("resources/upo/niemcy/umowa_pl_de.pdf"),
         structured_json_path=None,
+        article_overrides_path=Path("resources/upo/niemcy/verified_article_overrides.json"),
         source_url="https://www.podatki.gov.pl/media/wdxllckt/niemcy-konwencja-tekst-polski-niemiecki.pdf",
         act_title="Umowa między Rzecząpospolitą Polską a Republiką Federalną Niemiec w sprawie unikania podwójnego opodatkowania",
         subject_prefix="UPO Polska - Niemcy",
@@ -644,6 +650,42 @@ def load_structured_json_records(source: TreatySource) -> list[dict[str, Any]]:
     return records
 
 
+def load_article_overrides(source: TreatySource) -> list[dict[str, Any]]:
+    """Load verified article-level transcriptions bound to the same PDF.
+
+    This is intentionally a data layer rather than an answer-time exception:
+    it is reusable for every treaty and carries the original official source
+    URL in each resulting retrieval record.
+    """
+    if source.article_overrides_path is None:
+        return []
+    json_path = (
+        source.article_overrides_path
+        if source.article_overrides_path.is_absolute()
+        else REPO_ROOT / source.article_overrides_path
+    )
+    if not json_path.exists():
+        raise ValueError(f"Article override file is missing for {source.slug}/{source.variant}")
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    source_metadata = payload.get("source") or {}
+    official_url = str(source_metadata.get("official_pdf_url") or source_metadata.get("pdf_url") or "")
+    if official_url != source.source_url:
+        raise ValueError(
+            f"Article overrides for {source.slug}/{source.variant} do not bind to its official PDF"
+        )
+    overrides: list[dict[str, Any]] = []
+    for article in payload.get("articles", []):
+        article_number = str(article.get("article_number") or "").strip()
+        text = normalize_text(article.get("text") or article.get("source_text") or "")
+        if not article_number or not article_number.isdigit() or not text:
+            raise ValueError(f"Invalid article override in {json_path}")
+        raw_pages = article.get("pages") or []
+        if not isinstance(raw_pages, list) or any(not isinstance(page, int) or page < 1 for page in raw_pages):
+            raise ValueError(f"Invalid source pages in {json_path}")
+        overrides.append({"article": article_number, "pages": raw_pages, "text": text})
+    return overrides
+
+
 def min_article_count_for_ready(source: TreatySource) -> int:
     if source.variant.startswith("protokol"):
         return 3
@@ -683,6 +725,16 @@ def merge_article_layers(
         if existing is None or _article_quality(article) > _article_quality(existing):
             merged[key] = article
 
+    return _sort_article_records(merged.values())
+
+
+def apply_verified_article_overrides(
+    articles: list[dict[str, Any]], overrides: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Replace explicitly verified units, irrespective of OCR text length."""
+    merged = _dedupe_article_records(articles)
+    for article in overrides:
+        merged[str(article["article"])] = article
     return _sort_article_records(merged.values())
 
 
@@ -738,6 +790,7 @@ def build_outputs(sources: list[TreatySource]) -> tuple[list[dict[str, Any]], li
                 }
             )
             continue
+        article_overrides = load_article_overrides(source)
         pdf_path = source.pdf_path if source.pdf_path.is_absolute() else REPO_ROOT / source.pdf_path
         if pdf_path.exists():
             pages = extract_pdf_text_pages(source)
@@ -767,6 +820,10 @@ def build_outputs(sources: list[TreatySource]) -> tuple[list[dict[str, Any]], li
             else:
                 treaty_articles = _sort_article_records(_dedupe_article_records(ocr_articles).values())
                 extraction_method = "ocr" if ocr_articles else "none"
+
+            if article_overrides:
+                treaty_articles = apply_verified_article_overrides(treaty_articles, article_overrides)
+                extraction_method = f"{extraction_method}+verified_article_overrides"
 
             article_count = len(treaty_articles)
             extracted_chars = max(pdf_chars, ocr_chars)

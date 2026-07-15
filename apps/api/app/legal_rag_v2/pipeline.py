@@ -1718,9 +1718,14 @@ def _ensure_required_issue_claims(
             for item in references
             if re.search(rf"art\.\s*{treaty_article}(?!\d)", item.citation, re.I)
         )
-        # OCR commonly joins the words (``5procentkwoty``), therefore do not
-        # require a word boundary after ``procent``.
-        rate_match = re.search(r"(?<!\d)(\d{1,2})\s*(?:procent|%)", source_text, re.I)
+        # OCR commonly joins the Polish words (``5procentkwoty``).  The
+        # official PL-DE PDF is bilingual and its German column can be the
+        # only intact rendering of the same norm (``5 vom Hundert``).
+        rate_match = re.search(
+            r"(?<!\d)(\d{1,2})\s*(?:procent|%|vom\s+Hundert)",
+            source_text,
+            re.I,
+        )
         rate = f"{rate_match.group(1)}%" if rate_match else "przewidziana w UPO"
         result.append(
             LegalClaim(

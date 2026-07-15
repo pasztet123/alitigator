@@ -230,7 +230,7 @@ class CrossborderWhtEnrichmentTests(unittest.TestCase):
             EvidenceBundle(
                 issue_id="wht_royalties_pl_de_treaty",
                 controlling_provisions=[
-                    provision("upo_12", "art. 12", "upo-de-12", "Należności licencyjne: 5 procent kwoty brutto."),
+                    provision("upo_12", "art. 12", "upo-de-12", "Lizenzgebühren: 5 vom Hundert des Bruttobetrags."),
                     provision("cit_21_royalty", "art. 21 ust. 1 pkt 1", "cit-21", "Licencje podlegają WHT."),
                 ],
                 coverage_status="complete",
@@ -267,6 +267,7 @@ class CrossborderWhtEnrichmentTests(unittest.TestCase):
         )
         self.assertTrue(all(item.status == "conditional_missing_fact" for item in validated))
         self.assertIn("5%", next(item.result for item in validated if item.issue_id == "wht_interest_pl_de_treaty"))
+        self.assertIn("5%", next(item.result for item in validated if item.issue_id == "wht_royalties_pl_de_treaty"))
         self.assertIn("deterministic_complete_primary_bundle_claim", " ".join(warnings))
 
     def test_complete_vat_primary_bundles_cannot_be_erased_by_invalid_model_claims(self) -> None:

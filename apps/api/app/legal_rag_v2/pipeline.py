@@ -98,10 +98,21 @@ uncertainty in risks_and_gaps and list every claim ID you actually use.
 
 
 def _git_commit() -> str:
+    # The source tree is mounted at different depths locally and in Cloud
+    # Run (where it is normally /app/app/...).  Never derive a repository
+    # root from a fixed parent index: diagnostics must not be able to abort a
+    # legal answer before retrieval begins.
+    source = Path(__file__).resolve()
+    repository_root = next(
+        (directory for directory in source.parents if (directory / ".git").exists()),
+        None,
+    )
+    if repository_root is None:
+        return os.getenv("K_REVISION", "unknown")
     try:
         return subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=Path(__file__).resolve().parents[4],
+            cwd=repository_root,
             capture_output=True,
             text=True,
             timeout=1,

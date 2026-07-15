@@ -3,7 +3,9 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import app.legal_rag_v2.pipeline as pipeline_module
 from app.legal_rag_v2.authority import AuthorityExtractionResult
 from app.legal_rag_v2.pipeline import (
     ClaimSet,
@@ -11,6 +13,7 @@ from app.legal_rag_v2.pipeline import (
     LegalRagV2Pipeline,
     _build_evidence_bundles,
     _build_provision_graph,
+    _git_commit,
 )
 from app.legal_rag_v2.planner import LegalQueryPlanner
 from app.legal_rag_v2.retrieval import (
@@ -39,6 +42,15 @@ from app.legal_rag_v2.schemas import (
 
 
 QUESTION = "Czy sprzedaż udziału podlega PIT?"
+
+
+class RuntimeDiagnosticTests(unittest.TestCase):
+    def test_git_commit_uses_safe_fallback_in_cloud_run_layout(self) -> None:
+        with (
+            patch.object(pipeline_module, "__file__", "/app/app/legal_rag_v2/pipeline.py"),
+            patch.dict("os.environ", {"K_REVISION": "cloud-run-revision"}, clear=False),
+        ):
+            self.assertEqual(_git_commit(), "cloud-run-revision")
 
 
 def research_plan() -> LegalResearchPlan:

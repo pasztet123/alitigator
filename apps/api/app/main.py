@@ -123,7 +123,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.40"
+API_VERSION = "2.0.41"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -3516,9 +3516,22 @@ async def chat(
                 detail="Odpowiedź nie przeszła kontroli integralności źródeł.",
             )
         if failed_validations:
+            validation_diagnostics = {
+                item.stage: {
+                    "errors": item.errors,
+                    "warnings": item.warnings,
+                }
+                for item in v2_result.validation
+                if item.stage in failed_validations
+            }
             logger.warning(
-                "legal_rag_v2 served deterministic fallback after model validation failure",
-                extra={"run_id": run_id, "failed_stages": failed_validations},
+                "legal_rag_v2 served deterministic fallback after model validation failure: %s",
+                validation_diagnostics,
+                extra={
+                    "run_id": run_id,
+                    "failed_stages": failed_validations,
+                    "validation_diagnostics": validation_diagnostics,
+                },
             )
 
         v2_reply = v2_result.final_answer or (

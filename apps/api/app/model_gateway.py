@@ -70,12 +70,58 @@ class ModelRequestError(ModelGatewayError):
     """A non-retriable request/configuration/provider response error."""
 
 
+class ModelProviderRequestError(ModelRequestError):
+    """A provider-specific rejection which another provider may accept.
+
+    The public message deliberately contains only diagnostic metadata. Provider
+    response messages can echo request data and must never reach logs or user
+    answers verbatim.
+    """
+
+    def __init__(
+        self,
+        provider: str,
+        *,
+        status_code: Optional[int],
+        category: str,
+        error_code: Optional[str] = None,
+    ) -> None:
+        self.provider = provider
+        self.status_code = status_code
+        self.category = category
+        self.error_code = error_code
+        details = [f"category={category}"]
+        if status_code is not None:
+            details.append(f"status={status_code}")
+        if error_code:
+            details.append(f"code={error_code}")
+        super().__init__(f"{provider} provider rejection ({', '.join(details)})")
+
+
 class ModelConfigurationError(ModelRequestError):
     """The selected gateway cannot be constructed from current configuration."""
 
 
 class ModelSchemaError(ModelGatewayError):
     """Structured model output did not validate against the requested schema."""
+
+
+class ModelFallbackError(ModelGatewayError):
+    """Both configured providers failed, retaining only safe diagnostics."""
+
+    def __init__(
+        self,
+        primary_error: ModelGatewayError,
+        fallback_error: ModelGatewayError,
+    ) -> None:
+        self.primary_error = primary_error
+        self.fallback_error = fallback_error
+        super().__init__(
+            "primary="
+            f"{type(primary_error).__name__}:{primary_error}; "
+            "fallback="
+            f"{type(fallback_error).__name__}:{fallback_error}"
+        )
 
 
 @runtime_checkable
@@ -441,6 +487,68 @@ def _status_code_from_exception(exc: BaseException) -> Optional[int]:
     return response_status if isinstance(response_status, int) else None
 
 
+def _provider_error_payload(exc: BaseException) -> Mapping[str, Any]:
+    body = getattr(exc, "body", None)
+    if not isinstance(body, Mapping):
+        response = getattr(exc, "response", None)
+        try:
+            candidate = response.json() if response is not None else None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            candidate = None
+        body = candidate if isinstance(candidate, Mapping) else {}
+    error = body.get("error") if isinstance(body, Mapping) else None
+    return error if isinstance(error, Mapping) else body
+
+
+def _provider_error_metadata(
+    exc: BaseException,
+    *,
+    status: Optional[int],
+) -> tuple[str, Optional[str]]:
+    payload = _provider_error_payload(exc)
+    raw_code = payload.get("code")
+    raw_type = payload.get("type")
+    code = str(raw_code or raw_type).strip() or None
+    message = str(payload.get("message") or exc).lower()
+    combined = " ".join(filter(None, (code or "", message)))
+
+    if status == 401 or any(item in combined for item in ("invalid_api_key", "authentication")):
+        return "authentication", code
+    if status == 403 or any(item in combined for item in ("permission_denied", "not authorized")):
+        return "permission", code
+    if status == 402 or any(
+        item in combined
+        for item in ("insufficient_quota", "credit balance", "billing", "purchase credits")
+    ):
+        return "billing", code
+    if any(item in combined for item in ("content_filter", "safety", "refusal")):
+        return "safety", code
+    if any(
+        item in combined
+        for item in ("context_length", "too many tokens", "maximum context", "input is too long")
+    ):
+        return "context_length", code
+    if status == 404 or any(
+        item in combined
+        for item in ("model_not_found", "model not found", "does not have access to model")
+    ):
+        return "model_unavailable", code
+    if status in {400, 422} and any(
+        item in combined
+        for item in (
+            "json_schema",
+            "response_format",
+            "text.format",
+            "structured output",
+            "output_config",
+            "unsupported parameter",
+            "invalid schema",
+        )
+    ):
+        return "request_format", code
+    return "invalid_request", code
+
+
 def _classify_provider_exception(provider: str, exc: BaseException) -> ModelGatewayError:
     if isinstance(exc, ModelGatewayError):
         return exc
@@ -469,8 +577,21 @@ def _classify_provider_exception(provider: str, exc: BaseException) -> ModelGate
     if status is not None and status >= 500:
         return ModelUnavailableError(f"{provider} unavailable ({status})")
     if status is not None:
-        return ModelRequestError(f"{provider} rejected the request ({status})")
-    return ModelRequestError(f"{provider} request failed: {type(exc).__name__}")
+        category, error_code = _provider_error_metadata(exc, status=status)
+        if category == "safety":
+            return ModelRequestError(f"{provider} refused the request")
+        return ModelProviderRequestError(
+            provider,
+            status_code=status,
+            category=category,
+            error_code=error_code,
+        )
+    return ModelProviderRequestError(
+        provider,
+        status_code=None,
+        category="invalid_request",
+        error_code=type(exc).__name__,
+    )
 
 
 class _RetryingProviderGateway:
@@ -851,7 +972,7 @@ class AnthropicModelGateway(_RetryingProviderGateway):
 
 
 class FallbackModelGateway:
-    """Uses the fallback strictly after a typed technical provider failure."""
+    """Uses another provider after a typed technical or provider rejection."""
 
     def __init__(self, primary: ModelGateway, fallback: ModelGateway) -> None:
         self.primary = primary
@@ -877,10 +998,13 @@ class FallbackModelGateway:
         }
         try:
             return await self.primary.generate_text(**kwargs)
-        except ModelTechnicalError:
+        except (ModelTechnicalError, ModelProviderRequestError) as primary_error:
             # A primary-provider model id must never leak into a different provider.
             kwargs["model"] = None
-            return await self.fallback.generate_text(**kwargs)
+            try:
+                return await self.fallback.generate_text(**kwargs)
+            except ModelGatewayError as fallback_error:
+                raise ModelFallbackError(primary_error, fallback_error) from fallback_error
 
     async def generate_structured(
         self,
@@ -904,9 +1028,98 @@ class FallbackModelGateway:
         }
         try:
             return await self.primary.generate_structured(**kwargs)
-        except ModelTechnicalError:
+        except (ModelTechnicalError, ModelProviderRequestError) as primary_error:
             kwargs["model"] = None
-            return await self.fallback.generate_structured(**kwargs)
+            try:
+                return await self.fallback.generate_structured(**kwargs)
+            except ModelGatewayError as fallback_error:
+                raise ModelFallbackError(primary_error, fallback_error) from fallback_error
+
+
+def _extract_json_payload(value: str) -> str:
+    candidate = value.strip()
+    if candidate.startswith("```"):
+        lines = candidate.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        candidate = "\n".join(lines).strip()
+    try:
+        json.loads(candidate)
+        return candidate
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+
+    decoder = json.JSONDecoder()
+    for index, character in enumerate(candidate):
+        if character not in "[{":
+            continue
+        try:
+            _, end = decoder.raw_decode(candidate[index:])
+        except json.JSONDecodeError:
+            continue
+        return candidate[index : index + end]
+    raise ModelSchemaError("Model returned no valid JSON payload")
+
+
+class StructuredCompatibilityGateway:
+    """Falls back to JSON text only when native structured format is rejected."""
+
+    def __init__(self, gateway: ModelGateway) -> None:
+        self.gateway = gateway
+
+    async def generate_text(self, **kwargs: Any) -> str:
+        return await self.gateway.generate_text(**kwargs)
+
+    async def generate_structured(
+        self,
+        *,
+        response_model: Type[StructuredModelT],
+        input: ModelInput,
+        system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        reasoning_effort: Optional[ReasoningEffort] = None,
+        max_output_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+    ) -> StructuredModelT:
+        kwargs = {
+            "response_model": response_model,
+            "input": input,
+            "system_prompt": system_prompt,
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+            "max_output_tokens": max_output_tokens,
+            "temperature": temperature,
+        }
+        try:
+            return await self.gateway.generate_structured(**kwargs)
+        except ModelProviderRequestError as exc:
+            if exc.category != "request_format":
+                raise
+
+        schema = json.dumps(_model_json_schema(response_model), ensure_ascii=False)
+        compatibility_prompt = (
+            f"{system_prompt or ''}\n\n"
+            "Natywny format structured output nie jest dostępny dla tego żądania. "
+            "Zwróć wyłącznie jeden obiekt JSON zgodny dokładnie z poniższym JSON Schema; "
+            "bez Markdown, komentarzy ani dodatkowego tekstu.\n"
+            f"JSON Schema:\n{schema}"
+        ).strip()
+        text = await self.gateway.generate_text(
+            input=input,
+            system_prompt=compatibility_prompt,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
+            temperature=temperature,
+        )
+        try:
+            return _model_validate_json(response_model, _extract_json_payload(text))
+        except (ValidationError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ModelSchemaError(
+                "Compatibility JSON output failed schema validation"
+            ) from exc
 
 
 class RoutingModelGateway:
@@ -1085,17 +1298,19 @@ def _provider_gateway(
         "sleep": sleep,
     }
     if provider == "openai":
-        return OpenAIModelGateway(
+        gateway: ModelGateway = OpenAIModelGateway(
             api_key=config.openai_api_key,
             client=openai_client,
             **common,
         )
-    return AnthropicModelGateway(
-        api_key=config.anthropic_api_key,
-        client=anthropic_client,
-        api_url=config.anthropic_api_url,
-        **common,
-    )
+    else:
+        gateway = AnthropicModelGateway(
+            api_key=config.anthropic_api_key,
+            client=anthropic_client,
+            api_url=config.anthropic_api_url,
+            **common,
+        )
+    return StructuredCompatibilityGateway(gateway)
 
 
 def create_model_gateway(
@@ -1205,7 +1420,9 @@ __all__ = [
     "ModelGateway",
     "ModelGatewayConfig",
     "ModelGatewayError",
+    "ModelFallbackError",
     "ModelMessage",
+    "ModelProviderRequestError",
     "ModelRateLimitError",
     "ModelRequestError",
     "ModelSchemaError",
@@ -1215,6 +1432,7 @@ __all__ = [
     "OpenAIModelGateway",
     "ReasoningEffort",
     "RoutingModelGateway",
+    "StructuredCompatibilityGateway",
     "configured_model_ids",
     "configured_models",
     "create_model_gateway",

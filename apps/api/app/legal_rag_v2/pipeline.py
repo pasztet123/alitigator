@@ -894,7 +894,7 @@ class LegalRagV2Pipeline:
                     return batch_claims, [], []
                 error = "empty_issue_batch_claim_set"
             except ModelGatewayError as exc:
-                error = type(exc).__name__
+                error = f"{type(exc).__name__}:{exc}"
 
             # A provider can reject a combined payload even though every
             # individual issue is valid. Split the failed batch so one axis
@@ -983,7 +983,10 @@ class LegalRagV2Pipeline:
                 stage="writer_validation",
                 passed=False,
                 errors=["structured_answer_writer_failed"],
-                warnings=[type(exc).__name__, "deterministic_renderer_fallback"],
+                warnings=[
+                    f"{type(exc).__name__}:{exc}",
+                    "deterministic_renderer_fallback",
+                ],
             )
 
         errors = validate_writer_output(

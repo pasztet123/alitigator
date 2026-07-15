@@ -12,13 +12,16 @@ from app.model_gateway import (
     DEFAULT_OPENAI_MODEL,
     FallbackModelGateway,
     ModelConfigurationError,
+    ModelFallbackError,
     ModelGateway,
     ModelGatewayConfig,
+    ModelProviderRequestError,
     ModelRequestError,
     ModelSchemaError,
     ModelTransportError,
     OpenAIModelGateway,
     RoutingModelGateway,
+    StructuredCompatibilityGateway,
     configured_model_ids,
     create_model_gateway,
     create_model_gateway_for_model,
@@ -98,9 +101,10 @@ class FakeAnthropicClient:
 
 
 class FakeStatusError(Exception):
-    def __init__(self, status_code: int) -> None:
+    def __init__(self, status_code: int, body: Any = None) -> None:
         super().__init__(f"HTTP {status_code}")
         self.status_code = status_code
+        self.body = body
 
 
 async def no_sleep(_: float) -> None:
@@ -253,8 +257,9 @@ class OpenAIModelGatewayTests(unittest.IsolatedAsyncioTestCase):
             sleep=no_sleep,
         )
 
-        with self.assertRaises(ModelRequestError):
+        with self.assertRaises(ModelProviderRequestError) as raised:
             await gateway.generate_text(input="q")
+        self.assertEqual(raised.exception.category, "invalid_request")
         self.assertEqual(len(responses.create_calls), 1)
 
 
@@ -358,6 +363,144 @@ class FallbackModelGatewayTests(unittest.IsolatedAsyncioTestCase):
                         response_model=PlannedAnswer, input="q"
                     )
                 self.assertEqual(fallback.structured_calls, [])
+
+    async def test_fallback_is_used_for_provider_specific_request_rejection(self) -> None:
+        primary = StubGateway(
+            structured_error=ModelProviderRequestError(
+                "OpenAI",
+                status_code=404,
+                category="model_unavailable",
+                error_code="model_not_found",
+            )
+        )
+        expected = PlannedAnswer(title="fallback", confidence=0.8)
+        fallback = StubGateway(structured=expected)
+        gateway = FallbackModelGateway(primary, fallback)
+
+        result = await gateway.generate_structured(
+            response_model=PlannedAnswer,
+            input="q",
+            model="gpt-5.6-terra",
+        )
+
+        self.assertEqual(result, expected)
+        self.assertEqual(fallback.structured_calls[0]["model"], None)
+
+    async def test_both_provider_failures_keep_safe_diagnostics(self) -> None:
+        primary = StubGateway(
+            structured_error=ModelProviderRequestError(
+                "OpenAI",
+                status_code=404,
+                category="model_unavailable",
+                error_code="model_not_found",
+            )
+        )
+        fallback = StubGateway(
+            structured_error=ModelProviderRequestError(
+                "Anthropic",
+                status_code=400,
+                category="billing",
+                error_code="invalid_request_error",
+            )
+        )
+        gateway = FallbackModelGateway(primary, fallback)
+
+        with self.assertRaises(ModelFallbackError) as raised:
+            await gateway.generate_structured(
+                response_model=PlannedAnswer,
+                input="sekret123",
+            )
+
+        diagnostic = str(raised.exception)
+        self.assertIn("OpenAI provider rejection", diagnostic)
+        self.assertIn("Anthropic provider rejection", diagnostic)
+        self.assertNotIn("sekret123", diagnostic)
+
+
+class StructuredCompatibilityGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_request_format_rejection_falls_back_to_validated_json_text(self) -> None:
+        expected = PlannedAnswer(title="json fallback", confidence=0.9)
+        provider = StubGateway(
+            text='Oto wynik:\n```json\n{"title":"json fallback","confidence":0.9}\n```',
+            structured_error=ModelProviderRequestError(
+                "OpenAI",
+                status_code=400,
+                category="request_format",
+                error_code="invalid_json_schema",
+            ),
+        )
+        gateway = StructuredCompatibilityGateway(provider)
+
+        result = await gateway.generate_structured(
+            response_model=PlannedAnswer,
+            input="q",
+            system_prompt="system",
+        )
+
+        self.assertEqual(result, expected)
+        self.assertEqual(len(provider.text_calls), 1)
+        self.assertIn("JSON Schema", provider.text_calls[0]["system_prompt"])
+
+    async def test_billing_rejection_does_not_retry_as_text(self) -> None:
+        provider = StubGateway(
+            structured_error=ModelProviderRequestError(
+                "Anthropic",
+                status_code=400,
+                category="billing",
+                error_code="invalid_request_error",
+            )
+        )
+        gateway = StructuredCompatibilityGateway(provider)
+
+        with self.assertRaises(ModelProviderRequestError):
+            await gateway.generate_structured(
+                response_model=PlannedAnswer,
+                input="q",
+            )
+
+        self.assertEqual(provider.text_calls, [])
+
+    async def test_factory_recovers_from_openai_native_schema_rejection(self) -> None:
+        responses = FakeOpenAIResponses(
+            parse_results=[
+                FakeStatusError(
+                    400,
+                    {
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "invalid_json_schema",
+                            "message": "Invalid schema for response_format",
+                        }
+                    },
+                )
+            ],
+            create_results=[
+                FakeOpenAIResponse(
+                    output_text='{"title":"recovered","confidence":0.75}'
+                )
+            ],
+        )
+        config = get_model_gateway_config(
+            {
+                "OPENAI_API_KEY": "openai-test",
+                "LLM_TRANSPORT_RETRIES": "0",
+            }
+        )
+        gateway = create_model_gateway(
+            config,
+            openai_client=FakeOpenAIClient(responses),
+            sleep=no_sleep,
+        )
+
+        result = await gateway.generate_structured(
+            response_model=PlannedAnswer,
+            input="q",
+            model=DEFAULT_OPENAI_MODEL,
+        )
+
+        self.assertEqual(result.title, "recovered")
+        self.assertEqual(len(responses.parse_calls), 1)
+        self.assertEqual(len(responses.create_calls), 1)
 
 
 class ModelGatewayConfigurationTests(unittest.IsolatedAsyncioTestCase):

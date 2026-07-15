@@ -19,6 +19,10 @@ from app.rag import (
     build_legal_source_plan,
     chunk_has_substantive_axis_preferred_target,
     extract_normalized_provision_references,
+    filter_treaty_country_chunks,
+    query_is_direct_statute_lookup,
+    search_primary_law_chunks,
+    treaty_direct_subject_prefix,
 )
 
 
@@ -41,6 +45,43 @@ class MysqlAuthorityFastPathTests(unittest.TestCase):
         self.assertTrue(
             any(axis.axis_id == "poland_germany_treaty" for axis in plan.axes)
         )
+
+    def test_every_supported_treaty_country_uses_its_own_direct_lane(self) -> None:
+        query = "Polska spółka płaci odsetki do austriackiej spółki; UPO i podatek u źródła."
+        plan = build_legal_source_plan(query)
+
+        self.assertEqual("UPO Polska - Austria", treaty_direct_subject_prefix(query))
+        self.assertTrue(query_is_direct_statute_lookup(query))
+        self.assertTrue(any(axis.axis_id == "poland_austria_treaty" for axis in plan.axes))
+
+        chunks = [
+            RagChunk(
+                chunk_id="at:11", document_id="at", chunk_index=0, score=1.0,
+                chunk_text="Art. 11 Odsetki", subject="UPO Polska - Austria - art. 11",
+                signature=None, published_date=None, source_url=None, category=None,
+                source_type="statute", source_subtype="tax_treaty", legal_provisions=["art. 11"],
+            ),
+            RagChunk(
+                chunk_id="de:11", document_id="de", chunk_index=0, score=1.0,
+                chunk_text="Art. 11 Odsetki", subject="UPO Polska - Niemcy - art. 11",
+                signature=None, published_date=None, source_url=None, category=None,
+                source_type="statute", source_subtype="tax_treaty", legal_provisions=["art. 11"],
+            ),
+        ]
+        self.assertEqual(["at:11"], [chunk.chunk_id for chunk in filter_treaty_country_chunks(chunks, query)])
+
+    def test_exact_treaty_lane_does_not_wait_for_fulltext_supplement(self) -> None:
+        query = "Polska spółka płaci odsetki niemieckiej GmbH; UPO i WHT."
+        chunk = RagChunk(
+            chunk_id="de:11", document_id="de", chunk_index=0, score=200.0,
+            chunk_text="Art. 11 Odsetki", subject="UPO Polska - Niemcy - art. 11",
+            signature=None, published_date=None, source_url=None, category=None,
+            source_type="statute", source_subtype="tax_treaty", legal_provisions=["art. 11"],
+        )
+        with patch("app.rag.retrieve_deterministic_statute_chunks", return_value=[chunk]), patch(
+            "app.mysql_rag.search_chunks_mysql", side_effect=AssertionError("FULLTEXT must not run")
+        ):
+            self.assertEqual([chunk], search_primary_law_chunks(query, limit=4))
 
     def test_extracts_exact_citation_only_for_authority_scopes(self) -> None:
         query = "art. 21 ust. 30a ustawy PIT spłata kredytu"
@@ -144,6 +185,7 @@ class MysqlAuthorityFastPathTests(unittest.TestCase):
             if "FROM `chunks`" in str(call.args[0])
         )
         self.assertIn("CHAR_LENGTH(TRIM(c.chunk_text)) >= 40", statement)
+        self.assertIn("COALESCE(d.source_subtype, '') <> 'tax_treaty'", statement)
         self.assertNotIn("c.chunk_index = 0", statement)
 
     def test_heading_does_not_count_as_substantive_primary_law(self) -> None:

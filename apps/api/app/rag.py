@@ -3329,6 +3329,40 @@ def query_targets_poland_germany_treaty(query: str) -> bool:
     return has_germany_marker and (has_treaty_marker or query_targets_crossborder_treaty_analysis(query))
 
 
+_TREATY_COUNTRY_LANES: tuple[tuple[str, str, str], ...] = (
+    ("austria", "UPO Polska - Austria", r"\baustri\w*\b"),
+    ("czechy", "UPO Polska - Czechy", r"\bczech\w*\b"),
+    ("francja", "UPO Polska - Francja", r"\bfranc\w*\b"),
+    ("irlandia", "UPO Polska - Irlandia", r"\birland\w*\b"),
+    ("luksemburg", "UPO Polska - Luksemburg", r"\bluksemburg\w*\b"),
+    ("niderlandy", "UPO Polska - Niderlandy", r"\b(niderland\w*|holand\w*)\b"),
+    ("szwajcaria", "UPO Polska - Szwajcaria", r"\bszwajcar\w*\b"),
+    ("usa", "UPO Polska - USA", r"\b(usa|stan\w* zjednoczon\w*)\b"),
+    ("wielka_brytania", "UPO Polska - Wielka Brytania", r"\b(wielk\w* bryt\w*|uk)\b"),
+)
+
+
+def treaty_direct_subject_prefix(query: str) -> Optional[str]:
+    """Return exactly one country-specific UPO prefix for a treaty query.
+
+    Treaty articles share the same numbers across countries.  Letting a broad
+    CIT article lookup retrieve all of them makes the first result arbitrary
+    (and previously let a Polish-German question surface a US or Spanish
+    treaty).  Country selection therefore happens before lexical retrieval.
+    """
+    if query_targets_poland_germany_treaty(query):
+        return "UPO Polska - Niemcy"
+    if query_targets_poland_spain_treaty(query):
+        return "UPO Polska - Hiszpania"
+    if not query_targets_crossborder_treaty_analysis(query):
+        return None
+    normalized = normalize_whitespace(query or "").lower()
+    for _slug, prefix, pattern in _TREATY_COUNTRY_LANES:
+        if re.search(pattern, normalized):
+            return prefix
+    return None
+
+
 def build_poland_spain_treaty_statute_targets(query: str) -> list[tuple[str, str]]:
     if not query_targets_poland_spain_treaty(query):
         return []
@@ -5249,6 +5283,8 @@ def build_general_statute_concept_targets(query: str) -> list[tuple[str, str]]:
 
 
 def query_is_direct_statute_lookup(query: str) -> bool:
+    if treaty_direct_subject_prefix(query):
+        return True
     if not (build_explicit_statute_article_targets(query) or build_general_statute_concept_targets(query)):
         return False
     normalized = normalize_whitespace(query or "").lower()
@@ -7337,15 +7373,13 @@ def order_chunks_by_statute_targets(chunks: list[RagChunk], targets: list[tuple[
 def filter_treaty_country_chunks(chunks: list[RagChunk], query: str) -> list[RagChunk]:
     if not chunks:
         return chunks
-    if query_targets_poland_germany_treaty(query):
+    prefix = treaty_direct_subject_prefix(query)
+    if prefix:
+        normalized_prefix = prefix.lower()
         return [
             chunk for chunk in chunks
-            if not chunk.subject.lower().startswith("upo polska") or "niemcy" in chunk.subject.lower()
-        ]
-    if query_targets_poland_spain_treaty(query):
-        return [
-            chunk for chunk in chunks
-            if not chunk.subject.lower().startswith("upo polska") or "hiszpani" in chunk.subject.lower()
+            if not chunk.subject.lower().startswith("upo polska")
+            or chunk.subject.lower().startswith(normalized_prefix)
         ]
     return chunks
 
@@ -7591,6 +7625,22 @@ def decompose_query_into_legal_axes(query: str) -> list[LegalRetrievalAxis]:
                 direct_subject_prefix="UPO Polska - Hiszpania",
             )
         )
+    else:
+        treaty_prefix = treaty_direct_subject_prefix(query)
+        if treaty_prefix:
+            country_slug = next(
+                slug for slug, prefix, _pattern in _TREATY_COUNTRY_LANES if prefix == treaty_prefix
+            )
+            axes.append(
+                LegalRetrievalAxis(
+                    axis_id=f"poland_{country_slug}_treaty",
+                    label=f"{treaty_prefix} / treaty override",
+                    query=expand_search_query(f"{normalized} {treaty_prefix}"),
+                    source_types={"statute"},
+                    tax_domains={"CIT", "PIT"},
+                    direct_subject_prefix=treaty_prefix,
+                )
+            )
 
     # Keep axes unique and stable.
     deduped: list[LegalRetrievalAxis] = []
@@ -8353,6 +8403,12 @@ def search_primary_law_chunks(
         plan=source_plan,
         limit=max(effective_limit, len(source_plan.statute_targets) or 1),
     )
+    # A country-specific treaty lane is already an exact primary-law lookup.
+    # Do not send it through the broad MySQL FULLTEXT fallback: that adds
+    # latency without adding a controlling provision and can exhaust the
+    # request budget before the answer renderer sees the verified bundle.
+    if treaty_direct_subject_prefix(query) and deterministic:
+        return deterministic[:effective_limit]
     domains = set(source_plan.tax_domains)
     runtime = resolve_rag_runtime()
     if runtime.read_backend == "mysql":

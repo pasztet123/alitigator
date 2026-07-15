@@ -48,6 +48,7 @@ from app.rag import (
     extract_normalized_provision_references,
     extract_primary_article_key,
     extract_statute_target_from_text,
+    filter_treaty_country_chunks,
     filter_index_chunks,
     get_query_expansion_terms,
     get_rag_config,
@@ -1093,6 +1094,7 @@ def fetch_statute_rows_by_targets_mysql(
                 FROM `{chunks_table}` c
                 JOIN `{documents_table}` d ON d.document_id = c.document_id
                 WHERE d.source_type = 'statute'
+                  AND COALESCE(d.source_subtype, '') <> 'tax_treaty'
                   AND CHAR_LENGTH(TRIM(c.chunk_text)) >= 40
                   AND ({' OR '.join(clauses)})
                 ORDER BY d.published_date DESC, c.chunk_index ASC, c.chunk_id ASC
@@ -1153,6 +1155,7 @@ def retrieve_deterministic_statute_chunks_mysql(
         for row in rows
     ]
     ordered_chunks = order_chunks_by_statute_targets(ranked_chunks, list(source_plan.statute_targets))
+    ordered_chunks = filter_treaty_country_chunks(ordered_chunks, query)
     ordered_chunks = prioritize_wht_primary_chunks(ordered_chunks, query)
     ordered_chunks = select_wht_primary_bundle(ordered_chunks, query)
     return [

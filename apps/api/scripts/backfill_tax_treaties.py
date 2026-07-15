@@ -58,6 +58,14 @@ def main() -> int:
         type=Path,
         default=Path("apps/api/data/processed/eureka_rag.sqlite3"),
     )
+    parser.add_argument(
+        "--from-existing-jsonl",
+        action="store_true",
+        help=(
+            "Rebuild only SQLite from the committed treaty JSONL instead of "
+            "rerunning PDF/OCR extraction. Useful for a production sync host."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -69,9 +77,19 @@ def main() -> int:
         get_rag_config,
         index_record,
     )
-    from app.treaty_chunk import CORE_TREATY_SOURCES, build_outputs
+    if args.from_existing_jsonl:
+        if not args.output.exists() or not args.manifest.exists():
+            raise SystemExit("Committed treaty JSONL or manifest is unavailable")
+        records = [
+            json.loads(line)
+            for line in args.output.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    else:
+        from app.treaty_chunk import CORE_TREATY_SOURCES, build_outputs
 
-    records, manifest = build_outputs(list(CORE_TREATY_SOURCES))
+        records, manifest = build_outputs(list(CORE_TREATY_SOURCES))
     audit = _article_audit(records)
     print(
         json.dumps(
@@ -88,13 +106,14 @@ def main() -> int:
     if args.dry_run:
         return 0
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n",
-        encoding="utf-8",
-    )
-    args.manifest.parent.mkdir(parents=True, exist_ok=True)
-    args.manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if not args.from_existing_jsonl:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(
+            "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n",
+            encoding="utf-8",
+        )
+        args.manifest.parent.mkdir(parents=True, exist_ok=True)
+        args.manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     configured = get_rag_config()
     config = RagConfig(**{**configured.__dict__, "db_path": args.sqlite_path})

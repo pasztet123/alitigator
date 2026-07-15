@@ -4,6 +4,7 @@ import unittest
 
 from app.legal_rag_v2.schemas import (
     Clarification,
+    CalculationRecord,
     DocumentSourceSpan,
     EvidenceBundle,
     LegalClaim,
@@ -12,7 +13,7 @@ from app.legal_rag_v2.schemas import (
     ProvisionReference,
     ResearchIntent,
 )
-from app.legal_rag_v2.pipeline import validate_claims
+from app.legal_rag_v2.pipeline import _ensure_required_issue_claims, validate_claims
 from app.legal_rag_v2.retrieval import LegalRetriever, RetrievalCandidate, RetrievalConfig
 from app.legal_rag_v2.wht import (
     WhtPayAndRefundCalculationEngine,
@@ -129,6 +130,69 @@ class CrossborderWhtEnrichmentTests(unittest.TestCase):
         enriched = enrich_crossborder_wht_plan(plan(), QUESTION)
         bundle = EvidenceBundle(issue_id="wht_pay_and_refund_procedure")
         self.assertEqual([], WhtPayAndRefundCalculationEngine().calculate(enriched, [bundle]))
+
+    def test_complete_vat_licence_and_calculation_cannot_be_omitted_by_synthesis(self) -> None:
+        enriched = enrich_crossborder_wht_plan(plan(), QUESTION)
+
+        def provision(provision_id: str, citation: str, document_id: str) -> ProvisionReference:
+            return ProvisionReference(
+                provision_id=provision_id,
+                document_id=document_id,
+                citation=citation,
+                status="active",
+                source_span=DocumentSourceSpan(start=0, end=1, document_id=document_id),
+            )
+
+        vat_28b = provision("vat_28b", "art. 28b ust. 1", "vat-act")
+        vat_17 = provision("vat_17", "art. 17 ust. 1 pkt 4", "vat-act")
+        cit_26 = provision("cit_26_2e", "art. 26 ust. 2e", "cit-act")
+        bundles = [
+            EvidenceBundle(
+                issue_id="vat_royalty_crossborder_service",
+                controlling_provisions=[vat_28b],
+                dependency_provisions=[vat_17],
+                coverage_status="complete",
+                controlling_provision_present=True,
+                temporal_validation_passed=True,
+            ),
+            EvidenceBundle(
+                issue_id="wht_pay_and_refund_procedure",
+                controlling_provisions=[cit_26],
+                coverage_status="complete",
+                controlling_provision_present=True,
+                temporal_validation_passed=True,
+            ),
+        ]
+        calculation = CalculationRecord(
+            calculation_id="wht_pay_and_refund_domestic_wht",
+            inputs={
+                "aggregate_payments": 2_200_000,
+                "threshold_base": 2_000_000,
+                "excess": 200_000,
+                "domestic_wht": 40_000,
+            },
+            units={},
+            operation="pay_and_refund_domestic_wht_on_excess",
+            formula="formula",
+            result=40_000,
+            rounding="nearest PLN",
+            legal_basis=[cit_26],
+            dependencies=["wht_pay_and_refund_procedure"],
+        )
+
+        completed, warnings = _ensure_required_issue_claims(
+            [], plan=enriched, bundles=bundles, calculations=[calculation]
+        )
+        validated, errors, _ = validate_claims(
+            completed, plan=enriched, bundles=bundles, calculations=[calculation]
+        )
+
+        self.assertEqual([], errors)
+        self.assertTrue(any(item.issue_id == "vat_royalty_crossborder_service" for item in validated))
+        calculation_claim = next(item for item in validated if item.claim_type == "calculation")
+        self.assertEqual([calculation.calculation_id], calculation_claim.calculation_ids)
+        self.assertIn("40 000 zł", calculation_claim.result)
+        self.assertIn("deterministic_complete_bundle_claim", " ".join(warnings))
 
     def test_incomplete_procedural_bundle_blocks_only_its_own_claims(self) -> None:
         enriched = enrich_crossborder_wht_plan(plan(), QUESTION)

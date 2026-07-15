@@ -830,11 +830,17 @@ class LegalRagV2Pipeline:
             claims = output.claims
         except ModelGatewayError as exc:
             claims = _blocked_claims(plan, bundles, reason=type(exc).__name__)
+            claims, completion_warnings = _ensure_required_issue_claims(
+                claims,
+                plan=plan,
+                bundles=bundles,
+                calculations=calculations,
+            )
             return claims, ValidationRecord(
                 stage="claim_validation",
                 passed=False,
                 errors=["structured_claim_synthesis_failed"],
-                warnings=[type(exc).__name__],
+                warnings=[type(exc).__name__, *completion_warnings],
             )
 
         claims, errors, warnings = validate_claims(
@@ -843,6 +849,13 @@ class LegalRagV2Pipeline:
             bundles=bundles,
             calculations=calculations,
         )
+        claims, completion_warnings = _ensure_required_issue_claims(
+            claims,
+            plan=plan,
+            bundles=bundles,
+            calculations=calculations,
+        )
+        warnings.extend(completion_warnings)
         return claims, ValidationRecord(
             stage="claim_validation",
             passed=not errors,
@@ -885,6 +898,17 @@ class LegalRagV2Pipeline:
             answer_plan=writer_payload["answer_plan"],
             bundles=writer_payload["evidence_bundles"],
         )
+        required_claim_ids = {
+            item.claim_id
+            for item in writer_payload["validated_claims"]
+            if item.claim_id.startswith("deterministic_")
+        }
+        rendered_claim_ids = {
+            *output.claim_ids_used,
+            *(claim_id for section in output.analysis_sections for claim_id in section.claim_ids_used),
+        }
+        if required_claim_ids - rendered_claim_ids:
+            errors.append("writer_omitted_required_deterministic_claim")
         if errors:
             output = _deterministic_writer_output(writer_payload)
         return output, ValidationRecord(
@@ -1572,6 +1596,122 @@ def _blocked_claims(
     return result
 
 
+def _ensure_required_issue_claims(
+    claims: list[LegalClaim],
+    *,
+    plan: LegalResearchPlan,
+    bundles: list[EvidenceBundle],
+    calculations: list[CalculationRecord],
+) -> tuple[list[LegalClaim], list[str]]:
+    """Close mandatory, source-complete issue outputs deterministically.
+
+    The model is allowed to qualify or block a legal conclusion, but it must
+    not silently omit an entire issue whose EvidenceBundle is complete.  In
+    particular, this guarantees the B2B VAT licence rule and code-produced
+    pay-and-refund calculation are rendered even when structured synthesis
+    decides to focus on a different payment stream.
+    """
+    result = list(claims)
+    warnings: list[str] = []
+    allowed_statuses = {"approved", "conditional_missing_fact"}
+    approved_by_issue = {
+        item.issue_id for item in result if item.status in allowed_statuses
+    }
+    bundles_by_issue = {item.issue_id: item for item in bundles}
+
+    licence_bundle = bundles_by_issue.get("vat_royalty_crossborder_service")
+    if (
+        licence_bundle is not None
+        and licence_bundle.coverage_status == "complete"
+        and "vat_royalty_crossborder_service" not in approved_by_issue
+    ):
+        references = [
+            item
+            for item in (
+                *licence_bundle.controlling_provisions,
+                *licence_bundle.dependency_provisions,
+            )
+            if item.source_span is not None
+        ]
+        reference_ids = {item.provision_id for item in references}
+        has_place_rule = any(re.search(r"art\.\s*28b", item.citation, re.I) for item in references)
+        has_import_rule = any(re.search(r"art\.\s*17\s+ust\.\s*1\s+pkt\s*4", item.citation, re.I) for item in references)
+        if references and has_place_rule and has_import_rule:
+            result.append(
+                LegalClaim(
+                    claim_id="deterministic_vat_royalty_import",
+                    issue_id="vat_royalty_crossborder_service",
+                    claim_type="application",
+                    text=(
+                        "Jeżeli polska spółka jest podatnikiem VAT nabywającym licencję "
+                        "od niemieckiej GmbH, miejsce świadczenia B2B jest co do zasady w Polsce, "
+                        "a nabywca rozlicza import usług po spełnieniu ustawowych warunków."
+                    ),
+                    status="conditional_missing_fact",
+                    result=(
+                        "Dla licencji należy przyjąć warunkowo polskie miejsce świadczenia i "
+                        "import usług; potwierdź status VAT stron oraz brak polskiego stałego "
+                        "miejsca prowadzenia działalności GmbH."
+                    ),
+                    controlling_provision_ids=sorted(reference_ids),
+                    source_spans=[item.source_span for item in references if item.source_span],
+                    confidence=0.82,
+                )
+            )
+            approved_by_issue.add("vat_royalty_crossborder_service")
+            warnings.append("vat_royalty_crossborder_service:deterministic_complete_bundle_claim")
+
+    used_calculations = {
+        calculation_id
+        for item in result
+        if item.status in allowed_statuses
+        for calculation_id in item.calculation_ids
+    }
+    for calculation in calculations:
+        if calculation.calculation_id in used_calculations:
+            continue
+        issue_id = next(
+            (item for item in calculation.dependencies if item in bundles_by_issue),
+            "wht_pay_and_refund_procedure",
+        )
+        references = [item for item in calculation.legal_basis if item.source_span is not None]
+        if not references:
+            continue
+        total = calculation.inputs.get("aggregate_payments")
+        threshold = calculation.inputs.get("threshold_base")
+        excess = calculation.inputs.get("excess")
+        domestic_wht = calculation.inputs.get("domestic_wht", calculation.result)
+        if not all(isinstance(item, (int, float)) for item in (total, threshold, excess, domestic_wht)):
+            continue
+        result.append(
+            LegalClaim(
+                claim_id=f"deterministic_{calculation.calculation_id}",
+                issue_id=issue_id,
+                claim_type="calculation",
+                text=(
+                    "Łączne płatności wynoszą "
+                    f"{_format_pln(total)}, więc przekraczają próg {_format_pln(threshold)} "
+                    f"o {_format_pln(excess)}."
+                ),
+                status="approved",
+                result=(
+                    "Przy krajowej stawce 20% obowiązkowy pobór od nadwyżki wynosi "
+                    f"{_format_pln(domestic_wht)}."
+                ),
+                controlling_provision_ids=[item.provision_id for item in references],
+                calculation_ids=[calculation.calculation_id],
+                source_spans=[item.source_span for item in references if item.source_span],
+                confidence=0.99,
+            )
+        )
+        warnings.append(f"{calculation.calculation_id}:deterministic_calculation_claim")
+    return result, warnings
+
+
+def _format_pln(value: int | float) -> str:
+    return f"{int(round(value)):,}".replace(",", " ") + " zł"
+
+
 def _build_answer_plan(
     plan: LegalResearchPlan,
     claims: list[LegalClaim],
@@ -1716,7 +1856,7 @@ def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:
             sources.append(
                 WriterSource(
                     source_id=provision.provision_id,
-                    label="Przepis",
+                    label=_writer_source_label(provision),
                     citation=provision.citation,
                     claim_ids=[
                         claim.claim_id
@@ -1890,13 +2030,29 @@ def _dedupe_provisions(values: Iterable[ProvisionReference]) -> list[ProvisionRe
 
 def _dedupe_writer_sources(values: Iterable[WriterSource]) -> list[WriterSource]:
     result: list[WriterSource] = []
-    seen: set[str] = set()
+    by_citation: dict[tuple[str, str], WriterSource] = {}
     for value in values:
-        if value.source_id in seen:
+        key = (value.label, _normalize_citation(value.citation))
+        existing = by_citation.get(key)
+        if existing is not None:
+            existing.claim_ids = list(dict.fromkeys([*existing.claim_ids, *value.claim_ids]))
             continue
-        seen.add(value.source_id)
+        by_citation[key] = value
         result.append(value)
     return result
+
+
+def _writer_source_label(provision: ProvisionReference) -> str:
+    document_id = provision.document_id.casefold()
+    if "pl-upo" in document_id:
+        return "UPO Polska–Niemcy" if "niemcy" in document_id else "UPO"
+    if "podatku-od-towarow" in document_id:
+        return "Ustawa o VAT"
+    if "podatku-dochodowym-od-osob-prawnych" in document_id:
+        return "Ustawa o CIT"
+    if "podatku-dochodowym-od-osob-fizycznych" in document_id:
+        return "Ustawa o PIT"
+    return "Przepis"
 
 
 def _normalize_citation(value: str) -> str:

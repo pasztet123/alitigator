@@ -2018,36 +2018,46 @@ def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:
             *bundle.dependency_provisions,
             *bundle.exception_provisions,
         ):
+            claim_ids = [
+                claim.claim_id
+                for claim in selected
+                if provision.provision_id in claim.controlling_provision_ids
+            ]
+            # Do not emit unrelated entries from another issue bundle.  Apart
+            # from being noisy, mixing them into the final source list can
+            # make two editorial units of one technical record look like a
+            # citation substitution to the integrity gate.
+            if not claim_ids:
+                continue
             sources.append(
                 WriterSource(
                     source_id=provision.provision_id,
                     label=_writer_source_label(provision),
                     citation=provision.citation,
-                    claim_ids=[
-                        claim.claim_id
-                        for claim in selected
-                        if provision.provision_id in claim.controlling_provision_ids
-                    ],
+                    claim_ids=claim_ids,
                 )
             )
         for authority in (
             *bundle.supporting_authorities,
             *bundle.contrary_authorities,
         ):
+            claim_ids = [
+                claim.claim_id
+                for claim in selected
+                if authority.document_id
+                in (
+                    *claim.supporting_authority_ids,
+                    *claim.contrary_authority_ids,
+                )
+            ]
+            if not claim_ids:
+                continue
             sources.append(
                 WriterSource(
                     source_id=authority.document_id,
                     label=authority.document_type,
                     citation=authority.signature or authority.document_id,
-                    claim_ids=[
-                        claim.claim_id
-                        for claim in selected
-                        if authority.document_id
-                        in (
-                            *claim.supporting_authority_ids,
-                            *claim.contrary_authority_ids,
-                        )
-                    ],
+                    claim_ids=claim_ids,
                 )
             )
     missing_questions = [item.question for item in plan.missing_facts]

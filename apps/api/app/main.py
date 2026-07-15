@@ -123,7 +123,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.36"
+API_VERSION = "2.0.37"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -3497,9 +3497,19 @@ async def chat(
             if stage not in {"claim_validation", "writer_validation"}
         ]
         if blocking_validations:
+            validation_errors = {
+                item.stage: item.errors
+                for item in v2_result.validation
+                if item.stage in blocking_validations
+            }
             logger.error(
-                "legal_rag_v2 result blocked by deterministic validation",
-                extra={"run_id": run_id, "failed_stages": blocking_validations},
+                "legal_rag_v2 result blocked by deterministic validation: %s",
+                validation_errors,
+                extra={
+                    "run_id": run_id,
+                    "failed_stages": blocking_validations,
+                    "validation_errors": validation_errors,
+                },
             )
             raise HTTPException(
                 status_code=502,

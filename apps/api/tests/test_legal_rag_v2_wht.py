@@ -203,6 +203,72 @@ class CrossborderWhtEnrichmentTests(unittest.TestCase):
         self.assertIn("40 000 zł", calculation_claim.result)
         self.assertIn("deterministic_complete_bundle_claim", " ".join(warnings))
 
+    def test_complete_wht_primary_bundles_cannot_be_erased_by_invalid_model_claims(self) -> None:
+        enriched = enrich_crossborder_wht_plan(plan(), QUESTION)
+
+        def provision(provision_id: str, citation: str, document_id: str, text: str) -> ProvisionReference:
+            return ProvisionReference(
+                provision_id=provision_id,
+                document_id=document_id,
+                citation=citation,
+                text=text,
+                status="active",
+                source_span=DocumentSourceSpan(start=0, end=max(1, len(text)), document_id=document_id),
+            )
+
+        bundles = [
+            EvidenceBundle(
+                issue_id="wht_interest_pl_de_treaty",
+                controlling_provisions=[
+                    provision("upo_11", "art. 11", "upo-de-11", "Odsetki: 5 procent kwoty brutto."),
+                    provision("cit_21_1", "art. 21 ust. 1 pkt 1", "cit-21", "Odsetki podlegają WHT."),
+                ],
+                coverage_status="complete",
+                controlling_provision_present=True,
+                temporal_validation_passed=True,
+            ),
+            EvidenceBundle(
+                issue_id="wht_royalties_pl_de_treaty",
+                controlling_provisions=[
+                    provision("upo_12", "art. 12", "upo-de-12", "Należności licencyjne: 5 procent kwoty brutto."),
+                    provision("cit_21_royalty", "art. 21 ust. 1 pkt 1", "cit-21", "Licencje podlegają WHT."),
+                ],
+                coverage_status="complete",
+                controlling_provision_present=True,
+                temporal_validation_passed=True,
+            ),
+            EvidenceBundle(
+                issue_id="wht_services_pl_de_business_profits",
+                controlling_provisions=[
+                    provision("upo_7", "art. 7", "upo-de-7", "Zyski przedsiębiorstw i zakład."),
+                    provision("cit_21_management", "art. 21 ust. 1 pkt 2a", "cit-21", "Usługi zarządzania i kontroli."),
+                ],
+                coverage_status="complete",
+                controlling_provision_present=True,
+                temporal_validation_passed=True,
+            ),
+        ]
+
+        completed, warnings = _ensure_required_issue_claims(
+            [], plan=enriched, bundles=bundles, calculations=[]
+        )
+        validated, errors, _ = validate_claims(
+            completed, plan=enriched, bundles=bundles, calculations=[]
+        )
+
+        self.assertEqual([], errors)
+        self.assertEqual(
+            {
+                "wht_interest_pl_de_treaty",
+                "wht_royalties_pl_de_treaty",
+                "wht_services_pl_de_business_profits",
+            },
+            {item.issue_id for item in validated},
+        )
+        self.assertTrue(all(item.status == "conditional_missing_fact" for item in validated))
+        self.assertIn("5%", next(item.result for item in validated if item.issue_id == "wht_interest_pl_de_treaty"))
+        self.assertIn("deterministic_complete_primary_bundle_claim", " ".join(warnings))
+
     def test_incomplete_procedural_bundle_blocks_only_its_own_claims(self) -> None:
         enriched = enrich_crossborder_wht_plan(plan(), QUESTION)
         art_26_2e = ProvisionReference(

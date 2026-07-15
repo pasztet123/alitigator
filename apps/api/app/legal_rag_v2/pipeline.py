@@ -1619,6 +1619,99 @@ def _ensure_required_issue_claims(
     }
     bundles_by_issue = {item.issue_id: item for item in bundles}
 
+    # A model-produced claim can be rejected because it bound the right legal
+    # proposition to a wrong provision ID.  That must not erase a complete,
+    # independently verified WHT bundle.  These minimum claims are generated
+    # only from the exact primary-law references already selected for the
+    # issue; they never infer beneficial-owner or permanent-establishment
+    # facts and remain explicitly conditional.
+    wht_templates = {
+        "wht_interest_pl_de_treaty": {
+            "required": (r"art\.\s*11", r"art\.\s*21\s+ust\.\s*1\s+pkt\s*1"),
+            "text": (
+                "Odsetki wypłacane niemieckiej GmbH należą do krajowej kategorii WHT z "
+                "art. 21 ust. 1 pkt 1 ustawy o CIT. Art. 11 UPO Polska–Niemcy "
+                "dopuszcza opodatkowanie w państwie źródła, lecz przewiduje preferencję "
+                "wyłącznie dla osoby uprawnionej mającej rezydencję w drugim państwie."
+            ),
+            "result": (
+                "Stawka traktatowa {rate} ma charakter warunkowy; bez potwierdzenia statusu "
+                "beneficial owner nie można zatwierdzić jej zastosowania."
+            ),
+        },
+        "wht_royalties_pl_de_treaty": {
+            "required": (r"art\.\s*12", r"art\.\s*21\s+ust\.\s*1\s+pkt\s*1"),
+            "text": (
+                "Należności za korzystanie z praw własności intelektualnej mogą należeć do "
+                "krajowej kategorii WHT z art. 21 ust. 1 pkt 1 ustawy o CIT. Art. 12 UPO "
+                "Polska–Niemcy ogranicza podatek u źródła, gdy odbiorca jest osobą uprawnioną "
+                "mającą rezydencję w drugim państwie."
+            ),
+            "result": (
+                "Stawka traktatowa {rate} ma charakter warunkowy; potwierdź zakres licencji "
+                "oraz status beneficial owner przed zastosowaniem preferencji."
+            ),
+        },
+        "wht_services_pl_de_business_profits": {
+            "required": (r"art\.\s*7", r"art\.\s*21\s+ust\.\s*1\s+pkt\s*2a"),
+            "text": (
+                "Usługi zarządzania i kontroli są objęte krajowym reżimem art. 21 ust. 1 pkt 2a "
+                "ustawy o CIT. Dla zastosowania UPO Polska–Niemcy należy odrębnie ocenić "
+                "regułę zysków przedsiębiorstw z art. 7 i związek świadczenia z zakładem."
+            ),
+            "result": (
+                "Bez ustalenia, czy GmbH prowadzi działalność przez zakład w Polsce i czy "
+                "wynagrodzenie jest z nim związane, nie można zatwierdzić niepobrania WHT na "
+                "podstawie art. 7 UPO."
+            ),
+        },
+    }
+    for issue_id, template in wht_templates.items():
+        bundle = bundles_by_issue.get(issue_id)
+        if (
+            bundle is None
+            or bundle.coverage_status != "complete"
+            or issue_id in approved_by_issue
+        ):
+            continue
+        references = [
+            item
+            for item in (
+                *bundle.controlling_provisions,
+                *bundle.dependency_provisions,
+                *bundle.exception_provisions,
+            )
+            if item.source_span is not None
+        ]
+        if not references or not all(
+            any(re.search(pattern, item.citation, re.I) for item in references)
+            for pattern in template["required"]
+        ):
+            continue
+        treaty_article = "11" if issue_id == "wht_interest_pl_de_treaty" else "12"
+        source_text = "\n".join(
+            item.text or ""
+            for item in references
+            if re.search(rf"art\.\s*{treaty_article}(?!\d)", item.citation, re.I)
+        )
+        rate_match = re.search(r"\b(\d{1,2})\s*(?:procent|%)\b", source_text, re.I)
+        rate = f"{rate_match.group(1)}%" if rate_match else "wynikająca z art. 11 lub art. 12 UPO"
+        result.append(
+            LegalClaim(
+                claim_id=f"deterministic_{issue_id}_primary_bundle",
+                issue_id=issue_id,
+                claim_type="application",
+                text=template["text"],
+                status="conditional_missing_fact",
+                result=template["result"].format(rate=rate),
+                controlling_provision_ids=[item.provision_id for item in references],
+                source_spans=[item.source_span for item in references if item.source_span],
+                confidence=0.93,
+            )
+        )
+        approved_by_issue.add(issue_id)
+        warnings.append(f"{issue_id}:deterministic_complete_primary_bundle_claim")
+
     licence_bundle = bundles_by_issue.get("vat_royalty_crossborder_service")
     if (
         licence_bundle is not None

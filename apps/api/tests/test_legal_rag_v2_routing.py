@@ -37,8 +37,14 @@ def _plan() -> LegalResearchPlan:
 class FakePipeline:
     calls = 0
 
-    def __init__(self, *, validation_passed: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        validation_passed: bool = True,
+        validation_stage: str = "post_render",
+    ) -> None:
         self.validation_passed = validation_passed
+        self.validation_stage = validation_stage
 
     async def run(self, question, **kwargs):
         self.calls += 1
@@ -59,7 +65,7 @@ class FakePipeline:
             final_answer=answer,
             validation=[
                 ValidationRecord(
-                    stage="post_render",
+                    stage=self.validation_stage,
                     passed=self.validation_passed,
                     errors=[] if self.validation_passed else ["unsupported claim"],
                 )
@@ -107,7 +113,7 @@ class LegalRagV2RoutingTests(unittest.IsolatedAsyncioTestCase):
                 await chat(request, current_user=user)
 
         self.assertEqual(raised.exception.status_code, 502)
-        self.assertIn("zablokował odpowiedź", str(raised.exception.detail))
+        self.assertIn("kontroli integralności", str(raised.exception.detail))
 
     async def test_v2_returns_before_every_special_case_router(self) -> None:
         pipeline = FakePipeline()
@@ -144,6 +150,26 @@ class LegalRagV2RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pipeline.calls, 1)
         self.assertEqual(response.analysis_trace["pipeline"], "legal_rag_v2")
         self.assertEqual(response.reply.splitlines()[0], "Teza")
+
+    async def test_recovered_claim_validation_is_served_without_a_trace_id(self) -> None:
+        pipeline = FakePipeline(
+            validation_passed=False,
+            validation_stage="claim_validation",
+        )
+        request = ChatRequest(messages=[ChatMessage(role="user", content="Pytanie")])
+        user = AuthenticatedUser(id="user", email=None, full_name=None)
+
+        with (
+            patch.dict(os.environ, {"LEGAL_PIPELINE_MODE": "legal_rag_v2"}),
+            patch("app.main.ensure_profile"),
+            patch("app.main.is_chat_storage_available", return_value=False),
+            patch("app.main.is_model_gateway_configured", return_value=False),
+            patch("app.main.get_legal_rag_v2_pipeline", return_value=pipeline),
+        ):
+            response = await chat(request, current_user=user)
+
+        self.assertEqual(response.reply.splitlines()[0], "Teza")
+        self.assertNotIn("Trace diagnostyczny", response.reply)
 
 
 if __name__ == "__main__":

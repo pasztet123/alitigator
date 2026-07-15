@@ -123,7 +123,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.26"
+API_VERSION = "2.0.27"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -181,7 +181,12 @@ def legal_runtime_debug(*, controlled_pipeline_used: bool = False) -> dict[str, 
         "retrieval_mode": "issue_scoped_bidirectional" if mode in {"model_rag_model", "legal_rag_v2"} else get_legal_retrieval_mode(),
         "rag_backend": resolve_rag_runtime().read_backend,
         "planner_mode": "model_first" if mode in {"model_rag_model", "legal_rag_v2"} else "legacy_rules",
-        "authority_extractor_mode": "model_structured" if mode in {"model_rag_model", "legal_rag_v2"} else "heuristic_or_disabled",
+        "authority_extractor_mode": (
+            "model_structured"
+            if os.getenv("LEGAL_RAG_V2_MODEL_AUTHORITY_EXTRACTION", "").strip().lower()
+            in {"1", "true", "yes", "on"}
+            else "heuristic"
+        ) if mode in {"model_rag_model", "legal_rag_v2"} else "heuristic_or_disabled",
         "answer_provider": MODEL_GATEWAY_CONFIG.provider,
         "answer_model": MODEL_GATEWAY_CONFIG.answer_writer_model if mode in {"model_rag_model", "legal_rag_v2"} else DEFAULT_MODEL,
         "provider": MODEL_GATEWAY_CONFIG.provider,
@@ -3476,33 +3481,41 @@ async def chat(
             logger.exception("legal_rag_v2 request failed", extra={"run_id": run_id})
             raise HTTPException(
                 status_code=502,
-                detail=(
-                    "Nowy pipeline prawny nie ukończył analizy. "
-                    f"Trace diagnostyczny: {run_id}."
-                ),
+                detail="Nie udało się ukończyć analizy prawnej. Spróbuj ponownie.",
             ) from exc
 
-        failed_validations = [
-            item.stage for item in v2_result.validation if not item.passed
+        failed_validations = [item.stage for item in v2_result.validation if not item.passed]
+        # A failed structured model call has a deterministic, source-bound
+        # fallback in the pipeline.  Returning a 502 in that situation made
+        # the product unavailable despite a safely renderable answer.  Only
+        # the final renderer validation is an integrity gate; the other two
+        # stages can be reported diagnostically while their fallback output is
+        # served.
+        blocking_validations = [
+            stage
+            for stage in failed_validations
+            if stage not in {"claim_validation", "writer_validation"}
         ]
-        if failed_validations:
+        if blocking_validations:
             logger.error(
                 "legal_rag_v2 result blocked by deterministic validation",
-                extra={"run_id": run_id, "failed_stages": failed_validations},
+                extra={"run_id": run_id, "failed_stages": blocking_validations},
             )
             raise HTTPException(
                 status_code=502,
-                detail=(
-                    "Nowy pipeline prawny zablokował odpowiedź po walidacji. "
-                    f"Trace diagnostyczny: {run_id}."
-                ),
+                detail="Odpowiedź nie przeszła kontroli integralności źródeł.",
+            )
+        if failed_validations:
+            logger.warning(
+                "legal_rag_v2 served deterministic fallback after model validation failure",
+                extra={"run_id": run_id, "failed_stages": failed_validations},
             )
 
         v2_reply = v2_result.final_answer or (
             "Teza\nBrak zatwierdzonej odpowiedzi.\n\n"
             "Analiza\nPipeline nie utworzył renderowalnego wyniku.\n\n"
             "Źródła\nBrak.\n\n"
-            "Ryzyka i luki\nSprawdź trace przebiegu."
+            "Ryzyka i luki\nSpróbuj ponownie lub doprecyzuj pytanie."
         )
         if model_configured:
             consume_credit_for_chat(

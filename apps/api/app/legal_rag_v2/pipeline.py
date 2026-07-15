@@ -562,6 +562,30 @@ class LegalRagV2Pipeline:
             claims=claims,
             bundles=bundles,
         )
+        # The user-facing integrity gate remains strict, but a malformed
+        # model writer payload must not turn a complete, source-bound result
+        # into a 502.  Re-render from validated claims and serve that output
+        # only when it passes the exact same post-render validation.
+        if not render_validation.passed:
+            deterministic_output = _deterministic_writer_output(writer_payload)
+            deterministic_answer = render_structured_answer(deterministic_output)
+            deterministic_validation = validate_rendered_answer(
+                deterministic_answer,
+                writer_output=deterministic_output,
+                claims=claims,
+                bundles=bundles,
+            )
+            if deterministic_validation.passed:
+                writer_output = deterministic_output
+                final_answer = deterministic_answer
+                render_validation = deterministic_validation.model_copy(
+                    update={
+                        "warnings": [
+                            "model_render_failed_integrity_check",
+                            "deterministic_render_revalidated",
+                        ]
+                    }
+                )
         validations.append(render_validation)
         trace.write_text("final_answer.txt", final_answer)
         trace.write_json(

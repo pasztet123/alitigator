@@ -35,6 +35,7 @@ from app.legal_rag_v2.schemas import (
     QueryFamily,
     ResearchIntent,
     SourceSpan,
+    ValidationRecord,
     WriterAnalysisSection,
     WriterOutput,
     WriterSource,
@@ -326,6 +327,40 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
                 {path.name for path in (Path(directory) / "test-run").iterdir()},
                 set(pipeline.trace_factory("test-run").required_artifacts),
             )
+
+    async def test_invalid_model_render_is_replaced_only_by_revalidated_fallback(self) -> None:
+        gateway = FakeGateway()
+        planner = LegalQueryPlanner(gateway, model="gpt-5.6-terra")
+        retriever = LegalRetriever(FakeBackend(), config=RetrievalConfig(selected_limit_per_issue=4))
+        original_validate = pipeline_module.validate_rendered_answer
+        calls = 0
+
+        def fail_once(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return ValidationRecord(
+                    stage="post_render_validation",
+                    passed=False,
+                    errors=["simulated_model_render_integrity_failure"],
+                )
+            return original_validate(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = LegalRagV2Pipeline(
+                gateway=gateway,
+                planner=planner,
+                retriever=retriever,
+                authority_extractor=FakeAuthorityExtractor(),
+                config=LegalRagV2Config(artifact_root=Path(directory), allow_legacy_fallback=False),
+            )
+            with patch.object(pipeline_module, "validate_rendered_answer", side_effect=fail_once):
+                result = await pipeline.run(QUESTION, run_id="revalidated-render")
+
+        final_validation = result.validation[-1]
+        self.assertTrue(final_validation.passed)
+        self.assertIn("deterministic_render_revalidated", final_validation.warnings)
+        self.assertEqual(2, calls)
 
 
 if __name__ == "__main__":

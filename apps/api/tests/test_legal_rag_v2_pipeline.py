@@ -14,6 +14,7 @@ from app.legal_rag_v2.pipeline import (
     _build_evidence_bundles,
     _build_provision_graph,
     _git_commit,
+    validate_writer_output,
 )
 from app.legal_rag_v2.planner import LegalQueryPlanner
 from app.legal_rag_v2.retrieval import (
@@ -28,10 +29,12 @@ from app.legal_rag_v2.schemas import (
     AuthoritySourceSpans,
     Clarification,
     DocumentSourceSpan,
+    EvidenceBundle,
     Fact,
     LegalClaim,
     LegalIssue,
     LegalResearchPlan,
+    ProvisionReference,
     QueryFamily,
     ResearchIntent,
     SourceSpan,
@@ -361,6 +364,47 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(final_validation.passed)
         self.assertIn("deterministic_render_revalidated", final_validation.warnings)
         self.assertEqual(2, calls)
+
+    def test_writer_integrity_accepts_multiple_verified_citations_for_one_source_id(self) -> None:
+        article_21 = ProvisionReference(
+            provision_id="cit-source",
+            document_id="cit-act",
+            citation="art. 21 ust. 1 pkt 1",
+            status="active",
+        )
+        article_26 = ProvisionReference(
+            provision_id="cit-source",
+            document_id="cit-act",
+            citation="art. 26 ust. 2e",
+            status="active",
+        )
+        output = WriterOutput(
+            thesis="Wniosek.",
+            sources=[
+                WriterSource(
+                    source_id="cit-source",
+                    label="Ustawa o CIT",
+                    citation="art. 21 ust. 1 pkt 1",
+                ),
+                WriterSource(
+                    source_id="cit-source",
+                    label="Ustawa o CIT",
+                    citation="art. 26 ust. 2e",
+                ),
+            ],
+        )
+        bundles = [
+            EvidenceBundle(
+                issue_id="pit_sale",
+                controlling_provisions=[article_21, article_26],
+                coverage_status="complete",
+            )
+        ]
+
+        self.assertEqual(
+            [],
+            validate_writer_output(output, answer_plan=pipeline_module.AnswerPlan(), bundles=bundles),
+        )
 
 
 if __name__ == "__main__":

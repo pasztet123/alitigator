@@ -1915,30 +1915,41 @@ def validate_writer_output(
     )
     if not used.issubset(allowed_claims):
         errors.append("writer_used_unknown_or_blocked_claim")
-    allowed_source_citations = {
-        item.provision_id: item.citation
+    # A provision ID can identify a source record that exposes several
+    # editorial units (for example art. 21 and art. 26 from the same statute
+    # source). Keep every verified citation for that ID; a scalar map silently
+    # overwrote earlier units and caused false integrity failures.
+    allowed_source_citations: dict[str, set[str]] = {}
+    for item in (
+        provision
         for bundle in bundles
-        for item in (
+        for provision in (
             *bundle.controlling_provisions,
             *bundle.dependency_provisions,
             *bundle.exception_provisions,
         )
-    }
-    allowed_source_citations.update({
-        item.document_id: (item.signature or item.document_id)
+    ):
+        allowed_source_citations.setdefault(item.provision_id, set()).add(
+            _normalize_citation(item.citation)
+        )
+    for item in (
+        authority
         for bundle in bundles
-        for item in (
+        for authority in (
             *bundle.supporting_authorities,
             *bundle.contrary_authorities,
             *bundle.historical_authorities,
         )
-    })
+    ):
+        allowed_source_citations.setdefault(item.document_id, set()).add(
+            _normalize_citation(item.signature or item.document_id)
+        )
     if any(item.source_id not in allowed_source_citations for item in output.sources):
         errors.append("writer_used_unknown_source")
     if any(
         item.source_id in allowed_source_citations
         and _normalize_citation(item.citation)
-        != _normalize_citation(allowed_source_citations[item.source_id])
+        not in allowed_source_citations[item.source_id]
         for item in output.sources
     ):
         errors.append("writer_changed_source_citation")

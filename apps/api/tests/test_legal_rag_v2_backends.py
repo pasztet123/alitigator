@@ -3,12 +3,39 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from app.legal_rag_v2.backends import CorpusFtsBackend
 
 
 class CorpusFtsBackendTests(unittest.IsolatedAsyncioTestCase):
+    async def test_mysql_treaty_query_uses_country_prefix_before_article_lookup(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchall.return_value = []
+        connection = MagicMock()
+        connection.cursor.return_value.__enter__.return_value = cursor
+        backend = CorpusFtsBackend(backend="mysql")
+
+        with patch("app.mysql_rag.get_mysql_target", return_value=("documents", "chunks")), patch(
+            "app.mysql_rag.mysql_connection", return_value=nullcontext(connection)
+        ):
+            rows = backend._search_mysql(
+                "UPO Polska Niemcy art. 11 odsetki",
+                8,
+                frozenset({"tax_treaty"}),
+                {"tax_domains": ["CIT"]},
+            )
+
+        self.assertEqual([], rows)
+        statement = str(cursor.execute.call_args.args[0])
+        params = cursor.execute.call_args.args[1]
+        self.assertIn("LOWER(d.subject) LIKE LOWER(%s)", statement)
+        self.assertNotIn("MATCH(c.search_text", statement)
+        self.assertEqual("UPO Polska - Niemcy%", params[0])
+        self.assertEqual("art. 11%", params[1])
+
     async def test_sqlite_search_is_typed_filtered_and_policy_free(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "rag.sqlite3"

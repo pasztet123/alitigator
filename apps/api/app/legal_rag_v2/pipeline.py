@@ -153,6 +153,7 @@ class LegalRagV2Config:
     authority_candidates_per_issue: int = 8
     authority_extraction_candidates_per_issue: int = 2
     authority_extraction_concurrency: int = 4
+    model_authority_extraction: bool = False
     require_real_embeddings: bool = False
 
     @classmethod
@@ -198,6 +199,14 @@ class LegalRagV2Config:
             ),
             authority_extraction_concurrency=max(
                 1, int(os.getenv("LEGAL_RAG_V2_AUTHORITY_EXTRACTION_CONCURRENCY", "4"))
+            ),
+            # Retrieval of interpretations, judgments and MF guidance stays
+            # enabled.  The model-based card summariser is opt-in because it
+            # can otherwise fan a single multi-payment WHT request into many
+            # slow provider calls; the conservative extractor preserves source
+            # spans without making the answer path dependent on them.
+            model_authority_extraction=_env_bool(
+                "LEGAL_RAG_V2_MODEL_AUTHORITY_EXTRACTION", False
             ),
             require_real_embeddings=_env_bool(
                 "LEGAL_RAG_V2_REQUIRE_REAL_EMBEDDINGS", False
@@ -903,10 +912,15 @@ def create_default_pipeline(
     try:
         from .authority import HeuristicAuthorityExtractor, ModelAuthorityExtractor
 
-        authority_extractor = ModelAuthorityExtractor(
-            gateway,
-            model=config.authority_extractor_model,
-            heuristic_fallback=HeuristicAuthorityExtractor(),
+        heuristic = HeuristicAuthorityExtractor()
+        authority_extractor = (
+            ModelAuthorityExtractor(
+                gateway,
+                model=config.authority_extractor_model,
+                heuristic_fallback=heuristic,
+            )
+            if config.model_authority_extraction
+            else heuristic
         )
     except ImportError:
         authority_extractor = None
@@ -983,8 +997,22 @@ def _build_provision_graph(
                     "chunk_id": candidate.chunk_id,
                 },
             )
-            if not units:
-                units = (_synthetic_provision_unit(candidate, version_id),)
+            # Source chunks often render a provision hierarchy as separate
+            # lines ("Art. 17." / "1." / "4)").  The generic parser then
+            # safely identifies the article but cannot reconstruct the full
+            # displayed editorial unit.  Preserve that verified unit from the
+            # corpus metadata as well, otherwise a request for art. 17(1)(4)
+            # is incorrectly validated as a bare art. 17.
+            displayed_reference = str(candidate.metadata.get("display_reference") or "").strip()
+            if not units or (
+                displayed_reference
+                and not any(
+                    _normalise_provision_citation(unit.citation)
+                    == _normalise_provision_citation(displayed_reference)
+                    for unit in units
+                )
+            ):
+                units = (*units, _synthetic_provision_unit(candidate, version_id))
             for unit in units:
                 graph.add_provision(unit)
                 candidate_by_unit[unit.provision_id] = candidate
@@ -1037,6 +1065,10 @@ def _synthetic_provision_unit(
             "chunk_id": candidate.chunk_id,
         },
     )
+
+
+def _normalise_provision_citation(value: str) -> str:
+    return " ".join(str(value).casefold().split()).strip(" .;:,")
 
 
 def _provision_reference(

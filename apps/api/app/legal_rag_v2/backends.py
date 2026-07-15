@@ -249,19 +249,15 @@ class CorpusFtsBackend:
         connection.row_factory = sqlite3.Row
         try:
             if explicit_reference:
-                exact_clauses = [
-                    "(c.display_reference = ? OR EXISTS ("
-                    "SELECT 1 FROM chunk_citations cc "
-                    "WHERE cc.chunk_id = c.chunk_id AND cc.citation = ?))"
-                ]
-                exact_values: list[Any] = [explicit_reference, explicit_reference]
+                reference_prefix = f"{explicit_reference}%"
+                exact_clauses = ["c.display_reference LIKE ?"]
+                exact_values: list[Any] = [reference_prefix]
                 if types:
                     exact_clauses.append("d.source_type IN (" + ",".join("?" for _ in types) + ")")
                     exact_values.extend(types)
                 if domain_clause:
                     exact_clauses.append(domain_clause)
                     exact_values.extend(domain_values)
-                exact_values.append(limit)
                 exact_rows = connection.execute(
                     """
                     SELECT c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
@@ -273,8 +269,8 @@ class CorpusFtsBackend:
                            d.source_pages_json, 1000.0 AS lexical_score
                     FROM chunks c JOIN documents d ON d.document_id = c.document_id
                     WHERE """ + " AND ".join(exact_clauses)
-                    + " ORDER BY d.legal_state_date DESC, c.chunk_id ASC LIMIT ?",
-                    tuple(exact_values),
+                    + " ORDER BY (c.display_reference LIKE ?) DESC, d.legal_state_date DESC, c.chunk_id ASC LIMIT ?",
+                    tuple([*exact_values, reference_prefix, limit]),
                 ).fetchall()
                 if exact_rows:
                     return [dict(row) for row in exact_rows]
@@ -313,6 +309,7 @@ class CorpusFtsBackend:
         if not match_query:
             return []
         from app.mysql_rag import get_mysql_target, mysql_connection
+        from app.rag import treaty_direct_subject_prefix
 
         documents_table, chunks_table = get_mysql_target()
         citations_table = f"{chunks_table}_citations"
@@ -321,13 +318,44 @@ class CorpusFtsBackend:
                 raise ValueError("Unsafe MySQL RAG table identifier")
         types = self._storage_source_types(source_types)
         domains = self._tax_domains(metadata_filters)
-        if explicit_reference:
-            exact_clauses = [
-                f"(c.display_reference = %s OR EXISTS ("
-                f"SELECT 1 FROM `{citations_table}` cc "
-                f"WHERE cc.chunk_id = c.chunk_id AND cc.citation = %s))"
+        treaty_prefix = treaty_direct_subject_prefix(query) if "tax_treaty" in source_types else None
+        if treaty_prefix:
+            # Treaty article numbers recur in every UPO.  An unscoped exact
+            # lookup for art. 11 can therefore choose a treaty for a different
+            # country.  The query family already names the jurisdiction, so
+            # make that a deterministic predicate and skip broad FULLTEXT.
+            treaty_clauses = [
+                "d.source_type = 'statute'",
+                "LOWER(d.source_subtype) = 'tax_treaty'",
+                "LOWER(d.subject) LIKE LOWER(%s)",
             ]
-            exact_values: list[Any] = [explicit_reference, explicit_reference]
+            treaty_values: list[Any] = [f"{treaty_prefix}%"]
+            if explicit_reference:
+                reference_prefix = f"{explicit_reference}%"
+                treaty_clauses.append("c.display_reference LIKE %s")
+                treaty_values.append(reference_prefix)
+            treaty_sql = f"""
+                SELECT c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                       c.display_reference, c.provision_id,
+                       d.subject, d.signature, d.published_date, d.source_url,
+                       d.category, d.tax_domain, d.source, d.source_type,
+                       d.source_subtype, d.authority, d.act_title, d.publication,
+                       d.legal_state_date, d.legal_provisions_json,
+                       d.source_pages_json, 1000.0 AS lexical_score
+                FROM `{chunks_table}` c
+                JOIN `{documents_table}` d ON d.document_id = c.document_id
+                WHERE {' AND '.join(treaty_clauses)}
+                ORDER BY (c.display_reference LIKE %s) DESC, c.chunk_index ASC, c.chunk_id ASC
+                LIMIT %s
+            """
+            with mysql_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(treaty_sql, (*treaty_values, reference_prefix if explicit_reference else "", limit))
+                    return [dict(row) for row in cursor.fetchall()]
+        if explicit_reference:
+            reference_prefix = f"{explicit_reference}%"
+            exact_clauses = ["c.display_reference LIKE %s"]
+            exact_values: list[Any] = [reference_prefix]
             if types:
                 exact_clauses.append("d.source_type IN (" + ",".join("%s" for _ in types) + ")")
                 exact_values.extend(types)
@@ -346,11 +374,11 @@ class CorpusFtsBackend:
                 FROM `{chunks_table}` c
                 JOIN `{documents_table}` d ON d.document_id = c.document_id
                 WHERE {' AND '.join(exact_clauses)}
-                ORDER BY d.legal_state_date DESC, c.chunk_id ASC LIMIT %s
+                ORDER BY (c.display_reference LIKE %s) DESC, d.legal_state_date DESC, c.chunk_id ASC LIMIT %s
             """
             with mysql_connection() as connection:
                 with connection.cursor() as cursor:
-                    cursor.execute(exact_sql, (*exact_values, limit))
+                    cursor.execute(exact_sql, (*exact_values, reference_prefix, limit))
                     rows = [dict(row) for row in cursor.fetchall()]
                     if rows:
                         return rows

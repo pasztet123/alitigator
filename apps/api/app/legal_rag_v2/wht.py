@@ -181,7 +181,12 @@ def enrich_crossborder_wht_plan(
             [
                 ("explicit_provision_reference", "CIT art. 26 ust. 2e próg 2 000 000", "primary_law"),
                 ("explicit_provision_reference", "CIT art. 26 ust. 2g oświadczenie płatnika", "primary_law"),
-                ("explicit_provision_reference", "CIT art. 26 ust. 7a 7b 7c oświadczenie termin", "primary_law"),
+                # Every required statement provision needs its own
+                # machine-readable target; a single 7a/7b/7c string only
+                # exposes 7a to the reference parser.
+                ("explicit_provision_reference", "CIT art. 26 ust. 7a oświadczenie płatnika", "primary_law"),
+                ("explicit_provision_reference", "CIT art. 26 ust. 7b oświadczenie płatnika", "primary_law"),
+                ("explicit_provision_reference", "CIT art. 26 ust. 7c termin oświadczenia płatnika", "primary_law"),
                 ("explicit_provision_reference", "CIT art. 26b opinia o stosowaniu preferencji", "primary_law"),
                 ("explicit_provision_reference", "CIT art. 28b zwrot podatku", "primary_law"),
                 ("authority_backreference", "pay and refund beneficial owner cash pool objaśnienia MF", "authority"),

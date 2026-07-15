@@ -195,6 +195,7 @@ class RetrievalConfig:
     rrf_k: int = 60
     require_vector_index: bool = False
     graph_depth: int = 2
+    lane_concurrency: int = 6
 
 
 class TransparentLegalReranker:
@@ -208,6 +209,8 @@ class TransparentLegalReranker:
         target_date: Optional[str],
     ) -> RerankScore:
         text = f"{candidate.text} {_metadata_text(candidate.metadata)}".casefold()
+        explicit_references = _issue_explicit_references(issue)
+        candidate_references = _candidate_references(candidate)
         components: dict[str, float] = {
             "fusion": max(0.0, candidate.score),
             "source_type": 1.0
@@ -221,6 +224,18 @@ class TransparentLegalReranker:
             "positive_constraints": _text_coverage(issue.positive_fact_constraints, text),
             "provision_concepts": _text_coverage(issue.possible_provision_concepts, text),
             "temporal": 1.0 if _effective_on(candidate.metadata, target_date) else 0.0,
+            # A declared provision is a hard retrieval target, not just a
+            # keyword.  This prevents dozens of fragments of a general
+            # article (notably CIT art. 28b) from pushing art. 26(2e), 2g and
+            # 7a–7c out of the selected evidence set.
+            "explicit_provision": max(
+                (
+                    _reference_match_specificity(required, found)
+                    for required in explicit_references
+                    for found in candidate_references
+                ),
+                default=0.0,
+            ),
         }
         negative_hits = [
             value for value in issue.negative_fact_constraints if _phrase_present(value, text)
@@ -238,6 +253,7 @@ class TransparentLegalReranker:
             "positive_constraints": 1.0,
             "provision_concepts": 1.0,
             "temporal": 1.2,
+            "explicit_provision": 8.0,
             "negative_constraint_penalty": 1.4,
         }
         final_score = sum(components[name] * weights[name] for name in components)
@@ -280,6 +296,58 @@ class TransparentLegalReranker:
 
 
 LegalReranker = TransparentLegalReranker
+
+
+_ISSUE_EXPLICIT_REFERENCE_RE = re.compile(
+    r"\bart\.\s*\d+[a-z]?"
+    r"(?:\s*(?:ust\.\s*\d+[a-z]?|§\s*\d+[a-z]?))?"
+    r"(?:\s*pkt\s*\d+[a-z]?)?"
+    r"(?:\s*lit\.\s*[a-z])?",
+    re.IGNORECASE,
+)
+
+
+def _normalise_reference(value: str) -> str:
+    return " ".join(value.casefold().replace("artykuł", "art.").split()).strip(" .;:,")
+
+
+def _issue_explicit_references(issue: LegalIssue) -> tuple[str, ...]:
+    """References explicitly requested by a primary-law query family."""
+    result: list[str] = []
+    for family in issue.query_families:
+        if family.lane not in {"primary_law", "both"}:
+            continue
+        if family.family not in {"explicit_provision_reference", "explicit_provision"}:
+            continue
+        match = _ISSUE_EXPLICIT_REFERENCE_RE.search(family.query)
+        if not match:
+            continue
+        reference = _normalise_reference(match.group(0))
+        if reference and reference not in result:
+            result.append(reference)
+    return tuple(result)
+
+
+def _candidate_references(candidate: RetrievalCandidate) -> tuple[str, ...]:
+    values: list[str] = []
+    display = str(candidate.metadata.get("display_reference") or "")
+    if display:
+        values.append(display)
+    raw = candidate.metadata.get("legal_provisions") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    if isinstance(raw, (list, tuple, set, frozenset)):
+        values.extend(str(value) for value in raw)
+    return tuple(_normalise_reference(value) for value in values if value)
+
+
+def _reference_match_specificity(required: str, found: str) -> float:
+    """Score an exact provision above one of its finer editorial units."""
+    if found == required:
+        return 2.0
+    if found.startswith(required + " "):
+        return 1.0
+    return 0.0
 
 
 class _BaseLane:
@@ -510,12 +578,28 @@ class LegalRetriever:
     async def retrieve(self, plan: LegalResearchPlan) -> LegalRetrievalResult:
         jobs: list[Any] = []
         job_types: list[str] = []
+        # Each lane may open a database connection.  Running every issue and
+        # both lanes at once overloads the remote MySQL pool on multi-issue
+        # questions, which was the source of intermittent unfinished V2 runs.
+        semaphore = asyncio.Semaphore(max(1, self.primary_lane.config.lane_concurrency))
+
+        async def run_lane(lane: _BaseLane, issue: LegalIssue) -> LaneResult:
+            async with semaphore:
+                return await lane.retrieve(plan, issue)
+
         for issue in plan.issues:
             if self.primary_enabled:
-                jobs.append(self.primary_lane.retrieve(plan, issue))
+                jobs.append(run_lane(self.primary_lane, issue))
                 job_types.append("primary_law")
-            if self.authority_enabled:
-                jobs.append(self.authority_lane.retrieve(plan, issue))
+            # Authority retrieval is deliberately separate, but only issues
+            # that ask for an authority source need that lane.  VAT bundles
+            # that request primary law only must not spend a full query on an
+            # irrelevant interpretation/orzeczenie fallback.
+            needs_authority = bool(
+                set(issue.requested_source_types).intersection(AUTHORITY_SOURCE_TYPES)
+            )
+            if self.authority_enabled and needs_authority:
+                jobs.append(run_lane(self.authority_lane, issue))
                 job_types.append("authority")
         results = await asyncio.gather(*jobs) if jobs else []
         primary = tuple(
@@ -544,9 +628,10 @@ class LegalRetriever:
         # retrieval loop while preserving the initial candidate pools.
         if self.primary_enabled and self.authority_enabled:
             authority_refs = _cited_provisions_by_issue(authorities)
-            if authority_refs:
+            missing_primary_refs = _references_for_missing_lane(primary, authority_refs)
+            if missing_primary_refs:
                 retried_primary = await self._retry_lane(
-                    plan, primary, authority_refs, lane="primary_law"
+                    plan, primary, missing_primary_refs, lane="primary_law"
                 )
                 primary = retried_primary
                 trace.append(
@@ -554,23 +639,24 @@ class LegalRetriever:
                         "event": "authority_backreference_retry",
                         "retrieval_iteration": 1,
                         "executed": True,
-                        "discovered_from_authority": authority_refs,
+                        "discovered_from_authority": missing_primary_refs,
                     }
                 )
             else:
                 trace.append({"event": "authority_backreference_retry", "retrieval_iteration": 1, "executed": False, "discovered_from_authority": {}})
 
             primary_refs = _cited_provisions_by_issue(primary)
-            if primary_refs:
+            missing_authority_refs = _references_for_missing_lane(authorities, primary_refs)
+            if missing_authority_refs:
                 authorities = await self._retry_lane(
-                    plan, authorities, primary_refs, lane="authority"
+                    plan, authorities, missing_authority_refs, lane="authority"
                 )
                 trace.append(
                     {
                         "event": "primary_to_authority_retry",
                         "retrieval_iteration": 2,
                         "executed": True,
-                        "discovered_from_primary": primary_refs,
+                        "discovered_from_primary": missing_authority_refs,
                     }
                 )
             else:
@@ -655,6 +741,25 @@ def _cited_provisions_by_issue(
             if not (value.casefold() in seen or seen.add(value.casefold()))
         ]
     return result
+
+
+def _references_for_missing_lane(
+    lanes: Sequence[LaneResult],
+    references: Mapping[str, list[str]],
+) -> dict[str, list[str]]:
+    """Keep directed retries targeted to a lane that produced no evidence.
+
+    Retrying an already populated lane with every citation found in the other
+    lane fans one WHT question into dozens of remote database queries.  The
+    initial lanes remain independent and complete; this is only the recovery
+    path for an empty lane.
+    """
+    existing = {item.issue_id: item for item in lanes}
+    return {
+        issue_id: cited[:2]
+        for issue_id, cited in references.items()
+        if cited and not (existing.get(issue_id) and existing[issue_id].candidates)
+    }
 
 
 def reciprocal_rank_fusion(

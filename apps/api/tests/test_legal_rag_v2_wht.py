@@ -85,7 +85,9 @@ class CrossborderWhtEnrichmentTests(unittest.TestCase):
         )
         procedure_queries = [item.query for item in issues["wht_pay_and_refund_procedure"].query_families]
         self.assertTrue(any("art. 26 ust. 2g" in item for item in procedure_queries))
-        self.assertTrue(any("art. 26 ust. 7a 7b 7c" in item for item in procedure_queries))
+        self.assertTrue(any("art. 26 ust. 7a" in item for item in procedure_queries))
+        self.assertTrue(any("art. 26 ust. 7b" in item for item in procedure_queries))
+        self.assertTrue(any("art. 26 ust. 7c" in item for item in procedure_queries))
         self.assertTrue(any("art. 28b" in item for item in procedure_queries))
         interest_authority_queries = [
             item.query for item in issues["wht_interest_pl_de_treaty"].query_families
@@ -262,6 +264,7 @@ class CrossborderWhtRetrievalTests(unittest.IsolatedAsyncioTestCase):
         }
         self.assertTrue({"vat-28b", "vat-17", "vat-43"}.issubset(vat_candidate_ids))
         procedure_text = " ".join(item.text for item in primary["wht_pay_and_refund_procedure"].candidates)
+        self.assertIn("ust. 2e", procedure_text)
         self.assertIn("ust. 2g", procedure_text)
         self.assertIn("ust. 7a-7c", procedure_text)
         self.assertIn("art. 28b", procedure_text)

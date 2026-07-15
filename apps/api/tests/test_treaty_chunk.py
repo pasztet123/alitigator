@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from app.treaty_chunk import CORE_TREATY_SOURCES, iter_article_records, ocr_pages
+from app.treaty_chunk import (
+    CORE_TREATY_SOURCES,
+    iter_article_records,
+    load_structured_json_records,
+    missing_numeric_articles,
+    ocr_pages,
+)
 
 
 class TreatyChunkingTests(unittest.TestCase):
@@ -27,3 +33,30 @@ class TreatyChunkingTests(unittest.TestCase):
             [item["article"] for item in iter_article_records(source, pages)],
         )
 
+    def test_canonical_transcriptions_are_complete_and_keep_official_citation(self) -> None:
+        expected = {
+            ("hiszpania", "umowa"): 30,
+            ("szwajcaria", "umowa"): 28,
+            ("usa", "umowa_1974"): 26,
+            ("wielka_brytania", "umowa"): 29,
+        }
+        for (slug, variant), count in expected.items():
+            source = next(item for item in CORE_TREATY_SOURCES if item.slug == slug and item.variant == variant)
+            records = load_structured_json_records(source)
+            self.assertEqual(count, len(records))
+            self.assertEqual(source.source_url, records[0]["source_url"])
+            self.assertEqual(f"art. {count}", records[-1]["legal_provisions"][0])
+
+    def test_swiss_corrected_article_15_is_not_lost_as_duplicate_article_14(self) -> None:
+        source = next(
+            item for item in CORE_TREATY_SOURCES if item.slug == "szwajcaria" and item.variant == "umowa"
+        )
+        records = load_structured_json_records(source)
+        article_15 = next(record for record in records if record["legal_provisions"] == ["art. 15"])
+        self.assertIn("Praca najemna", article_15["content_text"])
+        self.assertIn("niniejszego artykułu, wynagrodzenie", article_15["content_text"])
+
+    def test_expected_terminal_article_is_a_completeness_requirement(self) -> None:
+        source = next(item for item in CORE_TREATY_SOURCES if item.slug == "usa" and item.variant == "umowa_1974")
+        articles = [{"article": str(number)} for number in range(1, 26)]
+        self.assertEqual([26], missing_numeric_articles(source, articles))

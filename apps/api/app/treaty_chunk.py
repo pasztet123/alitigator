@@ -88,6 +88,7 @@ class TreatySource:
     published_date: str
     ready_without_ocr: bool = True
     structured_json_path: Path | None = None
+    expected_numeric_article_count: int | None = None
 
 
 CORE_TREATY_SOURCES: tuple[TreatySource, ...] = (
@@ -103,6 +104,7 @@ CORE_TREATY_SOURCES: tuple[TreatySource, ...] = (
         publication="Dz.U. 2005 poz. 1921",
         legal_state_date="2005-10-26",
         published_date="2005-10-26",
+        expected_numeric_article_count=30,
     ),
     TreatySource(
         country="Czechy",
@@ -117,6 +119,7 @@ CORE_TREATY_SOURCES: tuple[TreatySource, ...] = (
         legal_state_date="",
         published_date="",
         ready_without_ocr=False,
+        expected_numeric_article_count=27,
     ),
     TreatySource(
         country="Francja",
@@ -130,6 +133,7 @@ CORE_TREATY_SOURCES: tuple[TreatySource, ...] = (
         publication="MF treaty PDF",
         legal_state_date="",
         published_date="",
+        expected_numeric_article_count=30,
     ),
     TreatySource(
         country="Irlandia",
@@ -144,6 +148,7 @@ CORE_TREATY_SOURCES: tuple[TreatySource, ...] = (
         legal_state_date="",
         published_date="",
         ready_without_ocr=False,
+        expected_numeric_article_count=30,
     ),
     TreatySource(
         country="Luksemburg",
@@ -157,6 +162,7 @@ CORE_TREATY_SOURCES: tuple[TreatySource, ...] = (
         publication="MF treaty PDF",
         legal_state_date="",
         published_date="",
+        expected_numeric_article_count=31,
     ),
     TreatySource(
         country="Luksemburg",
@@ -184,6 +190,7 @@ CORE_TREATY_SOURCES: tuple[TreatySource, ...] = (
         legal_state_date="2003-10-09",
         published_date="2003-10-09",
         ready_without_ocr=False,
+        expected_numeric_article_count=33,
     ),
     TreatySource(
         country="Niderlandy",
@@ -212,19 +219,21 @@ CORE_TREATY_SOURCES: tuple[TreatySource, ...] = (
         legal_state_date="",
         published_date="",
         ready_without_ocr=False,
+        expected_numeric_article_count=33,
     ),
     TreatySource(
         country="Szwajcaria",
         slug="szwajcaria",
         variant="umowa",
         pdf_path=Path("resources/upo/szwajcaria/umowa_pl.pdf"),
-        structured_json_path=None,
+        structured_json_path=Path("resources/upo/szwajcaria/upo_polska_szwajcaria_pl.json"),
         source_url="https://www.podatki.gov.pl/media/fbol1ik4/19910902_konwencja_szwajcaria_pl_e.pdf",
         act_title="Konwencja między Rzecząpospolitą Polską a Konfederacją Szwajcarską w sprawie unikania podwójnego opodatkowania w zakresie podatków od dochodu i majątku",
         subject_prefix="UPO Polska - Szwajcaria",
         publication="MF treaty PDF",
         legal_state_date="",
         published_date="",
+        expected_numeric_article_count=28,
     ),
     TreatySource(
         country="Szwajcaria",
@@ -244,7 +253,7 @@ CORE_TREATY_SOURCES: tuple[TreatySource, ...] = (
         slug="usa",
         variant="umowa_1974",
         pdf_path=Path("resources/upo/usa/umowa_1974_pl.pdf"),
-        structured_json_path=None,
+        structured_json_path=Path("resources/upo/usa/upo_polska_usa_1974_pl.json"),
         source_url="https://www.podatki.gov.pl/media/fygbbhi0/19741008_usa_konwencja_tekst_polski.pdf",
         act_title="Umowa między Rządem Polskiej Rzeczypospolitej Ludowej a Rządem Stanów Zjednoczonych Ameryki o uniknięciu podwójnego opodatkowania",
         subject_prefix="UPO Polska - USA",
@@ -252,13 +261,14 @@ CORE_TREATY_SOURCES: tuple[TreatySource, ...] = (
         legal_state_date="1976-07-30",
         published_date="1976-07-30",
         ready_without_ocr=False,
+        expected_numeric_article_count=26,
     ),
     TreatySource(
         country="Wielka Brytania",
         slug="wielka_brytania",
         variant="umowa",
         pdf_path=Path("resources/upo/wielka_brytania/umowa_pl.pdf"),
-        structured_json_path=None,
+        structured_json_path=Path("resources/upo/wielka_brytania/upo_polska_wielka_brytania_pl.json"),
         source_url="https://www.podatki.gov.pl/media/uanpfvts/wlk-brytania-konwencja-tekst-polski.pdf",
         act_title="Konwencja między Rzecząpospolitą Polską a Zjednoczonym Królestwem w sprawie unikania podwójnego opodatkowania",
         subject_prefix="UPO Polska - Wielka Brytania",
@@ -266,6 +276,7 @@ CORE_TREATY_SOURCES: tuple[TreatySource, ...] = (
         legal_state_date="2006-12-08",
         published_date="2006-12-08",
         ready_without_ocr=False,
+        expected_numeric_article_count=29,
     ),
     TreatySource(
         country="Wielka Brytania",
@@ -279,19 +290,21 @@ CORE_TREATY_SOURCES: tuple[TreatySource, ...] = (
         publication="MF treaty PDF",
         legal_state_date="",
         published_date="",
+        expected_numeric_article_count=29,
     ),
     TreatySource(
         country="Hiszpania",
         slug="hiszpania",
         variant="umowa",
         pdf_path=Path("resources/upo/hiszpania/umowa_pl.pdf"),
-        structured_json_path=None,
+        structured_json_path=Path("resources/upo/hiszpania/upo_polska_hiszpania_pl.json"),
         source_url="https://www.podatki.gov.pl/media/0yppho2i/hiszpania-konwencja-tekst-polski.pdf",
         act_title="Umowa między Rządem Polskiej Rzeczypospolitej Ludowej a Rządem Hiszpanii o unikaniu podwójnego opodatkowania w zakresie podatków od dochodu i majątku",
         subject_prefix="UPO Polska - Hiszpania",
         publication="Dz.U. 1982 nr 17 poz. 127",
         legal_state_date="1982-06-18",
         published_date="1982-06-18",
+        expected_numeric_article_count=30,
     ),
     TreatySource(
         country="Hiszpania",
@@ -305,6 +318,7 @@ CORE_TREATY_SOURCES: tuple[TreatySource, ...] = (
         publication="MF treaty PDF",
         legal_state_date="",
         published_date="",
+        expected_numeric_article_count=30,
     ),
 )
 
@@ -590,6 +604,12 @@ def load_structured_json_records(source: TreatySource) -> list[dict[str, Any]]:
     if not json_path.exists():
         return []
     payload = json.loads(json_path.read_text(encoding="utf-8"))
+    source_metadata = payload.get("source") or {}
+    official_url = str(source_metadata.get("official_pdf_url") or source_metadata.get("pdf_url") or "")
+    if official_url != source.source_url:
+        raise ValueError(
+            f"Structured treaty text for {source.slug}/{source.variant} does not bind to its official PDF"
+        )
     records: list[dict[str, Any]] = []
     for article in payload.get("articles", []):
         article_number = str(article.get("article_number", "")).strip()
@@ -606,6 +626,21 @@ def load_structured_json_records(source: TreatySource) -> list[dict[str, Any]]:
                 },
             )
         )
+    expected = source.expected_numeric_article_count
+    if expected is not None:
+        found = {
+            int(record["legal_provisions"][0].removeprefix("art. "))
+            for record in records
+            if record["legal_provisions"][0].removeprefix("art. ").isdigit()
+        }
+        required = set(range(1, expected + 1))
+        if found != required:
+            missing = sorted(required - found)
+            unexpected = sorted(found - required)
+            raise ValueError(
+                f"Structured treaty text for {source.slug}/{source.variant} is incomplete: "
+                f"missing={missing}, unexpected={unexpected}"
+            )
     return records
 
 
@@ -628,7 +663,8 @@ def missing_numeric_articles(source: TreatySource, articles: list[dict[str, Any]
     numbers = {int(str(article["article"])) for article in articles if str(article["article"]).isdigit()}
     if not numbers:
         return []
-    return [number for number in range(1, max(numbers) + 1) if number not in numbers]
+    expected_max = source.expected_numeric_article_count or max(numbers)
+    return [number for number in range(1, expected_max + 1) if number not in numbers]
 
 
 def merge_article_layers(
@@ -696,6 +732,8 @@ def build_outputs(sources: list[TreatySource]) -> tuple[list[dict[str, Any]], li
                     "extraction_method": "structured_json",
                     "extracted_chars": sum(len(record["content_text"]) for record in structured_records),
                     "article_count": len(structured_records),
+                    "expected_numeric_article_count": source.expected_numeric_article_count,
+                    "missing_numeric_articles": [],
                     "included_in_jsonl": True,
                 }
             )
@@ -750,6 +788,8 @@ def build_outputs(sources: list[TreatySource]) -> tuple[list[dict[str, Any]], li
                 "extraction_method": extraction_method,
                 "extracted_chars": extracted_chars,
                 "article_count": article_count,
+                "expected_numeric_article_count": source.expected_numeric_article_count,
+                "missing_numeric_articles": missing_numeric_articles(source, treaty_articles),
                 # A partial source still contributes its verified article
                 # units; its gaps stay visible in the manifest and cannot be
                 # silently substituted by a guessed reference.

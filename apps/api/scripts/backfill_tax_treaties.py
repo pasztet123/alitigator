@@ -27,15 +27,17 @@ def _article_audit(records: list[dict[str, object]]) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     for treaty_id, articles in sorted(by_treaty.items()):
         numeric = sorted(int(value) for value in articles if value.isdigit())
+        amending_protocol = "-protokol_" in treaty_id
         result.append(
             {
                 "treaty_id": treaty_id,
                 "article_count": len(articles),
                 "numeric_article_count": len(numeric),
-                "missing_numeric_articles": (
+                "coverage_type": "amending_protocol" if amending_protocol else "full_text",
+                "missing_numeric_articles": ([] if amending_protocol else (
                     [number for number in range(1, max(numeric) + 1) if str(number) not in articles]
                     if numeric else []
-                ),
+                )),
             }
         )
     return result

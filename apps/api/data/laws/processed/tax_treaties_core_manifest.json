@@ -9,6 +9,8 @@
     "extraction_method": "pdf_text",
     "extracted_chars": 28557,
     "article_count": 30,
+    "expected_numeric_article_count": 30,
+    "missing_numeric_articles": [],
     "included_in_jsonl": true
   },
   {
@@ -21,6 +23,8 @@
     "extraction_method": "ocr",
     "extracted_chars": 19870,
     "article_count": 27,
+    "expected_numeric_article_count": 27,
+    "missing_numeric_articles": [],
     "included_in_jsonl": true
   },
   {
@@ -33,6 +37,8 @@
     "extraction_method": "pdf_text+ocr_backfill",
     "extracted_chars": 22735,
     "article_count": 30,
+    "expected_numeric_article_count": 30,
+    "missing_numeric_articles": [],
     "included_in_jsonl": true
   },
   {
@@ -45,6 +51,8 @@
     "extraction_method": "ocr",
     "extracted_chars": 24130,
     "article_count": 30,
+    "expected_numeric_article_count": 30,
+    "missing_numeric_articles": [],
     "included_in_jsonl": true
   },
   {
@@ -57,6 +65,8 @@
     "extraction_method": "pdf_text+ocr_backfill",
     "extracted_chars": 20619,
     "article_count": 31,
+    "expected_numeric_article_count": 31,
+    "missing_numeric_articles": [],
     "included_in_jsonl": true
   },
   {
@@ -69,6 +79,8 @@
     "extraction_method": "pdf_text",
     "extracted_chars": 6959,
     "article_count": 5,
+    "expected_numeric_article_count": null,
+    "missing_numeric_articles": [],
     "included_in_jsonl": true
   },
   {
@@ -81,6 +93,8 @@
     "extraction_method": "ocr",
     "extracted_chars": 31762,
     "article_count": 33,
+    "expected_numeric_article_count": 33,
+    "missing_numeric_articles": [],
     "included_in_jsonl": true
   },
   {
@@ -93,6 +107,8 @@
     "extraction_method": "ocr",
     "extracted_chars": 20581,
     "article_count": 29,
+    "expected_numeric_article_count": null,
+    "missing_numeric_articles": [],
     "included_in_jsonl": true
   },
   {
@@ -105,6 +121,8 @@
     "extraction_method": "ocr",
     "extracted_chars": 34641,
     "article_count": 33,
+    "expected_numeric_article_count": 33,
+    "missing_numeric_articles": [],
     "included_in_jsonl": true
   },
   {
@@ -113,10 +131,12 @@
     "variant": "umowa",
     "pdf_path": "resources/upo/szwajcaria/umowa_pl.pdf",
     "source_url": "https://www.podatki.gov.pl/media/fbol1ik4/19910902_konwencja_szwajcaria_pl_e.pdf",
-    "status": "partial_text_only",
-    "extraction_method": "pdf_text+ocr_backfill",
-    "extracted_chars": 22766,
-    "article_count": 25,
+    "status": "ready",
+    "extraction_method": "structured_json",
+    "extracted_chars": 45054,
+    "article_count": 28,
+    "expected_numeric_article_count": 28,
+    "missing_numeric_articles": [],
     "included_in_jsonl": true
   },
   {
@@ -129,6 +149,8 @@
     "extraction_method": "ocr",
     "extracted_chars": 14171,
     "article_count": 8,
+    "expected_numeric_article_count": null,
+    "missing_numeric_articles": [],
     "included_in_jsonl": true
   },
   {
@@ -137,10 +159,12 @@
     "variant": "umowa_1974",
     "pdf_path": "resources/upo/usa/umowa_1974_pl.pdf",
     "source_url": "https://www.podatki.gov.pl/media/fygbbhi0/19741008_usa_konwencja_tekst_polski.pdf",
-    "status": "partial_text_only",
-    "extraction_method": "ocr",
-    "extracted_chars": 22337,
-    "article_count": 25,
+    "status": "ready",
+    "extraction_method": "structured_json",
+    "extracted_chars": 43137,
+    "article_count": 26,
+    "expected_numeric_article_count": 26,
+    "missing_numeric_articles": [],
     "included_in_jsonl": true
   },
   {
@@ -149,10 +173,12 @@
     "variant": "umowa",
     "pdf_path": "resources/upo/wielka_brytania/umowa_pl.pdf",
     "source_url": "https://www.podatki.gov.pl/media/uanpfvts/wlk-brytania-konwencja-tekst-polski.pdf",
-    "status": "partial_text_only",
-    "extraction_method": "ocr",
-    "extracted_chars": 28559,
-    "article_count": 27,
+    "status": "ready",
+    "extraction_method": "structured_json",
+    "extracted_chars": 54593,
+    "article_count": 29,
+    "expected_numeric_article_count": 29,
+    "missing_numeric_articles": [],
     "included_in_jsonl": true
   },
   {
@@ -165,6 +191,8 @@
     "extraction_method": "structured_json",
     "extracted_chars": 58207,
     "article_count": 29,
+    "expected_numeric_article_count": 29,
+    "missing_numeric_articles": [],
     "included_in_jsonl": true
   },
   {
@@ -173,10 +201,12 @@
     "variant": "umowa",
     "pdf_path": "resources/upo/hiszpania/umowa_pl.pdf",
     "source_url": "https://www.podatki.gov.pl/media/0yppho2i/hiszpania-konwencja-tekst-polski.pdf",
-    "status": "partial_text_only",
-    "extraction_method": "ocr",
-    "extracted_chars": 20584,
-    "article_count": 24,
+    "status": "ready",
+    "extraction_method": "structured_json",
+    "extracted_chars": 46025,
+    "article_count": 30,
+    "expected_numeric_article_count": 30,
+    "missing_numeric_articles": [],
     "included_in_jsonl": true
   },
   {
@@ -189,6 +219,8 @@
     "extraction_method": "pdf_text",
     "extracted_chars": 41435,
     "article_count": 30,
+    "expected_numeric_article_count": 30,
+    "missing_numeric_articles": [],
     "included_in_jsonl": true
   }
 ]

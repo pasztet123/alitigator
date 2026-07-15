@@ -220,7 +220,7 @@ class CrossborderWhtEnrichmentTests(unittest.TestCase):
             EvidenceBundle(
                 issue_id="wht_interest_pl_de_treaty",
                 controlling_provisions=[
-                    provision("upo_11", "art. 11", "upo-de-11", "Odsetki: 5 procent kwoty brutto."),
+                    provision("upo_11", "art. 11", "upo-de-11", "Odsetki: 5procentkwoty brutto."),
                     provision("cit_21_1", "art. 21 ust. 1 pkt 1", "cit-21", "Odsetki podlegają WHT."),
                 ],
                 coverage_status="complete",
@@ -268,6 +268,68 @@ class CrossborderWhtEnrichmentTests(unittest.TestCase):
         self.assertTrue(all(item.status == "conditional_missing_fact" for item in validated))
         self.assertIn("5%", next(item.result for item in validated if item.issue_id == "wht_interest_pl_de_treaty"))
         self.assertIn("deterministic_complete_primary_bundle_claim", " ".join(warnings))
+
+    def test_complete_vat_primary_bundles_cannot_be_erased_by_invalid_model_claims(self) -> None:
+        enriched = enrich_crossborder_wht_plan(plan(), QUESTION)
+
+        def provision(provision_id: str, citation: str, document_id: str) -> ProvisionReference:
+            return ProvisionReference(
+                provision_id=provision_id,
+                document_id=document_id,
+                citation=citation,
+                text=citation,
+                status="active",
+                source_span=DocumentSourceSpan(start=0, end=1, document_id=document_id),
+            )
+
+        place = provision("vat_28b", "art. 28b ust. 1", "vat-act")
+        import_rule = provision("vat_17", "art. 17 ust. 1 pkt 4", "vat-act")
+        exemption = provision("vat_43", "art. 43 ust. 1 pkt 38", "vat-act")
+        bundles = [
+            EvidenceBundle(
+                issue_id="vat_interest_financial_service",
+                controlling_provisions=[place, exemption],
+                dependency_provisions=[import_rule],
+                coverage_status="complete",
+                controlling_provision_present=True,
+                temporal_validation_passed=True,
+            ),
+            EvidenceBundle(
+                issue_id="vat_royalty_crossborder_service",
+                controlling_provisions=[place],
+                dependency_provisions=[import_rule],
+                coverage_status="complete",
+                controlling_provision_present=True,
+                temporal_validation_passed=True,
+            ),
+            EvidenceBundle(
+                issue_id="vat_management_crossborder_service",
+                controlling_provisions=[place],
+                dependency_provisions=[import_rule],
+                coverage_status="complete",
+                controlling_provision_present=True,
+                temporal_validation_passed=True,
+            ),
+        ]
+
+        completed, warnings = _ensure_required_issue_claims(
+            [], plan=enriched, bundles=bundles, calculations=[]
+        )
+        validated, errors, _ = validate_claims(
+            completed, plan=enriched, bundles=bundles, calculations=[]
+        )
+
+        self.assertEqual([], errors)
+        self.assertEqual(
+            {
+                "vat_interest_financial_service",
+                "vat_royalty_crossborder_service",
+                "vat_management_crossborder_service",
+            },
+            {item.issue_id for item in validated},
+        )
+        self.assertIn("zwolnienia", next(item.text for item in validated if item.issue_id == "vat_interest_financial_service"))
+        self.assertIn("deterministic_complete_bundle_claim", " ".join(warnings))
 
     def test_incomplete_procedural_bundle_blocks_only_its_own_claims(self) -> None:
         enriched = enrich_crossborder_wht_plan(plan(), QUESTION)

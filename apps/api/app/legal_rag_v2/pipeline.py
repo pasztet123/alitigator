@@ -1694,8 +1694,10 @@ def _ensure_required_issue_claims(
             for item in references
             if re.search(rf"art\.\s*{treaty_article}(?!\d)", item.citation, re.I)
         )
-        rate_match = re.search(r"\b(\d{1,2})\s*(?:procent|%)\b", source_text, re.I)
-        rate = f"{rate_match.group(1)}%" if rate_match else "wynikająca z art. 11 lub art. 12 UPO"
+        # OCR commonly joins the words (``5procentkwoty``), therefore do not
+        # require a word boundary after ``procent``.
+        rate_match = re.search(r"(?<!\d)(\d{1,2})\s*(?:procent|%)", source_text, re.I)
+        rate = f"{rate_match.group(1)}%" if rate_match else "przewidziana w UPO"
         result.append(
             LegalClaim(
                 claim_id=f"deterministic_{issue_id}_primary_bundle",
@@ -1712,47 +1714,82 @@ def _ensure_required_issue_claims(
         approved_by_issue.add(issue_id)
         warnings.append(f"{issue_id}:deterministic_complete_primary_bundle_claim")
 
-    licence_bundle = bundles_by_issue.get("vat_royalty_crossborder_service")
-    if (
-        licence_bundle is not None
-        and licence_bundle.coverage_status == "complete"
-        and "vat_royalty_crossborder_service" not in approved_by_issue
-    ):
+    vat_templates = {
+        "vat_interest_financial_service": {
+            "required": (r"art\.\s*28b", r"art\.\s*17\s+ust\.\s*1\s+pkt\s*4", r"art\.\s*43\s+ust\.\s*1\s+pkt\s*38"),
+            "text": (
+                "Jeżeli odsetki są wynagrodzeniem za udzielenie pożyczki przez GmbH, "
+                "usługa korzysta ze zwolnienia z art. 43 ust. 1 pkt 38 ustawy o VAT. "
+                "W relacji B2B miejsce świadczenia jest co do zasady w Polsce, a przy "
+                "spełnieniu art. 17 ust. 1 pkt 4 polska spółka rozlicza import usług."
+            ),
+            "result": (
+                "Potwierdź status VAT stron, rolę GmbH jako usługodawcy pożyczki oraz brak "
+                "jej polskiego stałego miejsca prowadzenia działalności dla tej transakcji."
+            ),
+        },
+        "vat_royalty_crossborder_service": {
+            "required": (r"art\.\s*28b", r"art\.\s*17\s+ust\.\s*1\s+pkt\s*4"),
+            "text": (
+                "Jeżeli polska spółka jest podatnikiem VAT nabywającym licencję od niemieckiej "
+                "GmbH, miejsce świadczenia B2B jest co do zasady w Polsce, a nabywca rozlicza "
+                "import usług po spełnieniu ustawowych warunków."
+            ),
+            "result": (
+                "Dla licencji należy przyjąć warunkowo polskie miejsce świadczenia i import usług; "
+                "potwierdź status VAT stron oraz brak polskiego stałego miejsca prowadzenia "
+                "działalności GmbH."
+            ),
+        },
+        "vat_management_crossborder_service": {
+            "required": (r"art\.\s*28b", r"art\.\s*17\s+ust\.\s*1\s+pkt\s*4"),
+            "text": (
+                "Dla usług zarządzania świadczonych na rzecz polskiej spółki będącej podatnikiem, "
+                "miejscem świadczenia jest co do zasady Polska. Przy spełnieniu warunków art. 17 "
+                "ust. 1 pkt 4 polska spółka rozlicza VAT jako usługobiorca."
+            ),
+            "result": (
+                "Import usług jest warunkowo właściwy; potwierdź status VAT polskiej spółki oraz "
+                "brak siedziby lub stałego miejsca prowadzenia działalności GmbH w Polsce."
+            ),
+        },
+    }
+    for issue_id, template in vat_templates.items():
+        vat_bundle = bundles_by_issue.get(issue_id)
+        if (
+            vat_bundle is None
+            or vat_bundle.coverage_status != "complete"
+            or issue_id in approved_by_issue
+        ):
+            continue
         references = [
             item
             for item in (
-                *licence_bundle.controlling_provisions,
-                *licence_bundle.dependency_provisions,
+                *vat_bundle.controlling_provisions,
+                *vat_bundle.dependency_provisions,
+                *vat_bundle.exception_provisions,
             )
             if item.source_span is not None
         ]
-        reference_ids = {item.provision_id for item in references}
-        has_place_rule = any(re.search(r"art\.\s*28b", item.citation, re.I) for item in references)
-        has_import_rule = any(re.search(r"art\.\s*17\s+ust\.\s*1\s+pkt\s*4", item.citation, re.I) for item in references)
-        if references and has_place_rule and has_import_rule:
+        if references and all(
+            any(re.search(pattern, item.citation, re.I) for item in references)
+            for pattern in template["required"]
+        ):
             result.append(
                 LegalClaim(
-                    claim_id="deterministic_vat_royalty_import",
-                    issue_id="vat_royalty_crossborder_service",
+                    claim_id=f"deterministic_{issue_id}_primary_bundle",
+                    issue_id=issue_id,
                     claim_type="application",
-                    text=(
-                        "Jeżeli polska spółka jest podatnikiem VAT nabywającym licencję "
-                        "od niemieckiej GmbH, miejsce świadczenia B2B jest co do zasady w Polsce, "
-                        "a nabywca rozlicza import usług po spełnieniu ustawowych warunków."
-                    ),
+                    text=template["text"],
                     status="conditional_missing_fact",
-                    result=(
-                        "Dla licencji należy przyjąć warunkowo polskie miejsce świadczenia i "
-                        "import usług; potwierdź status VAT stron oraz brak polskiego stałego "
-                        "miejsca prowadzenia działalności GmbH."
-                    ),
-                    controlling_provision_ids=sorted(reference_ids),
+                    result=template["result"],
+                    controlling_provision_ids=[item.provision_id for item in references],
                     source_spans=[item.source_span for item in references if item.source_span],
                     confidence=0.82,
                 )
             )
-            approved_by_issue.add("vat_royalty_crossborder_service")
-            warnings.append("vat_royalty_crossborder_service:deterministic_complete_bundle_claim")
+            approved_by_issue.add(issue_id)
+            warnings.append(f"{issue_id}:deterministic_complete_bundle_claim")
 
     used_calculations = {
         calculation_id

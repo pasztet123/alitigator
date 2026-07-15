@@ -61,6 +61,15 @@ class ModelTransportError(ModelTechnicalError):
 class ModelRateLimitError(ModelTechnicalError):
     """The provider rejected a call due to a rate limit."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after_seconds: Optional[float] = None,
+    ) -> None:
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(message)
+
 
 class ModelUnavailableError(ModelTechnicalError):
     """The provider was reachable but temporarily unavailable."""
@@ -168,9 +177,9 @@ class ModelGatewayConfig:
     available_models: Tuple[Tuple[ProviderName, str], ...] = ()
     timeout_seconds: float = 110.0
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
-    transport_retries: int = 2
+    transport_retries: int = 3
     schema_retries: int = 1
-    retry_base_delay_seconds: float = 0.25
+    retry_base_delay_seconds: float = 2.0
 
     def api_key_for(self, provider: ProviderName) -> Optional[str]:
         if provider == "openai":
@@ -316,7 +325,7 @@ def get_model_gateway_config(env: Optional[Mapping[str, str]] = None) -> ModelGa
         ),
         transport_retries=_bounded_int(
             source.get("LLM_MAX_RETRIES") or source.get("LLM_TRANSPORT_RETRIES"),
-            2,
+            3,
             minimum=0,
             maximum=8,
         ),
@@ -325,7 +334,7 @@ def get_model_gateway_config(env: Optional[Mapping[str, str]] = None) -> ModelGa
         ),
         retry_base_delay_seconds=_bounded_float(
             source.get("LLM_RETRY_BASE_DELAY_SECONDS"),
-            0.25,
+            2.0,
             minimum=0.0,
             maximum=10.0,
         ),
@@ -549,6 +558,42 @@ def _provider_error_metadata(
     return "invalid_request", code
 
 
+def _duration_seconds(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    candidate = str(value).strip().lower()
+    try:
+        if candidate.endswith("ms"):
+            return float(candidate[:-2]) / 1000.0
+        if candidate.endswith("s"):
+            return float(candidate[:-1])
+        if candidate.endswith("m"):
+            return float(candidate[:-1]) * 60.0
+        return float(candidate)
+    except ValueError:
+        return None
+
+
+def _retry_after_seconds(exc: BaseException) -> Optional[float]:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) or getattr(exc, "headers", None)
+    if not isinstance(headers, Mapping):
+        return None
+    retry_after_ms = _duration_seconds(headers.get("retry-after-ms"))
+    if retry_after_ms is not None and not str(headers.get("retry-after-ms")).lower().endswith(
+        ("ms", "s", "m")
+    ):
+        retry_after_ms /= 1000.0
+    candidates = [
+        retry_after_ms,
+        _duration_seconds(headers.get("retry-after")),
+        _duration_seconds(headers.get("x-ratelimit-reset-tokens")),
+        _duration_seconds(headers.get("x-ratelimit-reset-requests")),
+    ]
+    usable = [item for item in candidates if item is not None and item >= 0]
+    return min(60.0, max(usable)) if usable else None
+
+
 def _classify_provider_exception(provider: str, exc: BaseException) -> ModelGatewayError:
     if isinstance(exc, ModelGatewayError):
         return exc
@@ -560,8 +605,20 @@ def _classify_provider_exception(provider: str, exc: BaseException) -> ModelGate
         return ModelTransportError(f"Could not connect to {provider}")
 
     class_name = type(exc).__name__.lower()
-    if "ratelimit" in class_name:
-        return ModelRateLimitError(f"{provider} rate limit exceeded")
+    status = _status_code_from_exception(exc)
+    if "ratelimit" in class_name or status == 429:
+        category, error_code = _provider_error_metadata(exc, status=status)
+        if category == "billing":
+            return ModelProviderRequestError(
+                provider,
+                status_code=status,
+                category=category,
+                error_code=error_code,
+            )
+        return ModelRateLimitError(
+            f"{provider} rate limit exceeded",
+            retry_after_seconds=_retry_after_seconds(exc),
+        )
     if "timeout" in class_name or "connection" in class_name:
         return ModelTransportError(f"Could not connect to {provider}")
     if "lengthfinishreason" in class_name:
@@ -569,9 +626,6 @@ def _classify_provider_exception(provider: str, exc: BaseException) -> ModelGate
     if "contentfilter" in class_name:
         return ModelRequestError(f"{provider} refused the request")
 
-    status = _status_code_from_exception(exc)
-    if status == 429:
-        return ModelRateLimitError(f"{provider} rate limit exceeded")
     if status in {408, 409, 425}:
         return ModelTransportError(f"{provider} temporary request failure ({status})")
     if status is not None and status >= 500:
@@ -622,7 +676,13 @@ class _RetryingProviderGateway:
                     raise error from exc
                 if attempt >= self._max_transport_retries:
                     raise error from exc
-                await self._sleep(self._retry_base_delay_seconds * (2**attempt))
+                delay = self._retry_base_delay_seconds * (2**attempt)
+                if isinstance(error, ModelRateLimitError):
+                    provider_delay = error.retry_after_seconds
+                    if provider_delay is None:
+                        provider_delay = 5.0 * (2**attempt)
+                    delay = max(delay, provider_delay)
+                await self._sleep(delay)
         raise AssertionError("unreachable")
 
     async def _schema_attempts(

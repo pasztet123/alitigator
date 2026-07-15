@@ -101,10 +101,16 @@ class FakeAnthropicClient:
 
 
 class FakeStatusError(Exception):
-    def __init__(self, status_code: int, body: Any = None) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        body: Any = None,
+        headers: Optional[dict[str, str]] = None,
+    ) -> None:
         super().__init__(f"HTTP {status_code}")
         self.status_code = status_code
         self.body = body
+        self.headers = headers or {}
 
 
 async def no_sleep(_: float) -> None:
@@ -260,6 +266,80 @@ class OpenAIModelGatewayTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ModelProviderRequestError) as raised:
             await gateway.generate_text(input="q")
         self.assertEqual(raised.exception.category, "invalid_request")
+        self.assertEqual(len(responses.create_calls), 1)
+
+    async def test_rate_limit_respects_provider_retry_after(self) -> None:
+        delays: list[float] = []
+
+        async def record_sleep(delay: float) -> None:
+            delays.append(delay)
+
+        responses = FakeOpenAIResponses(
+            create_results=[
+                FakeStatusError(
+                    429,
+                    {"error": {"type": "rate_limit_error"}},
+                    headers={"retry-after": "3"},
+                ),
+                FakeOpenAIResponse(output_text="ok"),
+            ]
+        )
+        gateway = OpenAIModelGateway(
+            client=FakeOpenAIClient(responses),
+            max_transport_retries=1,
+            retry_base_delay_seconds=0.25,
+            sleep=record_sleep,
+        )
+
+        self.assertEqual(await gateway.generate_text(input="q"), "ok")
+        self.assertEqual(delays, [3.0])
+
+    async def test_rate_limit_without_headers_uses_conservative_backoff(self) -> None:
+        delays: list[float] = []
+
+        async def record_sleep(delay: float) -> None:
+            delays.append(delay)
+
+        responses = FakeOpenAIResponses(
+            create_results=[
+                FakeStatusError(429, {"error": {"type": "rate_limit_error"}}),
+                FakeOpenAIResponse(output_text="ok"),
+            ]
+        )
+        gateway = OpenAIModelGateway(
+            client=FakeOpenAIClient(responses),
+            max_transport_retries=1,
+            retry_base_delay_seconds=0.25,
+            sleep=record_sleep,
+        )
+
+        self.assertEqual(await gateway.generate_text(input="q"), "ok")
+        self.assertEqual(delays, [5.0])
+
+    async def test_insufficient_quota_429_is_billing_not_retryable_rate_limit(self) -> None:
+        responses = FakeOpenAIResponses(
+            create_results=[
+                FakeStatusError(
+                    429,
+                    {
+                        "error": {
+                            "type": "insufficient_quota",
+                            "code": "insufficient_quota",
+                        }
+                    },
+                )
+            ]
+        )
+        gateway = OpenAIModelGateway(
+            client=FakeOpenAIClient(responses),
+            max_transport_retries=3,
+            sleep=no_sleep,
+        )
+
+        with self.assertRaises(ModelProviderRequestError) as raised:
+            await gateway.generate_text(input="q")
+
+        self.assertEqual(raised.exception.category, "billing")
         self.assertEqual(len(responses.create_calls), 1)
 
 

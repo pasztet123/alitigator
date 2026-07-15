@@ -7,7 +7,12 @@ from unittest.mock import patch
 
 import app.legal_rag_v2.pipeline as pipeline_module
 from app.legal_rag_v2.authority import AuthorityExtractionResult
-from app.model_gateway import ModelRequestError
+from app.model_gateway import (
+    ModelFallbackError,
+    ModelProviderRequestError,
+    ModelRateLimitError,
+    ModelRequestError,
+)
 from app.legal_rag_v2.pipeline import (
     ClaimSet,
     LegalRagV2Config,
@@ -452,6 +457,62 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({item.issue_id for item in issues}, {item.issue_id for item in claims})
         self.assertTrue(all(item.status == "conditional_missing_fact" for item in claims))
         self.assertTrue(any("batch_split_after:ModelRequestError" in item for item in validation.warnings))
+
+    async def test_rate_limit_failure_does_not_fan_out_into_per_issue_calls(self) -> None:
+        issues = [
+            LegalIssue(
+                issue_id=f"limited_{index}",
+                label=f"Zagadnienie {index}",
+                legal_mechanism="general",
+            )
+            for index in range(10)
+        ]
+        plan = LegalResearchPlan(
+            user_query="Wielowątkowy kazus podatkowy.",
+            intent=ResearchIntent(mode="mixed_analysis"),
+            issues=issues,
+            clarification=Clarification(),
+            confidence=0.9,
+        )
+
+        class RateLimitedGateway(FakeGateway):
+            claim_calls = 0
+
+            async def generate_structured(self, *, response_model, **kwargs):
+                if response_model is ClaimSet:
+                    self.claim_calls += 1
+                    raise ModelFallbackError(
+                        ModelRateLimitError("OpenAI rate limit exceeded"),
+                        ModelProviderRequestError(
+                            "Anthropic",
+                            status_code=400,
+                            category="billing",
+                            error_code="invalid_request_error",
+                        ),
+                    )
+                return await super().generate_structured(
+                    response_model=response_model, **kwargs
+                )
+
+        gateway = RateLimitedGateway()
+        pipeline = LegalRagV2Pipeline(
+            gateway=gateway,
+            planner=LegalQueryPlanner(gateway),
+            retriever=LegalRetriever(FakeBackend()),
+            config=LegalRagV2Config(),
+        )
+
+        claims, validation = await pipeline._synthesize_and_validate_claims(
+            plan.user_query,
+            plan,
+            [],
+            [],
+        )
+
+        self.assertEqual(gateway.claim_calls, 1)
+        self.assertEqual(len(claims), len(issues))
+        self.assertEqual(len(validation.errors), len(issues))
+        self.assertFalse(any("batch_split_after" in item for item in validation.warnings))
 
     def test_writer_integrity_accepts_multiple_verified_citations_for_one_source_id(self) -> None:
         article_21 = ProvisionReference(

@@ -457,7 +457,7 @@ class LegalQueryPlanner:
                 system_prompt=PLANNER_SYSTEM_PROMPT,
                 model=self.model,
                 reasoning_effort=self.reasoning_effort,
-                max_output_tokens=8000,
+                max_output_tokens=5000,
             )
             plan = (
                 generated

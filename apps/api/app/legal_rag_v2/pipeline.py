@@ -18,8 +18,11 @@ from uuid import uuid4
 from pydantic import Field
 
 from app.model_gateway import (
+    ModelFallbackError,
     ModelGateway,
     ModelGatewayError,
+    ModelProviderRequestError,
+    ModelRateLimitError,
     ModelTechnicalError,
     create_model_gateway,
     get_model_gateway_config,
@@ -67,8 +70,32 @@ from .wht import WhtPayAndRefundCalculationEngine, enrich_crossborder_wht_plan
 PIPELINE_VERSION = "legal_rag_v2_1"
 SYNTHESIS_PROMPT_VERSION = "legal_claim_synthesis_v1"
 ANSWER_PROMPT_VERSION = "legal_answer_writer_v1"
-SYNTHESIS_MAX_ISSUES_PER_BATCH = 3
-SYNTHESIS_BATCH_CONCURRENCY = 3
+# A single structured call is substantially cheaper in provider token budgets
+# than reserving the same output allowance for several concurrent batches.
+# Larger plans still split, but never fan out by default.
+SYNTHESIS_MAX_ISSUES_PER_BATCH = 12
+SYNTHESIS_BATCH_CONCURRENCY = 1
+
+
+def _non_splittable_model_failure(error: Optional[ModelGatewayError]) -> bool:
+    if error is None:
+        return False
+    if isinstance(error, ModelFallbackError):
+        return (
+            _non_splittable_model_failure(error.primary_error)
+            or _non_splittable_model_failure(error.fallback_error)
+        )
+    if isinstance(error, ModelRateLimitError):
+        return True
+    if isinstance(error, ModelProviderRequestError):
+        return error.category in {
+            "authentication",
+            "billing",
+            "model_unavailable",
+            "permission",
+        }
+    return isinstance(error, ModelTechnicalError)
+
 
 GLOBAL_LEGAL_SYSTEM_RULES = """\
 You are a component in an evidence-gated Polish tax-law research pipeline.
@@ -888,21 +915,25 @@ class LegalRagV2Pipeline:
         async def synthesize_batch(
             issues: list[Any],
         ) -> tuple[list[LegalClaim], list[str], list[str]]:
+            failure: Optional[ModelGatewayError] = None
             try:
                 batch_claims = await call_once(issues)
                 if batch_claims:
                     return batch_claims, [], []
                 error = "empty_issue_batch_claim_set"
             except ModelGatewayError as exc:
+                failure = exc
                 error = f"{type(exc).__name__}:{exc}"
 
             # A provider can reject a combined payload even though every
             # individual issue is valid. Split the failed batch so one axis
-            # cannot erase the remaining legal analysis.
-            if len(issues) > 1:
-                children = await asyncio.gather(
-                    *(synthesize_batch([issue]) for issue in issues)
-                )
+            # cannot erase the remaining legal analysis. Capacity, billing or
+            # transport failures must never be split: doing so turns one 429
+            # into a burst of additional calls.
+            if len(issues) > 1 and not _non_splittable_model_failure(failure):
+                children = []
+                for issue in issues:
+                    children.append(await synthesize_batch([issue]))
                 return (
                     [claim for claims, _, _ in children for claim in claims],
                     [item for _, errors, _ in children for item in errors],
@@ -921,11 +952,16 @@ class LegalRagV2Pipeline:
             ]
             return (
                 _blocked_claims(scoped_plan, scoped_bundles, reason=error),
-                [f"structured_claim_synthesis_failed:{issues[0].issue_id}"],
-                [f"{issues[0].issue_id}:{error}"],
+                [
+                    f"structured_claim_synthesis_failed:{issue.issue_id}"
+                    for issue in issues
+                ],
+                [f"{issue.issue_id}:{error}" for issue in issues],
             )
 
-        synthesized = await asyncio.gather(*(synthesize_batch(batch) for batch in batches))
+        synthesized = []
+        for batch in batches:
+            synthesized.append(await synthesize_batch(batch))
         claims = [claim for batch_claims, _, _ in synthesized for claim in batch_claims]
         synthesis_errors = [item for _, errors, _ in synthesized for item in errors]
         synthesis_warnings = [item for _, _, warnings in synthesized for item in warnings]
@@ -975,7 +1011,7 @@ class LegalRagV2Pipeline:
                 system_prompt=ANSWER_WRITER_RULES,
                 model=self.config.answer_writer_model,
                 reasoning_effort="medium",
-                max_output_tokens=10000,
+                max_output_tokens=6000,
             )
         except ModelGatewayError as exc:
             output = _deterministic_writer_output(writer_payload)

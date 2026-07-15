@@ -8,6 +8,7 @@ all other legal sources remain untouched.
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -21,8 +22,28 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", default="apps/api/.env")
     parser.add_argument("--sqlite-path", default="apps/api/data/processed/eureka_rag.sqlite3")
+    parser.add_argument(
+        "--manifest-path",
+        default="apps/api/data/laws/processed/tax_treaties_core_manifest.json",
+        help="Completeness manifest produced with the local treaty corpus.",
+    )
     parser.add_argument("--apply", action="store_true", help="Perform the scoped remote replacement.")
     args = parser.parse_args()
+
+    manifest_path = Path(args.manifest_path)
+    if not manifest_path.exists():
+        raise SystemExit("Treaty manifest is unavailable; rebuild the local UPO corpus before remote sync")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    incomplete = [
+        f"{item.get('slug')}/{item.get('variant')}"
+        for item in manifest
+        if item.get("status") != "ready" or item.get("missing_numeric_articles")
+    ]
+    if incomplete:
+        raise SystemExit(
+            "Refusing remote treaty replacement because the local UPO corpus is incomplete: "
+            + ", ".join(incomplete)
+        )
 
     sys.path.insert(0, str(Path("apps/api").resolve()))
     load_dotenv(args.env_file)
@@ -124,4 +145,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

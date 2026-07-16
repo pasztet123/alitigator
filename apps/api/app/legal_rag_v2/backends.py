@@ -22,10 +22,17 @@ from .retrieval import RetrievalCandidate
 _TOKEN_RE = re.compile(r"[0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", re.UNICODE)
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _EXPLICIT_REFERENCE_RE = re.compile(
-    r"\bart\.\s*\d+[a-z]?"
-    r"(?:\s*(?:ust\.\s*\d+[a-z]?|§\s*\d+[a-z]?))?"
-    r"(?:\s*pkt\s*\d+[a-z]?)?"
+    r"\bart\.\s*\d+[a-z]*"
+    r"(?:\s*(?:ust\.\s*\d+[a-z]*|§\s*\d+[a-z]*))?"
+    r"(?:\s*pkt\s*\d+[a-z]*)?"
     r"(?:\s*lit\.\s*[a-z])?",
+    re.IGNORECASE,
+)
+_DISPLAY_REFERENCE_RE = re.compile(
+    r"art\.\s*\d+[a-z]*"
+    r"(?:\s+(?:ust\.\s*\d+[a-z]*|§\s*\d+[a-z]*))?"
+    r"(?:\s+pkt\s*\d+[a-z]*)?"
+    r"(?:\s+lit\.\s*[a-z])?",
     re.IGNORECASE,
 )
 _QUERY_STOP_WORDS = frozenset(
@@ -64,6 +71,21 @@ def _explicit_reference(query: str) -> str:
     return _normalize_reference(match.group(0)) if match else ""
 
 
+def _display_reference(row: Mapping[str, Any]) -> str:
+    """Recover exact citations from legacy multi-letter article chunks."""
+
+    declared = str(row.get("display_reference") or "").strip()
+    if declared:
+        return _normalize_reference(declared)
+    first_line = next(
+        (line.strip() for line in str(row.get("chunk_text") or "").splitlines() if line.strip()),
+        "",
+    )
+    if _DISPLAY_REFERENCE_RE.fullmatch(first_line):
+        return _normalize_reference(first_line)
+    return ""
+
+
 def _json_list(value: Any) -> list[Any]:
     if isinstance(value, list):
         return value
@@ -88,7 +110,7 @@ def _candidate_from_row(row: Mapping[str, Any], *, backend: str, rank: int) -> R
     chunk_id = str(row.get("chunk_id") or "")
     document_id = str(row.get("document_id") or "")
     lexical_score = float(row.get("lexical_score") or 0.0)
-    display_reference = str(row.get("display_reference") or "").strip()
+    display_reference = _display_reference(row)
     # SQLite BM25 is lower-is-better and commonly negative; MySQL MATCH is
     # higher-is-better. RRF ultimately uses rank, while this normalized value is
     # retained only as an auditable component.
@@ -250,8 +272,8 @@ class CorpusFtsBackend:
         try:
             if explicit_reference:
                 reference_prefix = f"{explicit_reference}%"
-                exact_clauses = ["c.display_reference LIKE ?"]
-                exact_values: list[Any] = [reference_prefix]
+                exact_clauses = ["(c.display_reference LIKE ? OR c.chunk_text LIKE ?)"]
+                exact_values: list[Any] = [reference_prefix, f"{explicit_reference}\n%"]
                 if types:
                     exact_clauses.append("d.source_type IN (" + ",".join("?" for _ in types) + ")")
                     exact_values.extend(types)
@@ -269,7 +291,7 @@ class CorpusFtsBackend:
                            d.source_pages_json, 1000.0 AS lexical_score
                     FROM chunks c JOIN documents d ON d.document_id = c.document_id
                     WHERE """ + " AND ".join(exact_clauses)
-                    + " ORDER BY (c.display_reference LIKE ?) DESC, d.legal_state_date DESC, c.chunk_id ASC LIMIT ?",
+                    + " ORDER BY (c.display_reference LIKE ?) DESC, LENGTH(c.chunk_text) DESC, d.legal_state_date DESC, c.chunk_id ASC LIMIT ?",
                     tuple([*exact_values, reference_prefix, limit]),
                 ).fetchall()
                 if exact_rows:
@@ -354,8 +376,8 @@ class CorpusFtsBackend:
                     return [dict(row) for row in cursor.fetchall()]
         if explicit_reference:
             reference_prefix = f"{explicit_reference}%"
-            exact_clauses = ["c.display_reference LIKE %s"]
-            exact_values: list[Any] = [reference_prefix]
+            exact_clauses = ["(c.display_reference LIKE %s OR c.chunk_text LIKE %s)"]
+            exact_values: list[Any] = [reference_prefix, f"{explicit_reference}\n%"]
             if types:
                 exact_clauses.append("d.source_type IN (" + ",".join("%s" for _ in types) + ")")
                 exact_values.extend(types)
@@ -374,7 +396,8 @@ class CorpusFtsBackend:
                 FROM `{chunks_table}` c
                 JOIN `{documents_table}` d ON d.document_id = c.document_id
                 WHERE {' AND '.join(exact_clauses)}
-                ORDER BY (c.display_reference LIKE %s) DESC, d.legal_state_date DESC, c.chunk_id ASC LIMIT %s
+                ORDER BY (c.display_reference LIKE %s) DESC, CHAR_LENGTH(c.chunk_text) DESC,
+                         d.legal_state_date DESC, c.chunk_id ASC LIMIT %s
             """
             with mysql_connection() as connection:
                 with connection.cursor() as cursor:

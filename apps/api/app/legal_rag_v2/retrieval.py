@@ -25,19 +25,19 @@ AUTHORITY_SOURCE_TYPES = frozenset(
 )
 _WORD_RE = re.compile(r"[0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", re.UNICODE)
 _PROVISION_REFERENCE_RE = re.compile(
-    r"\bart\.\s*\d+[a-zA-Z]?"
-    r"(?:\s*(?:ust\.\s*\d+[a-zA-Z]?|§\s*\d+[a-zA-Z]?))?"
-    r"(?:\s*pkt\s*\d+[a-zA-Z]?)?"
+    r"\bart\.\s*\d+[a-zA-Z]*"
+    r"(?:\s*(?:ust\.\s*\d+[a-zA-Z]*|§\s*\d+[a-zA-Z]*))?"
+    r"(?:\s*pkt\s*\d+[a-zA-Z]*)?"
     r"(?:\s*lit\.\s*[a-zA-Z])?",
     re.IGNORECASE,
 )
 _RELATIVE_PROVISION_REFERENCE_RE = re.compile(
-    r"\bust\.\s*\d+[a-zA-Z]?"
-    r"(?:\s*pkt\s*\d+[a-zA-Z]?)?"
+    r"\bust\.\s*\d+[a-zA-Z]*"
+    r"(?:\s*pkt\s*\d+[a-zA-Z]*)?"
     r"(?:\s*lit\.\s*[a-zA-Z])?",
     re.IGNORECASE,
 )
-_ARTICLE_ONLY_RE = re.compile(r"\bart\.\s*(\d+[a-zA-Z]?)", re.IGNORECASE)
+_ARTICLE_ONLY_RE = re.compile(r"\bart\.\s*(\d+[a-zA-Z]*)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -299,9 +299,9 @@ LegalReranker = TransparentLegalReranker
 
 
 _ISSUE_EXPLICIT_REFERENCE_RE = re.compile(
-    r"\bart\.\s*\d+[a-z]?"
-    r"(?:\s*(?:ust\.\s*\d+[a-z]?|§\s*\d+[a-z]?))?"
-    r"(?:\s*pkt\s*\d+[a-z]?)?"
+    r"\bart\.\s*\d+[a-z]*"
+    r"(?:\s*(?:ust\.\s*\d+[a-z]*|§\s*\d+[a-z]*))?"
+    r"(?:\s*pkt\s*\d+[a-z]*)?"
     r"(?:\s*lit\.\s*[a-z])?",
     re.IGNORECASE,
 )

@@ -5,12 +5,48 @@ import tempfile
 import unittest
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from app.legal_rag_v2.backends import CorpusFtsBackend
+from app.mysql_rag import build_mysql_chunk_rows
 
 
 class CorpusFtsBackendTests(unittest.IsolatedAsyncioTestCase):
+    def test_mysql_index_preserves_multi_letter_article_display_reference(self) -> None:
+        record = {
+            "document_id": "vat-106ga",
+            "source_type": "statute",
+            "source_subtype": "codified_text",
+            "act_title": "Ustawa VAT",
+            "subject": "Ustawa VAT - art. 106ga",
+            "legal_provisions": ["art. 106ga"],
+            "issues": ["vat"],
+            "law_tags": ["VAT"],
+            "content_text": "Art. 106ga. 1. Reguła KSeF.",
+            "pre_chunked": True,
+            "provision_units": [
+                {
+                    "citation": "art. 106ga ust. 1",
+                    "text": "1. Reguła KSeF.",
+                    "article": "106ga",
+                    "section": "1",
+                    "unit_type": "section",
+                }
+            ],
+        }
+
+        _document, chunks = build_mysql_chunk_rows(
+            record,
+            config=SimpleNamespace(
+                chunk_target_chars=1000,
+                chunk_overlap_chars=0,
+                embedding_dimensions=16,
+            ),
+        )
+
+        self.assertEqual(["art. 106ga ust. 1"], [item["display_reference"] for item in chunks])
+
     async def test_mysql_treaty_query_uses_country_prefix_before_article_lookup(self) -> None:
         cursor = MagicMock()
         cursor.fetchall.return_value = []
@@ -108,6 +144,25 @@ class CorpusFtsBackendTests(unittest.IsolatedAsyncioTestCase):
                 "INSERT INTO chunks_fts(rowid, chunk_text, subject, signature, keywords, legal_provisions, issues, question_text, facts_text, tax_domain) VALUES (2,?,?,?,?,?,?,?,?,?)",
                 ("Art. 11 Odsetki stawka 5%", "UPO Polska Niemcy art. 11", "", "", "art. 11", "upo", "", "", "TAX_TREATY"),
             )
+            # Indexes created before v2.0.54 contain correct unit text for
+            # multi-letter articles but an empty display_reference. Exact
+            # retrieval must remain compatible until the next corpus sync.
+            connection.execute(
+                "INSERT INTO documents VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "vat-106ga", "Ustawa VAT", "", "2026-05-05", "", "", "VAT",
+                    "eli", "statute", "codified_text", "Sejm", "Ustawa VAT", "Dz.U.",
+                    "2026-05-05", '["art. 106ga"]', "[]",
+                ),
+            )
+            connection.execute(
+                "INSERT INTO chunks VALUES (?,?,?,?,?,?)",
+                (
+                    "vat-106ga-1", "vat-106ga", 0,
+                    "art. 106ga ust. 1\nArt. 106ga. 1. Podatnicy wystawiają faktury ustrukturyzowane.",
+                    "", "",
+                ),
+            )
             connection.commit()
             connection.close()
 
@@ -141,6 +196,16 @@ class CorpusFtsBackendTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual([item.document_id for item in treaty], ["upo-de-11"])
             self.assertEqual(treaty[0].source_type, "tax_treaty")
+
+            ksef = await backend.search(
+                "VAT art. 106ga ust. 1",
+                limit=5,
+                source_types=frozenset({"statute"}),
+                metadata_filters={"tax_domains": ["VAT"]},
+            )
+            self.assertEqual([item.document_id for item in ksef], ["vat-106ga"])
+            self.assertEqual(ksef[0].metadata["display_reference"], "art. 106ga ust. 1")
+            self.assertEqual(ksef[0].metadata["legal_provisions"], ["art. 106ga ust. 1"])
 
 
 if __name__ == "__main__":

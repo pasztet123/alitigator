@@ -1587,7 +1587,7 @@ def _graph_document_id(candidate: RetrievalCandidate) -> str:
         (
             match.group(1).casefold()
             for value in citations
-            for match in [re.search(r"\bart\.\s*(\d+[a-z]?)", str(value), re.IGNORECASE)]
+            for match in [re.search(r"\bart\.\s*(\d+[a-z]*)", str(value), re.IGNORECASE)]
             if match
         ),
         "",

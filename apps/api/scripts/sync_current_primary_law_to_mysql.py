@@ -32,7 +32,26 @@ DEFAULT_PATHS = (
 REQUIRED_REFERENCES = {
     "CIT": {"art. 11n pkt 1", "art. 15 ust. 2", "art. 24q ust. 1", "art. 24r ust. 1"},
     "PIT": {"art. 20 ust. 1g", "art. 21 ust. 1 pkt 157", "art. 30 ust. 1 pkt 17"},
-    "VAT": {"art. 15 ust. 1", "art. 29a ust. 1", "art. 32 ust. 2", "art. 86 ust. 1"},
+    "VAT": {
+        "art. 15 ust. 1",
+        "art. 29a ust. 1",
+        "art. 32 ust. 2",
+        "art. 86 ust. 1",
+        "art. 106ga ust. 1",
+        "art. 106ga ust. 2 pkt 1",
+        "art. 106ga ust. 2 pkt 2",
+        "art. 106ga ust. 2 pkt 3",
+        "art. 106ga ust. 2 pkt 4",
+        "art. 106ga ust. 2 pkt 5",
+        "art. 106ga ust. 2 pkt 6",
+        "art. 106na ust. 3",
+        "art. 106nda ust. 11",
+        "art. 106nf ust. 10",
+        "art. 106nh ust. 4",
+        "art. 106ng",
+        "art. 145m ust. 1",
+        "art. 145m ust. 2",
+    },
     "UFR": {"art. 2 ust. 2", "art. 5 ust. 1", "art. 27 ust. 4", "art. 29 ust. 1"},
 }
 

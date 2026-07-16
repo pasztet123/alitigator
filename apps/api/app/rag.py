@@ -43,9 +43,9 @@ WHITESPACE_RE = re.compile(r"\s+")
 QUERY_TOKEN_RE = re.compile(r"[0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]{3,}")
 EMBEDDING_TOKEN_RE = re.compile(r"[0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]{2,}")
 EXACT_PROVISION_REFERENCE_RE = re.compile(
-    r"\bart\.\s*\d+[a-z]?"
-    r"(?:\s*(?:ust\.\s*\d+[a-z]?|§\s*\d+[a-z]?))?"
-    r"(?:\s*pkt\s*\d+[a-z]?)?"
+    r"\bart\.\s*\d+[a-z]*"
+    r"(?:\s*(?:ust\.\s*\d+[a-z]*|§\s*\d+[a-z]*))?"
+    r"(?:\s*pkt\s*\d+[a-z]*)?"
     r"(?:\s*lit\.\s*[a-z])?",
     re.IGNORECASE,
 )
@@ -2642,7 +2642,7 @@ RESOLUTION_SECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 STATUTE_QUOTE_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\b(art\.\s*\d+[a-z]?\b|ust\.\s*\d+\b|pkt\s*\d+\b|lit\.\s*[a-z]\b)\b", re.IGNORECASE),
+    re.compile(r"\b(art\.\s*\d+[a-z]*\b|ust\.\s*\d+\b|pkt\s*\d+\b|lit\.\s*[a-z]\b)\b", re.IGNORECASE),
     re.compile(r"\b(zwalnia się od podatku|opodatkowaniu podlega|podatnik jest obowiązany|przepisów niniejszej ustawy nie stosuje się)\b", re.IGNORECASE),
 )
 
@@ -4652,7 +4652,7 @@ def build_record_index_chunks(
             (
                 match.group(1).casefold()
                 for value in record.get("legal_provisions") or []
-                for match in [re.fullmatch(r"art\.\s*(\d+[a-z]?)", str(value).strip(), re.IGNORECASE)]
+                for match in [re.fullmatch(r"art\.\s*(\d+[a-z]*)", str(value).strip(), re.IGNORECASE)]
                 if match
             ),
             "",
@@ -4668,7 +4668,7 @@ def build_record_index_chunks(
                 (
                     str(value).strip()
                     for value in record.get("legal_provisions") or []
-                    if re.fullmatch(r"art\.\s*\d+[a-z]?", str(value).strip(), re.IGNORECASE)
+                    if re.fullmatch(r"art\.\s*\d+[a-z]*", str(value).strip(), re.IGNORECASE)
                 ),
                 None,
             )
@@ -4823,8 +4823,8 @@ def index_record(connection: sqlite3.Connection, record: dict[str, Any], config:
         display_reference = (
             normalize_provision_reference(first_line)
             if re.fullmatch(
-                r"art\.\s*\d+[a-z]?(?:\s+(?:ust\.\s*\d+[a-z]?|§\s*\d+[a-z]?))?"
-                r"(?:\s+pkt\s*\d+[a-z]?)?(?:\s+lit\.\s*[a-z])?",
+                r"art\.\s*\d+[a-z]*(?:\s+(?:ust\.\s*\d+[a-z]*|§\s*\d+[a-z]*))?"
+                r"(?:\s+pkt\s*\d+[a-z]*)?(?:\s+lit\.\s*[a-z])?",
                 first_line,
                 re.IGNORECASE,
             )
@@ -6837,7 +6837,7 @@ def fetch_statute_rows_by_targets(
         # controlling text was present next door.
         heading_penalty = int(
             len(text) < 80
-            or bool(re.fullmatch(r"(?:art\.?|artyku[łl])\s*\d+[a-z]?\s*\.?", text, re.IGNORECASE))
+            or bool(re.fullmatch(r"(?:art\.?|artyku[łl])\s*\d+[a-z]*\s*\.?", text, re.IGNORECASE))
         )
         subject = str(row["subject"] or "")
         treaty_penalty = int(subject.lower().startswith("upo polska"))
@@ -6950,7 +6950,7 @@ def extract_rule_unit_blocks(text: str) -> list[tuple[Optional[str], str]]:
     if blocks:
         return blocks
     article_stripped = re.sub(
-        r"^.*?Art\.\s*\d+[a-z]?\.\s*",
+        r"^.*?Art\.\s*\d+[a-z]*\.\s*",
         "",
         text,
         count=1,
@@ -7947,7 +7947,7 @@ def chunk_has_substantive_axis_preferred_target(
     text = normalize_whitespace(chunk.chunk_text or "")
     if len(text) < 80:
         return False
-    return not bool(re.fullmatch(r"art\.\s*\d+[a-z]?(?:\s*\.)?", text, re.IGNORECASE))
+    return not bool(re.fullmatch(r"art\.\s*\d+[a-z]*(?:\s*\.)?", text, re.IGNORECASE))
 
 
 def chunk_is_direct_axis_source(axis: LegalRetrievalAxis, chunk: RagChunk) -> bool:
@@ -8528,7 +8528,7 @@ def retrieve_deterministic_statute_chunks(
         substantive = int(
             len(normalize_whitespace(chunk.chunk_text or "")) >= 80
             and not re.fullmatch(
-                r"(?:art\.?|artyku[łl])\s*\d+[a-z]?\s*\.?",
+                r"(?:art\.?|artyku[łl])\s*\d+[a-z]*\s*\.?",
                 normalize_whitespace(chunk.chunk_text or ""),
                 re.IGNORECASE,
             )

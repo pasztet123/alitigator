@@ -357,6 +357,20 @@ class RetrievalTests(unittest.IsolatedAsyncioTestCase):
                             },
                         )
                     ]
+                if query == "VAT art. 106ga ust. 1":
+                    return [
+                        RetrievalCandidate(
+                            candidate_id="vat-art-106ga-1",
+                            document_id="vat-act",
+                            chunk_id="vat-art-106ga-1",
+                            text="Art. 106ga ust. 1. Obowiązek wystawienia faktury ustrukturyzowanej.",
+                            source_type="statute",
+                            metadata={
+                                "tax_domains": ["VAT"],
+                                "legal_provisions": ["art. 106ga ust. 1"],
+                            },
+                        )
+                    ]
                 return []
 
         backend = RepeatingArticleBackend()
@@ -375,6 +389,11 @@ class RetrievalTests(unittest.IsolatedAsyncioTestCase):
                         query="VAT art. 32 ust. 2",
                         lane="primary_law",
                     ),
+                    QueryFamily(
+                        family="explicit_provision_reference",
+                        query="VAT art. 106ga ust. 1",
+                        lane="primary_law",
+                    ),
                 ],
             }
         )
@@ -385,8 +404,9 @@ class RetrievalTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(["UFR"], backend.filters["UFR art. 5"])
         self.assertEqual(["VAT"], backend.filters["VAT art. 32 ust. 2"])
+        self.assertEqual(["VAT"], backend.filters["VAT art. 106ga ust. 1"])
         self.assertEqual(
-            {"ufr-art-5", "vat-art-32-2"},
+            {"ufr-art-5", "vat-art-32-2", "vat-art-106ga-1"},
             {item.candidate_id for item in result.primary_law[0].candidates},
         )
 

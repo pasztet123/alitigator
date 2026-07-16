@@ -396,8 +396,8 @@ def build_mysql_chunk_rows(
         display_reference = (
             normalize_provision_reference(first_line)
             if re.fullmatch(
-                r"art\.\s*\d+[a-z]?(?:\s+(?:ust\.\s*\d+[a-z]?|§\s*\d+[a-z]?))?"
-                r"(?:\s+pkt\s*\d+[a-z]?)?(?:\s+lit\.\s*[a-z])?",
+                r"art\.\s*\d+[a-z]*(?:\s+(?:ust\.\s*\d+[a-z]*|§\s*\d+[a-z]*))?"
+                r"(?:\s+pkt\s*\d+[a-z]*)?(?:\s+lit\.\s*[a-z])?",
                 first_line,
                 re.IGNORECASE,
             )

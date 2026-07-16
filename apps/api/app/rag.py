@@ -2517,6 +2517,24 @@ def query_targets_family_foundation_mechanism(query: str) -> bool:
     return has_foundation and has_activity
 
 
+def query_targets_cit_cost_deductibility(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    return bool(
+        re.search(
+            r"(?:koszt\w*\s+uzyskani\w*\s+przychod|koszt\w*\s+podatkow|"
+            r"zalicz\w*.{0,100}\s+do\s+koszt|potr[ąa]calno[śs][ćc]\s+koszt)",
+            normalized,
+        )
+    )
+
+
+def query_targets_contractual_penalty_cost(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    return query_targets_cit_cost_deductibility(query) and bool(
+        re.search(r"kar\w*\s+umown|odszkodowan", normalized)
+    )
+
+
 def query_targets_wht_pay_and_refund_services(query: str) -> bool:
     normalized = normalize_whitespace(query or "").lower()
     has_wht_context = bool(re.search(r"\b(wht|podatek u źr[óo]dła|withholding|certyfikat\w* rezydencji|beneficial owner|rzeczywist\w* właściciel\w*)\b", normalized))
@@ -7419,6 +7437,37 @@ def filter_treaty_country_chunks(chunks: list[RagChunk], query: str) -> list[Rag
 def decompose_query_into_legal_axes(query: str) -> list[LegalRetrievalAxis]:
     normalized = normalize_whitespace(query or "")
     axes: list[LegalRetrievalAxis] = []
+
+    if query_targets_cit_cost_deductibility(query):
+        penalty = query_targets_contractual_penalty_cost(query)
+        axes.append(
+            LegalRetrievalAxis(
+                axis_id=(
+                    "cit_contractual_penalty_cost"
+                    if penalty
+                    else "cit_cost_deductibility"
+                ),
+                label=(
+                    "CIT: kara umowna — koszt podatkowy i ustawowe wyłączenie"
+                    if penalty
+                    else "CIT: koszt uzyskania przychodów i ustawowe wyłączenia"
+                ),
+                query=expand_search_query(
+                    f"{normalized} art. 15 ust. 1 art. 16 ust. 1 "
+                    + (
+                        "art. 16 ust. 1 pkt 22 kara umowna opóźnienie dostawy "
+                        "wady towarów zwłoka w usunięciu wad należyta staranność"
+                        if penalty
+                        else "koszty poniesione w celu osiągnięcia przychodów wyłączenia"
+                    )
+                ),
+                source_types={"statute", "interpretation", "judgment"},
+                tax_domains={"CIT"},
+                preferred_targets=(
+                    (("CIT", "15"), ("CIT", "16"))
+                ),
+            )
+        )
 
     if query_targets_estonian_cit_transformation_share_cost(query) or query_targets_estonian_cit_hidden_profit(query):
         axes.extend(

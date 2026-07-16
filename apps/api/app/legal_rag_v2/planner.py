@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from app.model_gateway import (
     ModelGateway,
@@ -61,6 +61,22 @@ change the legal result, materially change retrieval, or distinguish two close
 legal mechanisms. Otherwise continue with the fact marked missing. Confidence
 measures confidence in this research plan, not confidence in a legal answer.
 """
+
+ISSUE_LOCATOR_SYSTEM_PROMPT = """\
+You repair the issue-identification stage of a Polish tax-law research plan.
+Return only the requested structured issue locator output. Do not answer the
+legal question and do not state a legal conclusion. Split independent
+transactions and legal mechanisms. For every issue provide a specific label,
+tax domain, mechanism, useful primary-law provision candidates and query
+families for primary law, interpretations and judgments. Provision candidates
+are retrieval hints only and are not evidence. Never return labels such as
+"general tax issue" when the question describes a concrete mechanism.
+"""
+
+
+class IssueLocatorOutput(BaseModel):
+    issues: list[LegalIssue] = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
 
 
 class PlannerValidationError(ValueError):
@@ -510,13 +526,16 @@ class LegalQueryPlanner:
                 primary_succeeded=False,
             )
         except (ModelSchemaError, ValidationError, PlannerValidationError) as exc:
-            return self._fallback(
-                question,
-                reason="invalid_schema",
-                target_date=target_date,
-                primary_error=self._safe_error(exc),
-                primary_succeeded=False,
-            )
+            repaired = await self._repair_issue_only_plan(question, target_date=target_date)
+            if repaired is None:
+                return self._fallback(
+                    question,
+                    reason="invalid_schema",
+                    target_date=target_date,
+                    primary_error=self._safe_error(exc),
+                    primary_succeeded=False,
+                )
+            plan = repaired
         except ModelGatewayError as exc:
             # Provider request failures (for example an unsupported fallback
             # model/schema combination) are technical planning failures.  They
@@ -528,6 +547,20 @@ class LegalQueryPlanner:
                 primary_error=self._safe_error(exc),
                 primary_succeeded=False,
             )
+
+        if self._plan_is_unscoped(plan):
+            repaired = await self._repair_issue_only_plan(question, target_date=target_date)
+            if repaired is not None and not self._plan_is_unscoped(repaired):
+                plan = repaired
+            else:
+                return self._fallback(
+                    question,
+                    reason="low_confidence",
+                    target_date=target_date,
+                    base_plan=plan,
+                    primary_error="planner returned only unscoped general tax issues",
+                    primary_succeeded=True,
+                )
 
         if plan.confidence < self.minimum_confidence:
             return self._fallback(
@@ -610,6 +643,78 @@ class LegalQueryPlanner:
             "<user_question> tags, excluding the tags.\n"
             f"<user_question>{question}</user_question>"
         )
+
+    async def _repair_issue_only_plan(
+        self,
+        question: str,
+        *,
+        target_date: Optional[str],
+    ) -> Optional[LegalResearchPlan]:
+        """Retry issue location with a smaller schema and no fact spans.
+
+        The full planner schema is intentionally strict and can be rejected
+        because of one malformed source span even when the provider correctly
+        recognized the legal mechanism.  This recovery call asks only for the
+        research issues and provision candidates; it cannot emit a legal
+        answer and every candidate still has to pass retrieval and validation.
+        """
+
+        try:
+            located = await self.gateway.generate_structured(
+                response_model=IssueLocatorOutput,
+                input=(
+                    f"Authoritative target date: {target_date or 'not supplied'}\n"
+                    f"<user_question>{question}</user_question>"
+                ),
+                system_prompt=ISSUE_LOCATOR_SYSTEM_PROMPT,
+                model=self.model,
+                reasoning_effort=self.reasoning_effort,
+                max_output_tokens=4000,
+            )
+            output = (
+                located
+                if isinstance(located, IssueLocatorOutput)
+                else IssueLocatorOutput.model_validate(located)
+            )
+            plan = LegalResearchPlan(
+                user_query=question,
+                intent=ResearchIntent(
+                    mode="mixed_analysis",
+                    needs_normative_answer=True,
+                    needs_interpretations=True,
+                    needs_case_law=True,
+                    needs_conflict_analysis=True,
+                    needs_calculations=bool(re.search(r"\d", question)),
+                ),
+                target_date=target_date,
+                issues=output.issues,
+                clarification=Clarification(),
+                confidence=output.confidence,
+            )
+            return validate_plan_grounding(plan, question)
+        except (ModelGatewayError, ValidationError, PlannerValidationError):
+            return None
+
+    @staticmethod
+    def _plan_is_unscoped(plan: LegalResearchPlan) -> bool:
+        if not plan.issues:
+            return True
+        for issue in plan.issues:
+            text = " ".join(
+                (
+                    issue.issue_id,
+                    issue.label,
+                    issue.legal_mechanism,
+                    *issue.possible_provision_concepts,
+                    *issue.possible_legal_concepts,
+                    *issue.possible_provision_hints,
+                )
+            ).casefold()
+            generic = "general tax" in text or "general_tax_analysis" in text
+            has_provision_candidate = bool(re.search(r"\bart\.\s*\d", text))
+            if not generic or has_provision_candidate:
+                return False
+        return True
 
     def _fallback(
         self,

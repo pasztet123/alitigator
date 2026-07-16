@@ -1217,6 +1217,63 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("required_primary", rendered_risks)
         self.assertNotIn("internal_dependency_id", rendered_risks)
 
+    def test_deterministic_thesis_prefers_application_over_definition_dump(self) -> None:
+        plan = research_plan()
+        provision = ProvisionReference(
+            provision_id="cit-art-15-1",
+            document_id="pl-ustawa-o-podatku-dochodowym-od-osob-prawnych-art-15",
+            citation="art. 15 ust. 1",
+            text="Koszt musi pozostawać w związku z przychodem.",
+            status="active",
+            source_span=DocumentSourceSpan(
+                start=0,
+                end=44,
+                document_id="pl-ustawa-o-podatku-dochodowym-od-osob-prawnych-art-15",
+            ),
+        )
+        claims = [
+            LegalClaim(
+                claim_id="definition",
+                issue_id="pit_sale",
+                claim_type="normative_rule",
+                text="Ustawa definiuje ogólną przesłankę kosztu.",
+                result="Definicja ustawowa kosztu uzyskania przychodów.",
+                status="approved",
+                controlling_provision_ids=[provision.provision_id],
+                source_spans=[provision.source_span],
+                confidence=0.99,
+            ),
+            LegalClaim(
+                claim_id="application",
+                issue_id="pit_sale",
+                claim_type="application",
+                text="Wydatek spełnia przesłankę związku z przychodem.",
+                result="Wydatek może być kosztem po spełnieniu pozostałych warunków.",
+                status="approved",
+                controlling_provision_ids=[provision.provision_id],
+                source_spans=[provision.source_span],
+                confidence=0.8,
+            ),
+        ]
+        bundle = EvidenceBundle(
+            issue_id="pit_sale",
+            controlling_provisions=[provision],
+            coverage_status="complete",
+        )
+        answer_plan = pipeline_module._build_answer_plan(plan, claims, [])
+
+        output = pipeline_module._deterministic_writer_output(
+            {
+                "validated_claims": claims,
+                "legal_research_plan": plan,
+                "evidence_bundles": [bundle],
+                "answer_plan": answer_plan,
+            }
+        )
+
+        self.assertIn("Wydatek może być kosztem", output.thesis)
+        self.assertNotIn("Definicja ustawowa", output.thesis)
+
 
 if __name__ == "__main__":
     unittest.main()

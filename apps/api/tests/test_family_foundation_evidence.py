@@ -103,6 +103,49 @@ class FamilyFoundationEvidenceTests(unittest.TestCase):
         self.assertIn("PIT art. 21 ust. 1 pkt 157", beneficiary_queries)
         self.assertIn("UFR art. 29 ust. 1", beneficiary_queries)
 
+    def test_complex_case_is_split_by_transaction_not_five_generic_buckets(self) -> None:
+        question = (
+            "Fundacja rodzinna otrzymała dywidendę i odsetki od obligacji. "
+            "Wynajmuje magazyn spółce fundatora, kupuje usługi doradcze od "
+            "podmiotu powiązanego, a fundator udzielił fundacji pożyczki. "
+            "Fundacja udzieliła beneficjentowi pożyczki na 12 lat i wypłaciła "
+            "mu świadczenie. Kupiła mieszkania częściowo w celu odsprzedaży, "
+            "ponosi koszty wspólne, pyta o odliczenie podatku, deklaracje, "
+            "terminy oraz VAT od najmu i sprzedaży."
+        )
+        enriched = enrich_family_foundation_plan(plan(), question)
+        by_id = {issue.issue_id: issue for issue in enriched.issues}
+
+        expected = {
+            "family_foundation_investment_income",
+            "family_foundation_related_party_rent",
+            "family_foundation_related_party_services",
+            "family_foundation_borrowing_from_related_party",
+            "family_foundation_beneficiary_loan",
+            "family_foundation_beneficiary_benefit",
+            "family_foundation_real_estate_activity",
+            "family_foundation_common_costs",
+            "family_foundation_tax_credit_and_reporting",
+            "family_foundation_vat_transactions",
+        }
+        self.assertTrue(expected.issubset(by_id))
+        generic_ids = {
+            "family_foundation_allowed_activity_catalog",
+            "family_foundation_cit_hidden_profit",
+            "family_foundation_disallowed_income_25_percent",
+            "family_foundation_beneficiary_pit",
+            "family_foundation_vat_related_party",
+        }
+        self.assertFalse(generic_ids.intersection(by_id))
+
+        rent_queries = {item.query for item in by_id["family_foundation_related_party_rent"].query_families}
+        self.assertIn("CIT art. 6 ust. 8", rent_queries)
+        self.assertIn("CIT art. 24q ust. 8", rent_queries)
+        benefit_queries = {item.query for item in by_id["family_foundation_beneficiary_benefit"].query_families}
+        self.assertIn("PIT art. 21 ust. 49", benefit_queries)
+        vat_queries = {item.query for item in by_id["family_foundation_vat_transactions"].query_families}
+        self.assertIn("VAT art. 90 ust. 2", vat_queries)
+
     def test_domestic_family_plan_drops_legacy_wht_noise(self) -> None:
         base = plan()
         wht_issue = LegalIssue(

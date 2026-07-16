@@ -35,6 +35,7 @@ from .embeddings import (
     VersionedEmbeddingIndex,
 )
 from .family_foundation import enrich_family_foundation_plan, family_foundation_issue_kind
+from .cit_costs import enrich_cit_cost_plan
 from .planner import LegalQueryPlanner, PlannerOutcome
 from .provision_graph import ProvisionGraph as RuntimeProvisionGraph
 from .provision_graph import ProvisionParser, ProvisionUnit
@@ -388,9 +389,12 @@ class LegalRagV2Pipeline:
             force_fallback=force_planner_fallback,
         )
         timings["planner"] = _elapsed_ms(stage)
-        plan = enrich_transfer_pricing_plan(
-            enrich_family_foundation_plan(
-                enrich_crossborder_wht_plan(planner_outcome.plan, question),
+        plan = enrich_cit_cost_plan(
+            enrich_transfer_pricing_plan(
+                enrich_family_foundation_plan(
+                    enrich_crossborder_wht_plan(planner_outcome.plan, question),
+                    question,
+                ),
                 question,
             ),
             question,
@@ -437,9 +441,12 @@ class LegalRagV2Pipeline:
             )
             if augmented.fallback_trace.fallback_used:
                 planner_outcome = augmented
-                plan = enrich_transfer_pricing_plan(
-                    enrich_family_foundation_plan(
-                        enrich_crossborder_wht_plan(augmented.plan, question),
+                plan = enrich_cit_cost_plan(
+                    enrich_transfer_pricing_plan(
+                        enrich_family_foundation_plan(
+                            enrich_crossborder_wht_plan(augmented.plan, question),
+                            question,
+                        ),
                         question,
                     ),
                     question,
@@ -1673,6 +1680,26 @@ def _required_issue_dependency_patterns(
     pit_act = r"podatku-dochodowym-od-osob-fizycznych"
     vat_act = r"podatku-od-towarow"
     ufr_act = r"fundacji-rodzinnej"
+    issue_concepts = " ".join(
+        (
+            issue_id,
+            str(issue.legal_mechanism),
+            *(str(item) for item in issue.possible_provision_concepts),
+        )
+    ).casefold()
+    if issue_id == "cit_contractual_penalty_cost" or (
+        "contractual_penalty" in issue_concepts
+        or re.search(r"art\.\s*16\s+ust\.\s*1\s+pkt\s*22", issue_concepts)
+    ):
+        return (
+            ("cit_art_15_1", r"art\.\s*15\s+ust\.\s*1(?:\s|$)", cit_act),
+            ("cit_art_16_1_22", r"art\.\s*16\s+ust\.\s*1\s+pkt\s*22", cit_act),
+        )
+    if issue_id == "cit_cost_deductibility" or "cit_cost_deductibility" in issue_concepts:
+        return (
+            ("cit_art_15_1", r"art\.\s*15\s+ust\.\s*1(?:\s|$)", cit_act),
+            ("cit_art_16_1", r"art\.\s*16\s+ust\.\s*1(?:\s|$)", cit_act),
+        )
     if issue_id == "wht_pay_and_refund_procedure":
         return (
             ("art_26_2e", r"art\.\s*26\s+ust\.\s*2e", cit_act),
@@ -1695,6 +1722,79 @@ def _required_issue_dependency_patterns(
             ("vat_art_17_1_4", r"art\.\s*17\s+ust\.\s*1\s+pkt\s*4", vat_act),
         )
     family_issue_id = family_foundation_issue_kind(issue)
+    if family_issue_id == "family_foundation_investment_income":
+        return (
+            ("ufr_art_5_1_3", r"art\.\s*5\s+ust\.\s*1\s+pkt\s*3", ufr_act),
+            ("ufr_art_5_1_4", r"art\.\s*5\s+ust\.\s*1\s+pkt\s*4", ufr_act),
+            ("cit_art_6_1_25", r"art\.\s*6\s+ust\.\s*1\s+pkt\s*25", cit_act),
+            ("cit_art_6_6", r"art\.\s*6\s+ust\.\s*6", cit_act),
+            ("cit_art_6_7", r"art\.\s*6\s+ust\.\s*7", cit_act),
+        )
+    if family_issue_id == "family_foundation_related_party_rent":
+        return (
+            ("ufr_art_5_1_2", r"art\.\s*5\s+ust\.\s*1\s+pkt\s*2", ufr_act),
+            ("cit_art_6_8", r"art\.\s*6\s+ust\.\s*8", cit_act),
+            ("cit_art_19_1", r"art\.\s*19\s+ust\.\s*1", cit_act),
+            ("cit_art_24q_8", r"art\.\s*24q\s+ust\.\s*8", cit_act),
+        )
+    if family_issue_id == "family_foundation_related_party_services":
+        return (
+            ("cit_art_24q_1", r"art\.\s*24q\s+ust\.\s*1(?:\s|$)", cit_act),
+            ("cit_art_24q_1a_3", r"art\.\s*24q\s+ust\.\s*1a\s+pkt\s*3", cit_act),
+        )
+    if family_issue_id == "family_foundation_borrowing_from_related_party":
+        return (
+            ("cit_art_24q_1", r"art\.\s*24q\s+ust\.\s*1(?:\s|$)", cit_act),
+            ("cit_art_24q_1a_1", r"art\.\s*24q\s+ust\.\s*1a\s+pkt\s*1", cit_act),
+        )
+    if family_issue_id == "family_foundation_beneficiary_loan":
+        return (
+            ("ufr_art_5_1_5_c", r"art\.\s*5\s+ust\.\s*1\s+pkt\s*5\s+lit\.\s*c", ufr_act),
+            ("cit_art_24q_1", r"art\.\s*24q\s+ust\.\s*1(?:\s|$)", cit_act),
+            ("cit_art_24q_1a_2", r"art\.\s*24q\s+ust\.\s*1a\s+pkt\s*2", cit_act),
+            ("cit_art_24q_1a_5", r"art\.\s*24q\s+ust\.\s*1a\s+pkt\s*5", cit_act),
+            ("cit_art_24q_1a_6", r"art\.\s*24q\s+ust\.\s*1a\s+pkt\s*6", cit_act),
+            ("cit_art_24q_2", r"art\.\s*24q\s+ust\.\s*2", cit_act),
+        )
+    if family_issue_id == "family_foundation_beneficiary_benefit":
+        return (
+            ("ufr_art_2_2", r"art\.\s*2\s+ust\.\s*2", ufr_act),
+            ("cit_art_24q_1", r"art\.\s*24q\s+ust\.\s*1(?:\s|$)", cit_act),
+            ("pit_art_21_1_157", r"art\.\s*21\s+ust\.\s*1\s+pkt\s*157", pit_act),
+            ("pit_art_21_49", r"art\.\s*21\s+ust\.\s*49", pit_act),
+            ("pit_art_30_1_17", r"art\.\s*30\s+ust\.\s*1\s+pkt\s*17", pit_act),
+        )
+    if family_issue_id == "family_foundation_real_estate_activity":
+        return (
+            ("ufr_art_5_1_1", r"art\.\s*5\s+ust\.\s*1\s+pkt\s*1", ufr_act),
+            ("cit_art_6_7", r"art\.\s*6\s+ust\.\s*7", cit_act),
+            ("cit_art_24r_1", r"art\.\s*24r\s+ust\.\s*1", cit_act),
+            ("cit_art_15_2", r"art\.\s*15\s+ust\.\s*2", cit_act),
+        )
+    if family_issue_id == "family_foundation_common_costs":
+        return (
+            ("cit_art_15_2", r"art\.\s*15\s+ust\.\s*2", cit_act),
+            ("cit_art_24r_2", r"art\.\s*24r\s+ust\.\s*2", cit_act),
+        )
+    if family_issue_id == "family_foundation_tax_credit_and_reporting":
+        return (
+            ("cit_art_24q_6", r"art\.\s*24q\s+ust\.\s*6", cit_act),
+            ("cit_art_24q_8", r"art\.\s*24q\s+ust\.\s*8", cit_act),
+            ("cit_art_24q_9", r"art\.\s*24q\s+ust\.\s*9", cit_act),
+            ("cit_art_24s_1", r"art\.\s*24s\s+ust\.\s*1", cit_act),
+        )
+    if family_issue_id == "family_foundation_vat_transactions":
+        return (
+            ("vat_art_15_1", r"art\.\s*15\s+ust\.\s*1", vat_act),
+            ("vat_art_15_2", r"art\.\s*15\s+ust\.\s*2", vat_act),
+            ("vat_art_32_1", r"art\.\s*32\s+ust\.\s*1", vat_act),
+            ("vat_art_43_1_10", r"art\.\s*43\s+ust\.\s*1\s+pkt\s*10(?:\s|$)", vat_act),
+            ("vat_art_43_1_10a", r"art\.\s*43\s+ust\.\s*1\s+pkt\s*10a", vat_act),
+            ("vat_art_43_1_36", r"art\.\s*43\s+ust\.\s*1\s+pkt\s*36", vat_act),
+            ("vat_art_86_1", r"art\.\s*86\s+ust\.\s*1", vat_act),
+            ("vat_art_90_1", r"art\.\s*90\s+ust\.\s*1", vat_act),
+            ("vat_art_90_2", r"art\.\s*90\s+ust\.\s*2", vat_act),
+        )
     if family_issue_id == "family_foundation_allowed_activity_catalog":
         return (("ufr_art_5", r"art\.\s*5(?:\s|$)", ufr_act),)
     if family_issue_id == "family_foundation_cit_hidden_profit":
@@ -1739,9 +1839,24 @@ def _required_issue_dependency_patterns(
     if question_targets_transfer_pricing(transfer_pricing_haystack):
         return (
             ("cit_art_11k_1", r"art\.\s*11k\s+ust\.\s*1", cit_act),
+            ("cit_art_11k_2", r"art\.\s*11k\s+ust\.\s*2", cit_act),
+            ("cit_art_11k_3", r"art\.\s*11k\s+ust\.\s*3", cit_act),
             ("cit_art_11l_1", r"art\.\s*11l\s+ust\.\s*1", cit_act),
             ("cit_art_11n_1", r"art\.\s*11n\s+pkt\s*1", cit_act),
             ("cit_art_11t_1", r"art\.\s*11t\s+ust\.\s*1", cit_act),
+        )
+    # Never certify an arbitrary top semantic hit as controlling law for an
+    # issue that the planner itself left completely unscoped.  Mechanism
+    # enrichers resolve recognized questions before this point; an unknown
+    # generic issue remains visibly partial instead of citing a random article.
+    has_exact_target = any(
+        family.lane in {"primary_law", "both"}
+        and family.family in {"explicit_provision_reference", "explicit_provision"}
+        for family in issue.query_families
+    )
+    if issue.legal_mechanism == "general_tax_analysis" and not has_exact_target:
+        return (
+            ("unresolved_generic_issue", r"(?!)", r".*"),
         )
     return ()
 
@@ -2459,7 +2574,30 @@ def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:
         for bundle in bundles
         if bundle.issue_id in complete_primary_issues and bundle.controlling_provisions
     )
-    thesis = " ".join(item.result for item in selected)
+    # A provider/schema failure must not turn the thesis into a dump of every
+    # normative definition.  Prefer one applied outcome per issue, then fall
+    # back to a normative result only when no application claim exists.
+    thesis_claims: list[LegalClaim] = []
+    for issue in plan.issues:
+        issue_claims = [item for item in selected if item.issue_id == issue.issue_id]
+        preferred = [
+            item for item in issue_claims if item.claim_type in {"application", "calculation"}
+        ]
+        candidates = preferred or [
+            item for item in issue_claims if item.claim_type == "normative_rule"
+        ]
+        if candidates:
+            thesis_claims.append(max(candidates, key=lambda item: item.confidence))
+    thesis_parts = list(
+        dict.fromkeys(
+            " ".join(item.result.split()).rstrip(". ") + "."
+            for item in thesis_claims
+            if item.result.strip()
+        )
+    )
+    thesis = " ".join(thesis_parts[:6])
+    if len(thesis) > 1_500:
+        thesis = thesis[:1_497].rsplit(" ", 1)[0].rstrip(".,;: ") + "…"
     if not thesis:
         thesis = (
             "Źródła pierwotne zostały zweryfikowane, lecz synteza materialnych "
@@ -2564,6 +2702,19 @@ def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:
             for source in bundle.missing_sources
         )
     ]
+    claim_gaps = [
+        "Nie ukończono syntezy materialnej konkluzji dla: "
+        f"{issue.label}."
+        for issue in plan.issues
+        if not any(claim.issue_id == issue.issue_id for claim in selected)
+        and issue.issue_id in complete_primary_issues
+    ]
+    conditional_gaps = [
+        "Wniosek warunkowy wymaga uzupełnienia faktów dla: "
+        f"{issue_labels.get(claim.issue_id, claim.issue_id)}."
+        for claim in selected
+        if claim.status == "conditional_missing_fact"
+    ]
     synthesis_gap = (
         [
             "Kompletne źródła prawa pierwotnego są dostępne, ale synteza modelowa "
@@ -2576,7 +2727,17 @@ def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:
         thesis=thesis,
         analysis_sections=sections,
         sources=_dedupe_writer_sources(sources),
-        risks_and_gaps=[*missing_questions, *source_gaps, *synthesis_gap]
+        risks_and_gaps=list(
+            dict.fromkeys(
+                [
+                    *missing_questions,
+                    *source_gaps,
+                    *claim_gaps,
+                    *conditional_gaps,
+                    *synthesis_gap,
+                ]
+            )
+        )
         or ["Nie znaleziono dodatkowych luk poza oznaczonymi statusami claimów."],
         claim_ids_used=[item.claim_id for item in selected],
     )

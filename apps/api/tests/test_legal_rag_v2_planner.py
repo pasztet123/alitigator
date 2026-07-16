@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.legal_rag_v2.planner import LegalQueryPlanner
+from app.legal_rag_v2.planner import IssueLocatorOutput, LegalQueryPlanner
 from app.legal_rag_v2.schemas import (
     Clarification,
     Fact,
@@ -140,7 +140,7 @@ class LegalQueryPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("conclusion", serialized)
         self.assertNotIn("final_answer", serialized)
 
-    async def test_unsupported_fact_span_is_invalid_schema_and_falls_back(self) -> None:
+    async def test_unsupported_fact_span_recovers_the_scoped_issue_plan(self) -> None:
         payload = valid_plan().model_dump()
         payload["facts"][0]["value"] = "Francja"
         payload["facts"][0]["source_span"] = {
@@ -154,8 +154,10 @@ class LegalQueryPlannerTests(unittest.IsolatedAsyncioTestCase):
 
         outcome = await planner.plan(QUESTION)
 
-        self.assertEqual(outcome.fallback_trace.fallback_reason, "invalid_schema")
-        self.assertIn("not supported", outcome.fallback_trace.primary_planner_error or "")
+        self.assertFalse(outcome.fallback_trace.fallback_used)
+        self.assertEqual("withholding_payment", outcome.plan.issues[0].issue_id)
+        self.assertEqual([], outcome.plan.facts)
+        self.assertEqual(2, len(gateway.calls))
 
     async def test_low_confidence_and_zero_recall_are_the_only_semantic_fallbacks(self) -> None:
         low_gateway = FakeGateway(valid_plan(confidence=0.2))
@@ -178,6 +180,50 @@ class LegalQueryPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gateway.calls, [])
         self.assertEqual(outcome.fallback_trace.fallback_reason, "forced")
         self.assertLessEqual(len(outcome.plan.clarification.questions), 3)
+
+    async def test_unscoped_model_plan_is_repaired_with_issue_only_schema(self) -> None:
+        unscoped = LegalResearchPlan(
+            intent=ResearchIntent(mode="mixed_analysis"),
+            issues=[
+                LegalIssue(
+                    issue_id="cit_general_tax_issue",
+                    label="CIT: general tax issue",
+                    tax_domains=["CIT"],
+                    legal_mechanism="general_tax_analysis",
+                )
+            ],
+            clarification=Clarification(),
+            confidence=0.9,
+        )
+        located_issue = LegalIssue(
+            issue_id="cit_contractual_penalty_cost",
+            label="CIT: kara umowna i koszt podatkowy",
+            tax_domains=["CIT"],
+            legal_mechanism="contractual_penalty_cost",
+            possible_provision_concepts=[
+                "CIT art. 15 ust. 1",
+                "CIT art. 16 ust. 1 pkt 22",
+            ],
+        )
+
+        class RepairGateway(FakeGateway):
+            async def generate_structured(self, *, response_model, **kwargs):
+                self.calls.append({"response_model": response_model, **kwargs})
+                if response_model is LegalResearchPlan:
+                    return unscoped
+                if response_model is IssueLocatorOutput:
+                    return IssueLocatorOutput(issues=[located_issue], confidence=0.88)
+                raise AssertionError(response_model)
+
+        gateway = RepairGateway(unscoped)
+        outcome = await LegalQueryPlanner(gateway).plan(
+            "Czy kara umowna może być kosztem uzyskania przychodów w CIT?"
+        )
+
+        self.assertFalse(outcome.fallback_trace.fallback_used)
+        self.assertEqual("cit_contractual_penalty_cost", outcome.plan.issues[0].issue_id)
+        self.assertEqual(2, len(gateway.calls))
+        self.assertIs(IssueLocatorOutput, gateway.calls[1]["response_model"])
 
 
 class TraceWriterTests(unittest.TestCase):

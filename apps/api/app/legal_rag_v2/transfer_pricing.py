@@ -12,6 +12,8 @@ TRANSFER_PRICING_TARGETS = (
     ("CIT", "art. 11a ust. 1 pkt 4"),
     ("CIT", "art. 11c ust. 1"),
     ("CIT", "art. 11k ust. 1"),
+    ("CIT", "art. 11k ust. 2"),
+    ("CIT", "art. 11k ust. 3"),
     ("CIT", "art. 11l ust. 1"),
     ("CIT", "art. 11n pkt 1"),
     ("CIT", "art. 11t ust. 1"),

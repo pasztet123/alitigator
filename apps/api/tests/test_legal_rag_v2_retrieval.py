@@ -292,6 +292,51 @@ class FakeBackend:
 
 
 class RetrievalTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exact_primary_targets_expand_selection_limit(self) -> None:
+        class ExactBackend:
+            async def search(self, query, *, limit, source_types, metadata_filters):
+                if source_types != PRIMARY_SOURCE_TYPES:
+                    return []
+                article = query.rsplit(" ", 1)[-1]
+                return [
+                    RetrievalCandidate(
+                        candidate_id=f"ufr-{article}",
+                        document_id=f"ufr-{article}",
+                        chunk_id=f"ufr-{article}",
+                        text=f"Art. {article}. Zweryfikowana jednostka.",
+                        source_type="statute",
+                        metadata={
+                            "tax_domains": ["UFR"],
+                            "legal_provisions": [f"art. {article}"],
+                            "citation": f"art. {article}",
+                        },
+                    )
+                ]
+
+        base = research_plan()
+        issue = base.issues[0].model_copy(
+            update={
+                "tax_domains": ["UFR"],
+                "query_families": [
+                    QueryFamily(
+                        family="explicit_provision_reference",
+                        query=f"UFR art. {article}",
+                        lane="primary_law",
+                        origin="fallback",
+                    )
+                    for article in (2, 5, 27)
+                ],
+            }
+        )
+        plan_with_targets = base.model_copy(update={"issues": [issue]})
+
+        result = await LegalRetriever(
+            ExactBackend(),
+            config=RetrievalConfig(selected_limit_per_issue=1),
+        ).retrieve(plan_with_targets)
+
+        self.assertEqual(3, len(result.primary_law[0].candidates))
+
     async def test_authority_citations_retry_primary_without_suppressing_authority_lane(self) -> None:
         class BackreferenceBackend:
             def __init__(self) -> None:

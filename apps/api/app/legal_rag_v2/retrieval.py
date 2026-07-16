@@ -498,11 +498,21 @@ class _BaseLane:
             fused,
             target_date=plan.target_date,
         )
+        # A plan may declare more exact primary-law dependencies than the
+        # ordinary top-k.  Never truncate below the number of independently
+        # requested exact provisions; doing so makes completeness impossible
+        # before evidence validation even begins.
+        exact_primary_targets = sum(
+            family.lane == "primary_law"
+            and family.family in {"explicit_provision_reference", "explicit_provision"}
+            for family in families
+        )
+        selected_limit = max(self.config.selected_limit_per_issue, exact_primary_targets)
         return LaneResult(
             issue_id=issue.issue_id,
             lane=self.lane_name,
             query_families=families,
-            candidates=tuple(reranked[: self.config.selected_limit_per_issue]),
+            candidates=tuple(reranked[:selected_limit]),
             candidate_count_before_rerank=before_rerank,
             trace=tuple(trace),
         )

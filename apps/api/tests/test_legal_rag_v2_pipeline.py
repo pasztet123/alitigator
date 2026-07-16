@@ -555,7 +555,7 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
             validate_writer_output(output, answer_plan=pipeline_module.AnswerPlan(), bundles=bundles),
         )
 
-    def test_deterministic_renderer_removes_unbound_model_provision_labels(self) -> None:
+    def test_claim_validator_blocks_unbound_model_provision_labels(self) -> None:
         provision = ProvisionReference(
             provision_id="pit-art-10",
             document_id="pit-act",
@@ -582,19 +582,82 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
                 coverage_status="complete",
             )
         ]
-        answer_plan = pipeline_module._build_answer_plan(plan, [claim], [])
+        validated, errors, _ = pipeline_module.validate_claims(
+            [claim],
+            plan=plan,
+            bundles=bundles,
+            calculations=[],
+        )
+        self.assertTrue(any("unbound_textual_provision_reference" in item for item in errors))
+        self.assertEqual("blocked_invalid_provision", validated[0].status)
+
+        answer_plan = pipeline_module._build_answer_plan(plan, validated, [])
         output = pipeline_module._deterministic_writer_output(
             {
-                "validated_claims": [claim],
+                "validated_claims": validated,
                 "legal_research_plan": plan,
                 "evidence_bundles": bundles,
                 "answer_plan": answer_plan,
             }
         )
 
-        self.assertIn("właściwy przepis", output.thesis)
+        self.assertIn("Brak materialnej konkluzji", output.thesis)
+        self.assertNotIn("właściwy przepis", output.thesis)
         self.assertNotIn("art. 30e", output.thesis.casefold())
         self.assertEqual([], validate_writer_output(output, answer_plan=answer_plan, bundles=bundles))
+
+    def test_claim_validator_requires_both_ends_of_provision_range(self) -> None:
+        article_12_5 = ProvisionReference(
+            provision_id="cit-art-12-5",
+            document_id="pl-ustawa-o-podatku-dochodowym-od-osob-prawnych-art-12",
+            citation="art. 12 ust. 5",
+            status="active",
+            source_span=DocumentSourceSpan(
+                start=0,
+                end=1,
+                document_id="pl-ustawa-o-podatku-dochodowym-od-osob-prawnych-art-12",
+            ),
+        )
+        article_12_6a = article_12_5.model_copy(
+            update={"provision_id": "cit-art-12-6a", "citation": "art. 12 ust. 6a"}
+        )
+        bundle = EvidenceBundle(
+            issue_id="pit_sale",
+            controlling_provisions=[article_12_5, article_12_6a],
+            coverage_status="complete",
+        )
+        claim = LegalClaim(
+            claim_id="range-claim",
+            issue_id="pit_sale",
+            claim_type="normative_rule",
+            text="Wartość ustala się zgodnie z art. 12 ust. 5–6a.",
+            result="Należy zastosować wskazany przedział jednostek.",
+            status="approved",
+            controlling_provision_ids=[article_12_5.provision_id],
+            source_spans=[article_12_5.source_span],
+            confidence=0.9,
+        )
+
+        blocked, errors, _ = pipeline_module.validate_claims(
+            [claim], plan=research_plan(), bundles=[bundle], calculations=[]
+        )
+        self.assertEqual("blocked_invalid_provision", blocked[0].status)
+        self.assertTrue(any("unbound_textual_provision_reference" in item for item in errors))
+
+        complete_claim = claim.model_copy(
+            update={
+                "controlling_provision_ids": [
+                    article_12_5.provision_id,
+                    article_12_6a.provision_id,
+                ],
+                "source_spans": [article_12_5.source_span, article_12_6a.source_span],
+            }
+        )
+        approved, errors, _ = pipeline_module.validate_claims(
+            [complete_claim], plan=research_plan(), bundles=[bundle], calculations=[]
+        )
+        self.assertEqual([], errors)
+        self.assertEqual("approved", approved[0].status)
 
 
 if __name__ == "__main__":

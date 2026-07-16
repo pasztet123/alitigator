@@ -146,10 +146,11 @@ KSEF_CURRENT_BUNDLE_DOCUMENT_IDS: tuple[str, ...] = (
     "ksef-2-0-corrections-and-vat-deduction",
 )
 FAMILY_FOUNDATION_PRIMARY_BUNDLE_DOCUMENT_IDS: tuple[str, ...] = (
-    "family-foundation-primary-ufr-art-5-27-29",
-    "family-foundation-primary-cit-24q-24r",
-    "family-foundation-primary-pit-beneficiary-rates",
-    "family-foundation-primary-vat-related-party-transactions",
+    "pl-ustawa-o-fundacji-rodzinnej-2023-326-art.-2",
+    "pl-ustawa-o-fundacji-rodzinnej-2023-326-art.-5",
+    "pl-ustawa-o-fundacji-rodzinnej-2023-326-art.-27",
+    "pl-ustawa-o-fundacji-rodzinnej-2023-326-art.-28",
+    "pl-ustawa-o-fundacji-rodzinnej-2023-326-art.-29",
 )
 DEBT_ASSUMPTION_INTERPRETATION_DOCUMENT_IDS: tuple[str, ...] = ("695395", "678370")
 HOUSING_RELIEF_TEMPORARY_RENTAL_INTERPRETATION_DOCUMENT_IDS: tuple[str, ...] = ("691376",)
@@ -626,6 +627,13 @@ RANKING_STOPWORDS = {
     "wraz", "wtedy", "został", "została", "zostały", "związku",
 }
 DOMAIN_MARKERS: dict[str, tuple[str, ...]] = {
+    "ufr": (
+        "ufr",
+        "fundacja rodzinna",
+        "fundacji rodzinnej",
+        "ustawa o fundacji rodzinnej",
+        "ustawy o fundacji rodzinnej",
+    ),
     "vat": (
         "vat",
         "ksef",
@@ -3002,6 +3010,11 @@ def build_family_foundation_statute_targets(query: str) -> list[tuple[str, str]]
     if not query_targets_family_foundation_mechanism(query):
         return []
     return [
+        ("UFR", "2"),
+        ("UFR", "5"),
+        ("UFR", "27"),
+        ("UFR", "28"),
+        ("UFR", "29"),
         ("CIT", "24q"),
         ("CIT", "24r"),
         ("CIT", "6"),
@@ -3965,6 +3978,7 @@ def derive_tax_domain(record: dict[str, Any]) -> str:
         [*map(str, record.get("law_tags") or []), *map(str, record.get("issues") or []), *map(str, record.get("legal_provisions") or [])]
     ).lower()
     for domain, markers in (
+        ("UFR", ("[ufr]", "ufr", "ustawa o fundacji rodzinnej", "o fundacji rodzinnej")),
         ("VAT", ("[vat]", "vat", "towarów i usług")),
         ("CIT", ("[cit]", "cit", "dochodowym od osób prawnych")),
         ("PIT", ("[pit]", "pit", "dochodowym od osób fizycznych")),
@@ -5003,7 +5017,7 @@ def extract_article_key_from_text(value: str) -> str:
 def extract_statute_target_from_text(value: str) -> tuple[str, str] | None:
     if not value:
         return None
-    domain_match = re.match(r"\[(CIT|PIT|VAT|PCC|SD|EXCISE|AKCYZA|ORDYNACJA|OP)\]", value, re.IGNORECASE)
+    domain_match = re.match(r"\[(UFR|CIT|PIT|VAT|PCC|SD|EXCISE|AKCYZA|ORDYNACJA|OP)\]", value, re.IGNORECASE)
     article_key = extract_article_key_from_text(value)
     if not domain_match or not article_key:
         return None
@@ -5077,6 +5091,8 @@ def normalize_statute_domain(domain: str) -> str:
 def detect_explicit_statute_domains(query: str) -> set[str]:
     normalized = normalize_whitespace(query or "").lower()
     domains: set[str] = set()
+    if re.search(r"\b(ufr|ustaw\w* o fundacj\w* rodzinn\w*|fundacj\w* rodzinn\w*)\b", normalized):
+        domains.add("UFR")
     if re.search(r"\b(vat|ustaw\w* o vat|ustaw\w* vat|podatku od towar[óo]w i us[łl]ug|towar[óo]w i us[łl]ug)\b", normalized):
         domains.add("VAT")
     if re.search(r"\b(cit|ustaw\w* o cit|ustaw\w* cit|podatku dochodowym od os[óo]b prawnych|dochodowym od os[óo]b prawnych)\b", normalized):
@@ -5517,7 +5533,7 @@ def row_tax_domains(row: sqlite3.Row) -> set[str]:
     except (json.JSONDecodeError, TypeError):
         legal_provisions = []
     for provision in legal_provisions:
-        match = re.match(r"\[(CIT|PIT|VAT|PCC|SD|EXCISE|AKCYZA|ORDYNACJA|OP)\]", str(provision), re.IGNORECASE)
+        match = re.match(r"\[(UFR|CIT|PIT|VAT|PCC|SD|EXCISE|AKCYZA|ORDYNACJA|OP)\]", str(provision), re.IGNORECASE)
         if match:
             domain = match.group(1).upper()
             if domain == "OP":
@@ -7483,8 +7499,8 @@ def decompose_query_into_legal_axes(query: str) -> list[LegalRetrievalAxis]:
                     label="fundacja rodzinna: katalog art. 5 UFR",
                     query=expand_search_query(f"{normalized} fundacja rodzinna art. 5 UFR najem dzierżawa pożyczka spółce kapitałowej udziały akcje zbywanie mienia"),
                     source_types={"statute"},
-                    tax_domains={"CIT", "PIT", "VAT"},
-                    preferred_targets=tuple(build_family_foundation_statute_targets(query)),
+                    tax_domains={"UFR"},
+                    preferred_targets=(("UFR", "5"),),
                 ),
                 LegalRetrievalAxis(
                     axis_id="family_foundation_cit_hidden_profit",

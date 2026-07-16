@@ -56,6 +56,17 @@ _PROVISION_EXPLICIT_LETTER_RE = re.compile(r"^\s*lit\.\s*([a-z])\)?\s*(.*)$", re
 _PROVISION_SECTION_RE = re.compile(r"^\s*(\d+[a-z]*)\.\s+(.+)$", re.IGNORECASE)
 _PROVISION_POINT_RE = re.compile(r"^\s*(\d+[a-z]*)\)\s*(.+)$", re.IGNORECASE)
 _PROVISION_LETTER_RE = re.compile(r"^\s*([a-z])\)\s*(.+)$", re.IGNORECASE)
+_SOURCE_NOTE_RE = re.compile(
+    r"^\s*\d+\)\s*(?:"
+    r"Niniejsz[ąa]\s+ustaw[ąa]|"
+    r"Zmiany\s+tekstu\s+jednolitego|"
+    r"Zmiana\s+wymienionej\s+ustawy|"
+    r"W\s+brzmieniu\s+ustalonym|"
+    r"Dodany\s+przez|"
+    r"Uchylony\s+przez"
+    r")",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -272,6 +283,13 @@ def build_provision_units(
         local_start = start - seed_length
         local_end = end - seed_length
         unit_text = text[local_start:local_end]
+        # Kancelaria Sejmu PDFs place numbered editorial footnotes in the
+        # article text flow.  Their markers look exactly like statutory
+        # points (for example ``2) Zmiany tekstu jednolitego...``).  They are
+        # source metadata, not editorial units, and indexing them as a point
+        # creates duplicate/fictitious citations.
+        if _SOURCE_NOTE_RE.match(unit_text):
+            continue
         content_hash = hashlib.sha256(unit_text.encode("utf-8")).hexdigest()
         result.append(
             {

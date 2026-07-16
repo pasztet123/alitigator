@@ -34,6 +34,7 @@ from .embeddings import (
     OpenAIEmbeddingProvider,
     VersionedEmbeddingIndex,
 )
+from .family_foundation import enrich_family_foundation_plan, family_foundation_issue_kind
 from .planner import LegalQueryPlanner, PlannerOutcome
 from .provision_graph import ProvisionGraph as RuntimeProvisionGraph
 from .provision_graph import ProvisionParser, ProvisionUnit
@@ -366,7 +367,10 @@ class LegalRagV2Pipeline:
             force_fallback=force_planner_fallback,
         )
         timings["planner"] = _elapsed_ms(stage)
-        plan = enrich_crossborder_wht_plan(planner_outcome.plan, question)
+        plan = enrich_family_foundation_plan(
+            enrich_crossborder_wht_plan(planner_outcome.plan, question),
+            question,
+        )
         trace.write_json("legal_research_plan.json", plan)
         trace.write_json("research_plan.json", plan)
         trace.write_json("clarification.json", plan.clarification)
@@ -409,7 +413,10 @@ class LegalRagV2Pipeline:
             )
             if augmented.fallback_trace.fallback_used:
                 planner_outcome = augmented
-                plan = enrich_crossborder_wht_plan(augmented.plan, question)
+                plan = enrich_family_foundation_plan(
+                    enrich_crossborder_wht_plan(augmented.plan, question),
+                    question,
+                )
                 trace.write_json("legal_research_plan.json", plan)
                 trace.write_json("fallback_trace.json", augmented.fallback_trace)
                 trace.write_json("planner_fallback.json", augmented.fallback_trace)
@@ -1393,12 +1400,16 @@ def _build_evidence_bundles(
         authority_lane = authority_by_issue.get(issue.issue_id)
         if not authority_lane or not authority_lane.candidates:
             missing_sources.append("authority")
-        required_dependency_patterns = _required_wht_issue_dependency_patterns(issue.issue_id)
+        required_dependency_patterns = _required_issue_dependency_patterns(issue)
         all_issue_provisions = (*controlling, *dependencies, *exceptions)
         missing_dependencies = [
             label
-            for label, pattern in required_dependency_patterns
-            if not any(re.search(pattern, item.citation, re.IGNORECASE) for item in all_issue_provisions)
+            for label, citation_pattern, document_pattern in required_dependency_patterns
+            if not any(
+                re.search(citation_pattern, item.citation, re.IGNORECASE)
+                and re.search(document_pattern, item.document_id, re.IGNORECASE)
+                for item in all_issue_provisions
+            )
         ]
         missing_sources.extend(f"required_primary:{item}" for item in missing_dependencies)
         retrieval_confidence = min(
@@ -1449,27 +1460,68 @@ def _build_evidence_bundles(
     return bundles
 
 
-def _required_wht_issue_dependency_patterns(issue_id: str) -> tuple[tuple[str, str], ...]:
+def _required_issue_dependency_patterns(
+    issue: Any,
+) -> tuple[tuple[str, str, str], ...]:
+    issue_id = str(issue.issue_id)
+    cit_act = r"podatku-dochodowym-od-osob-prawnych"
+    pit_act = r"podatku-dochodowym-od-osob-fizycznych"
+    vat_act = r"podatku-od-towarow"
+    ufr_act = r"fundacji-rodzinnej"
     if issue_id == "wht_pay_and_refund_procedure":
         return (
-            ("art_26_2e", r"art\.\s*26\s+ust\.\s*2e"),
-            ("art_26_2g", r"art\.\s*26\s+ust\.\s*2g"),
-            ("art_26_7a", r"art\.\s*26\s+ust\.\s*7a"),
-            ("art_26_7b", r"art\.\s*26\s+ust\.\s*7b"),
-            ("art_26_7c", r"art\.\s*26\s+ust\.\s*7c"),
-            ("art_26b", r"art\.\s*26b"),
-            ("art_28b", r"art\.\s*28b"),
+            ("art_26_2e", r"art\.\s*26\s+ust\.\s*2e", cit_act),
+            ("art_26_2g", r"art\.\s*26\s+ust\.\s*2g", cit_act),
+            ("art_26_7a", r"art\.\s*26\s+ust\.\s*7a", cit_act),
+            ("art_26_7b", r"art\.\s*26\s+ust\.\s*7b", cit_act),
+            ("art_26_7c", r"art\.\s*26\s+ust\.\s*7c", cit_act),
+            ("art_26b", r"art\.\s*26b", cit_act),
+            ("art_28b", r"art\.\s*28b", cit_act),
         )
     if issue_id == "vat_interest_financial_service":
         return (
-            ("vat_art_28b", r"art\.\s*28b"),
-            ("vat_art_17_1_4", r"art\.\s*17\s+ust\.\s*1\s+pkt\s*4"),
-            ("vat_financial_exemption", r"art\.\s*43\s+ust\.\s*1\s+pkt\s*38"),
+            ("vat_art_28b", r"art\.\s*28b", vat_act),
+            ("vat_art_17_1_4", r"art\.\s*17\s+ust\.\s*1\s+pkt\s*4", vat_act),
+            ("vat_financial_exemption", r"art\.\s*43\s+ust\.\s*1\s+pkt\s*38", vat_act),
         )
     if issue_id in {"vat_royalty_crossborder_service", "vat_management_crossborder_service"}:
         return (
-            ("vat_art_28b", r"art\.\s*28b"),
-            ("vat_art_17_1_4", r"art\.\s*17\s+ust\.\s*1\s+pkt\s*4"),
+            ("vat_art_28b", r"art\.\s*28b", vat_act),
+            ("vat_art_17_1_4", r"art\.\s*17\s+ust\.\s*1\s+pkt\s*4", vat_act),
+        )
+    family_issue_id = family_foundation_issue_kind(issue)
+    if family_issue_id == "family_foundation_allowed_activity_catalog":
+        return (("ufr_art_5", r"art\.\s*5(?:\s|$)", ufr_act),)
+    if family_issue_id == "family_foundation_cit_hidden_profit":
+        return (
+            ("cit_art_24q", r"art\.\s*24q(?:\s|$)", cit_act),
+            ("ufr_art_2_2", r"art\.\s*2\s+ust\.\s*2", ufr_act),
+        )
+    if family_issue_id == "family_foundation_disallowed_income_25_percent":
+        return (
+            ("cit_art_24r", r"art\.\s*24r(?:\s|$)", cit_act),
+            ("cit_art_15_2", r"art\.\s*15\s+ust\.\s*2", cit_act),
+            ("ufr_art_5", r"art\.\s*5(?:\s|$)", ufr_act),
+        )
+    if family_issue_id == "family_foundation_beneficiary_pit":
+        return (
+            ("pit_art_20_1g", r"art\.\s*20\s+ust\.\s*1g", pit_act),
+            ("pit_art_21_1_157", r"art\.\s*21\s+ust\.\s*1\s+pkt\s*157", pit_act),
+            ("pit_art_30_1_17", r"art\.\s*30\s+ust\.\s*1\s+pkt\s*17", pit_act),
+            ("ufr_art_2_2", r"art\.\s*2\s+ust\.\s*2", ufr_act),
+            ("ufr_art_27_4", r"art\.\s*27\s+ust\.\s*4", ufr_act),
+            ("ufr_art_28_1", r"art\.\s*28\s+ust\.\s*1", ufr_act),
+            ("ufr_art_29_1", r"art\.\s*29\s+ust\.\s*1", ufr_act),
+        )
+    if family_issue_id == "family_foundation_vat_related_party":
+        return (
+            ("vat_art_15_1", r"art\.\s*15\s+ust\.\s*1", vat_act),
+            ("vat_art_15_2", r"art\.\s*15\s+ust\.\s*2", vat_act),
+            ("vat_art_29a_1", r"art\.\s*29a\s+ust\.\s*1", vat_act),
+            ("vat_art_32_1", r"art\.\s*32\s+ust\.\s*1", vat_act),
+            ("vat_art_32_2", r"art\.\s*32\s+ust\.\s*2", vat_act),
+            ("vat_art_43_1_36", r"art\.\s*43\s+ust\.\s*1\s+pkt\s*36", vat_act),
+            ("vat_art_86_1", r"art\.\s*86\s+ust\.\s*1", vat_act),
         )
     return ()
 
@@ -1615,6 +1667,17 @@ def validate_claims(
         }
         for bundle in bundles
     }
+    provision_references_by_issue = {
+        bundle.issue_id: {
+            item.provision_id: item
+            for item in (
+                *bundle.controlling_provisions,
+                *bundle.dependency_provisions,
+                *bundle.exception_provisions,
+            )
+        }
+        for bundle in bundles
+    }
     authorities_by_issue = {
         bundle.issue_id: {
             item.document_id
@@ -1654,6 +1717,24 @@ def validate_claims(
             provisions_by_issue.get(claim.issue_id, set())
         ):
             claim_errors.append("unknown_controlling_provision")
+        if (
+            claim.status in {"approved", "conditional_missing_fact"}
+            and not claim.controlling_provision_ids
+        ):
+            claim_errors.append("material_claim_without_primary_law")
+        bound_references = [
+            provision_references_by_issue.get(claim.issue_id, {}).get(provision_id)
+            for provision_id in claim.controlling_provision_ids
+        ]
+        unbound_textual_references = _unbound_claim_provision_references(
+            f"{claim.text} {claim.result}",
+            [item.citation for item in bound_references if item is not None],
+        )
+        if unbound_textual_references:
+            claim_errors.append(
+                "unbound_textual_provision_reference:"
+                + ",".join(unbound_textual_references)
+            )
         authority_ids = set(claim.supporting_authority_ids) | set(
             claim.contrary_authority_ids
         )
@@ -1992,8 +2073,6 @@ def _build_answer_plan(
         for item in claims
         if item.status in {"approved", "conditional_missing_fact"}
     ]
-    if not allowed:
-        allowed = [item.claim_id for item in claims]
     sections: list[AnswerSection] = []
     for issue in plan.issues:
         issue_claim_ids = [
@@ -2106,25 +2185,7 @@ def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:
     answer_plan: AnswerPlan = payload["answer_plan"]
     allowed = set(answer_plan.allowed_claim_ids)
     selected = [item for item in claims if item.claim_id in allowed]
-    provision_citations = {
-        provision.provision_id: provision.citation
-        for bundle in bundles
-        for provision in (
-            *bundle.controlling_provisions,
-            *bundle.dependency_provisions,
-            *bundle.exception_provisions,
-        )
-    }
-
-    def claim_text(claim: LegalClaim, value: str) -> str:
-        citations = [
-            provision_citations[provision_id]
-            for provision_id in claim.controlling_provision_ids
-            if provision_id in provision_citations
-        ]
-        return _remove_unbound_provision_references(value, citations)
-
-    thesis = " ".join(claim_text(item, item.result) for item in selected) or (
+    thesis = " ".join(item.result for item in selected) or (
         "Brak materialnej konkluzji, która przeszła walidację źródeł."
     )
     sections = [
@@ -2132,7 +2193,7 @@ def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:
             section_id=f"analysis_{issue.issue_id}",
             title=issue.label,
             content="\n".join(
-                f"- {claim_text(claim, claim.text)} {claim_text(claim, claim.result)}"
+                f"- {claim.text} {claim.result}"
                 for claim in selected
                 if claim.issue_id == issue.issue_id
             )
@@ -2195,37 +2256,77 @@ def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:
                 )
             )
     missing_questions = [item.question for item in plan.missing_facts]
+    source_gaps = [
+        f"{bundle.issue_id}: {source}"
+        for bundle in bundles
+        for source in bundle.missing_sources
+        if source == "primary_law" or source.startswith("required_primary:")
+    ]
     return WriterOutput(
         thesis=thesis,
         analysis_sections=sections,
         sources=_dedupe_writer_sources(sources),
-        risks_and_gaps=missing_questions
+        risks_and_gaps=[*missing_questions, *source_gaps]
         or ["Nie znaleziono dodatkowych luk poza oznaczonymi statusami claimów."],
         claim_ids_used=[item.claim_id for item in selected],
     )
 
 
 _RENDERED_PROVISION_RE = re.compile(
-    r"\bart\.\s*\d+[a-z]*(?:\s+ust\.\s*\d+[a-z]*)?(?:\s+pkt\s*\d+[a-z]*)?(?:\s+lit\.\s*[a-z])?",
+    r"\bart\.\s*\d+[a-z]*"
+    r"(?:\s+ust\.\s*\d+[a-z]*(?:\s*[–-]\s*\d+[a-z]*)?)?"
+    r"(?:\s+pkt\s*\d+[a-z]*(?:\s*[–-]\s*\d+[a-z]*)?)?"
+    r"(?:\s+lit\.\s*[a-z])?",
+    re.I,
+)
+_RANGED_SECTION_RE = re.compile(
+    r"^(?P<prefix>art\.\s*\d+[a-z]*\s+ust\.\s*)"
+    r"(?P<start>\d+[a-z]*)\s*[–-]\s*(?P<end>\d+[a-z]*)$",
     re.I,
 )
 
 
-def _remove_unbound_provision_references(text: str, citations: Iterable[str]) -> str:
-    """Remove a model-invented provision label while retaining its claim text.
+def _citations_are_compatible(reference: str, citation: str) -> bool:
+    """Allow exact units and their verified ancestors, never a sibling unit."""
 
-    The deterministic renderer only receives claims already validated against
-    primary-law IDs.  A textual article label can nevertheless be invented by
-    the model.  It is safer to omit that label than to reject an otherwise
-    source-bound answer or silently expand its cited authority.
-    """
-    allowed = [_normalize_citation(value) for value in citations if value.strip()]
+    normalized_reference = _normalize_citation(reference).rstrip(".,;:")
+    normalized_citation = _normalize_citation(citation).rstrip(".,;:")
+    return (
+        normalized_reference == normalized_citation
+        or normalized_reference.startswith(f"{normalized_citation} ")
+        or normalized_citation.startswith(f"{normalized_reference} ")
+    )
 
-    def replace(match: re.Match[str]) -> str:
-        reference = _normalize_citation(match.group(0))
-        return match.group(0) if any(reference in citation for citation in allowed) else "właściwy przepis"
 
-    return _RENDERED_PROVISION_RE.sub(replace, text)
+def _unbound_claim_provision_references(
+    text: str,
+    citations: Iterable[str],
+) -> list[str]:
+    """Return article labels not backed by this claim's exact source IDs."""
+
+    allowed = [value for value in citations if str(value).strip()]
+    result: list[str] = []
+    seen: set[str] = set()
+    for match in _RENDERED_PROVISION_RE.finditer(text):
+        reference = _normalize_citation(match.group(0)).rstrip(".,;:")
+        if reference in seen:
+            continue
+        seen.add(reference)
+        range_match = _RANGED_SECTION_RE.fullmatch(reference)
+        required_references = (
+            [
+                f"{range_match.group('prefix')}{range_match.group('start')}",
+                f"{range_match.group('prefix')}{range_match.group('end')}",
+            ]
+            if range_match
+            else [reference]
+        )
+        if not all(
+            any(_citations_are_compatible(required, citation) for citation in allowed)
+            for required in required_references
+        ):
+            result.append(reference)
+    return result
 
 
 def render_structured_answer(output: WriterOutput) -> str:
@@ -2378,6 +2479,8 @@ def _writer_source_label(provision: ProvisionReference) -> str:
     document_id = provision.document_id.casefold()
     if "pl-upo" in document_id:
         return "UPO Polska–Niemcy" if "niemcy" in document_id else "UPO"
+    if "fundacji-rodzinnej" in document_id:
+        return "Ustawa o fundacji rodzinnej"
     if "podatku-od-towarow" in document_id:
         return "Ustawa o VAT"
     if "podatku-dochodowym-od-osob-prawnych" in document_id:

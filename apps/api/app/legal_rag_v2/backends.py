@@ -291,8 +291,17 @@ class CorpusFtsBackend:
                            d.source_pages_json, 1000.0 AS lexical_score
                     FROM chunks c JOIN documents d ON d.document_id = c.document_id
                     WHERE """ + " AND ".join(exact_clauses)
-                    + " ORDER BY (c.display_reference LIKE ?) DESC, LENGTH(c.chunk_text) DESC, d.legal_state_date DESC, c.chunk_id ASC LIMIT ?",
-                    tuple([*exact_values, reference_prefix, limit]),
+                    + " ORDER BY (LOWER(c.display_reference) = LOWER(?)) DESC, "
+                    + "(c.chunk_text LIKE ?) DESC, LENGTH(c.chunk_text) DESC, "
+                    + "d.legal_state_date DESC, c.chunk_id ASC LIMIT ?",
+                    tuple(
+                        [
+                            *exact_values,
+                            explicit_reference,
+                            f"{explicit_reference}\n%",
+                            limit,
+                        ]
+                    ),
                 ).fetchall()
                 if exact_rows:
                     return [dict(row) for row in exact_rows]
@@ -396,12 +405,21 @@ class CorpusFtsBackend:
                 FROM `{chunks_table}` c
                 JOIN `{documents_table}` d ON d.document_id = c.document_id
                 WHERE {' AND '.join(exact_clauses)}
-                ORDER BY (c.display_reference LIKE %s) DESC, CHAR_LENGTH(c.chunk_text) DESC,
+                ORDER BY (LOWER(c.display_reference) = LOWER(%s)) DESC,
+                         (c.chunk_text LIKE %s) DESC, CHAR_LENGTH(c.chunk_text) DESC,
                          d.legal_state_date DESC, c.chunk_id ASC LIMIT %s
             """
             with mysql_connection() as connection:
                 with connection.cursor() as cursor:
-                    cursor.execute(exact_sql, (*exact_values, reference_prefix, limit))
+                    cursor.execute(
+                        exact_sql,
+                        (
+                            *exact_values,
+                            explicit_reference,
+                            f"{explicit_reference}\n%",
+                            limit,
+                        ),
+                    )
                     rows = [dict(row) for row in cursor.fetchall()]
                     if rows:
                         return rows

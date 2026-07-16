@@ -296,7 +296,7 @@ class FakeBackend:
         metadata_filters: Mapping[str, Any],
     ) -> list[RetrievalCandidate]:
         self.calls.append((query, source_types, metadata_filters))
-        if source_types == PRIMARY_SOURCE_TYPES:
+        if source_types == frozenset({"statute"}):
             return [
                 RetrievalCandidate(
                     candidate_id="primary-candidate",
@@ -310,13 +310,14 @@ class FakeBackend:
                     },
                 )
             ]
+        source_type = "judgment" if "judgment" in source_types else "interpretation"
         return [
             RetrievalCandidate(
-                candidate_id="authority-candidate",
-                document_id="authority-document",
-                chunk_id="authority-chunk",
+                candidate_id=f"authority-{source_type}",
+                document_id=f"authority-{source_type}",
+                chunk_id=f"authority-{source_type}",
                 text="Organ analizował sprzedaż przez sprzedawcę i zapłatę.",
-                source_type="interpretation",
+                source_type=source_type,
                 metadata={"tax_domains": ["VAT"], "legal_state_date": "2026-01-01"},
             )
         ]
@@ -330,7 +331,7 @@ class RetrievalTests(unittest.IsolatedAsyncioTestCase):
 
             async def search(self, query, *, limit, source_types, metadata_filters):
                 self.filters[query] = list(metadata_filters.get("tax_domains") or [])
-                if source_types != PRIMARY_SOURCE_TYPES:
+                if "statute" not in source_types:
                     return []
                 if query == "UFR art. 5":
                     return [
@@ -413,7 +414,7 @@ class RetrievalTests(unittest.IsolatedAsyncioTestCase):
     async def test_exact_primary_targets_expand_selection_limit(self) -> None:
         class ExactBackend:
             async def search(self, query, *, limit, source_types, metadata_filters):
-                if source_types != PRIMARY_SOURCE_TYPES:
+                if "statute" not in source_types:
                     return []
                 article = query.rsplit(" ", 1)[-1]
                 return [
@@ -462,7 +463,7 @@ class RetrievalTests(unittest.IsolatedAsyncioTestCase):
 
             async def search(self, query, *, limit, source_types, metadata_filters):
                 self.calls.append((query, source_types))
-                if source_types == AUTHORITY_SOURCE_TYPES:
+                if "interpretation" in source_types:
                     return [
                         RetrievalCandidate(
                             "authority", "Interpretacja stosuje art. 21 ust. 30a.",
@@ -501,8 +502,19 @@ class RetrievalTests(unittest.IsolatedAsyncioTestCase):
             {call[0] for call in backend.calls},
             {"wyłącznie planowana norma", "wyłącznie planowany stan faktyczny"},
         )
-        self.assertEqual(backend.calls[0][1], PRIMARY_SOURCE_TYPES)
-        self.assertEqual(backend.calls[1][1], AUTHORITY_SOURCE_TYPES)
+        self.assertEqual(backend.calls[0][1], frozenset({"statute"}))
+        authority_groups = {call[1] for call in backend.calls[1:]}
+        self.assertEqual(
+            {
+                frozenset({"interpretation", "general_interpretation"}),
+                frozenset({"judgment", "resolution"}),
+            },
+            authority_groups,
+        )
+        self.assertEqual(
+            {"interpretation", "judgment"},
+            {candidate.source_type for candidate in result.authorities[0].candidates},
+        )
         primary = result.primary_law[0].candidates[0]
         self.assertIn("fusion", primary.component_scores)
         self.assertTrue(primary.positive_reasons)
@@ -563,6 +575,24 @@ class FakeGateway:
 
 
 class AuthorityExtractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_heuristic_extractor_keeps_conclusion_sentence_as_reasoning(self) -> None:
+        text = (
+            "Organ przeanalizował związek wydatku z działalnością. "
+            "W konsekwencji wydatek na kurs może stanowić koszt uzyskania przychodów."
+        )
+
+        result = await HeuristicAuthorityExtractor().extract(
+            AuthorityDocument(
+                "interpretation-course",
+                text,
+                "interpretation",
+                chunk_id="course-chunk",
+            )
+        )
+
+        self.assertIn("może stanowić koszt", result.card.reasoning or "")
+        self.assertTrue(result.card.source_spans.reasoning)
+
     async def test_model_extractor_uses_structured_schema_and_validates_spans(self) -> None:
         text = "Organ uznał stanowisko podatnika za prawidłowe."
         span = DocumentSourceSpan(

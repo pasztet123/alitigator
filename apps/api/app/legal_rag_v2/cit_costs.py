@@ -29,6 +29,65 @@ PIT_COST_BASE_TARGETS = (
     ("PIT", "art. 23 ust. 1"),
 )
 
+_COST_AUTHORITY_STOP_WORDS = frozenset(
+    {
+        "aktualną",
+        "administracyjnych",
+        "działalności",
+        "gospodarczej",
+        "interpretacje",
+        "jednoosobową",
+        "jakie",
+        "kilku",
+        "którymi",
+        "kosztów",
+        "można",
+        "otrzymałem",
+        "podatkowe",
+        "podaj",
+        "podstawę",
+        "prowadzę",
+        "prawną",
+        "przychodów",
+        "relewantne",
+        "również",
+        "sądów",
+        "wystarczy",
+        "uzyskania",
+        "wydatek",
+        "wyjaśnij",
+        "wystawioną",
+        "wskaż",
+        "zaliczyć",
+        "znaczenie",
+    }
+)
+
+
+def _salient_cost_terms(question: str, *, limit: int = 14) -> list[str]:
+    """Keep concrete facts ahead of generic tax wording in authority search."""
+
+    result: list[str] = []
+    expense_contexts = re.findall(
+        r"(?:kupi\w*|wykupi\w*|naby\w*|zapłaci\w*|poni[oó]s\w*)[^.?!]{0,180}",
+        question,
+        re.IGNORECASE,
+    )
+    for context in (*expense_contexts, question):
+        for token in re.findall(r"[0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", context):
+            normalized = token.casefold()
+            if (
+                len(normalized) < 4
+                or normalized in _COST_AUTHORITY_STOP_WORDS
+                or normalized in result
+                or normalized.isdigit()
+            ):
+                continue
+            result.append(normalized)
+            if len(result) >= limit:
+                return result
+    return result
+
 
 def question_targets_cit_cost_deductibility(question: str) -> bool:
     return bool(
@@ -116,6 +175,19 @@ def enrich_cit_cost_plan(plan: LegalResearchPlan, question: str) -> LegalResearc
         else f"{tax_domain}: koszt uzyskania przychodów i ustawowe wyłączenia"
     )
     mechanism = "contractual_penalty_cost" if penalty else issue_id
+    salient_terms = _salient_cost_terms(question)
+    authority_query = " ".join(
+        (
+            *salient_terms,
+            label,
+            "wydatek zawodowy wydatek osobisty związek z przychodem",
+        )
+    )
+    if penalty:
+        authority_query += (
+            " opóźnienie dostawy wady towarów zwłoka w usunięciu wad "
+            "należyta staranność związek z przychodem"
+        )
 
     issues: list[LegalIssue] = []
     found = False
@@ -135,12 +207,26 @@ def enrich_cit_cost_plan(plan: LegalResearchPlan, question: str) -> LegalResearc
                         for concept in issue.possible_provision_concepts
                         if not concept.upper().startswith(f"{other_domain} ")
                     ],
+                    "transactions": _dedupe([*issue.transactions, *salient_terms]),
+                    "positive_fact_constraints": _dedupe(
+                        [*issue.positive_fact_constraints, *salient_terms]
+                    ),
                     "query_families": [
                         query
                         for query in issue.query_families
-                        if not (
-                            query.lane == "primary_law"
-                            and query.query.upper().startswith(f"{other_domain} ")
+                        if query.lane == "authority"
+                        or (
+                            query.family
+                            in {"explicit_provision_reference", "explicit_provision"}
+                            and not query.query.upper().startswith(f"{other_domain} ")
+                        )
+                    ]
+                    + [
+                        QueryFamily(
+                            family="statutory_concept",
+                            query=authority_query,
+                            lane="authority",
+                            origin="fallback",
                         )
                     ],
                 }
@@ -154,12 +240,6 @@ def enrich_cit_cost_plan(plan: LegalResearchPlan, question: str) -> LegalResearc
         # Secondary-law retrieval must retain the concrete subject (glasses,
         # insurance, a penalty, etc.); querying only the abstract cost rule
         # retrieves generic and often irrelevant authorities.
-        authority_query = f"{label}. {question.strip()}"
-        if penalty:
-            authority_query += (
-                " opóźnienie dostawy wady towarów zwłoka w usunięciu wad "
-                "należyta staranność związek z przychodem"
-            )
         issue = LegalIssue(
             issue_id=issue_id,
             label=label,
@@ -168,12 +248,14 @@ def enrich_cit_cost_plan(plan: LegalResearchPlan, question: str) -> LegalResearc
             possible_provision_concepts=_dedupe(
                 [f"{domain} {citation}" for domain, citation in targets]
             ),
+            transactions=salient_terms,
+            positive_fact_constraints=salient_terms,
             requested_source_types=["statute", "interpretation", "judgment"],
             query_families=[
                 QueryFamily(
                     family="statutory_concept",
                     query=authority_query,
-                    lane="both",
+                    lane="authority",
                     origin="fallback",
                 )
             ],

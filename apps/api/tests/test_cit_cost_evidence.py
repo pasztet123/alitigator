@@ -49,6 +49,13 @@ class CitCostEvidenceTests(unittest.TestCase):
         self.assertIn("CIT art. 15 ust. 1", queries)
         self.assertIn("CIT art. 16 ust. 1", queries)
         self.assertIn("CIT art. 16 ust. 1 pkt 22", queries)
+        self.assertTrue(
+            all(
+                query.family == "explicit_provision_reference"
+                for query in issue.query_families
+                if query.lane == "primary_law"
+            )
+        )
 
     def test_legacy_axis_is_specific_and_carries_both_cit_articles(self) -> None:
         axes = decompose_query_into_legal_axes(QUESTION)
@@ -87,6 +94,32 @@ class CitCostEvidenceTests(unittest.TestCase):
         self.assertEqual({"PIT"}, axis.tax_domains)
         self.assertEqual((("PIT", "22"), ("PIT", "23")), axis.preferred_targets)
         self.assertNotIn("CIT art. 15", axis.query)
+
+    def test_cost_authority_lane_keeps_concrete_expense_facts(self) -> None:
+        question = (
+            "Prowadzę JDG jako programista i wykupiłem indywidualny kurs języka "
+            "angielskiego do obsługi zagranicznych klientów. Czy jest to koszt "
+            "uzyskania przychodów w PIT?"
+        )
+        enriched = enrich_cit_cost_plan(
+            generic_plan().model_copy(update={"user_query": question}),
+            question,
+        )
+        issue = enriched.issues[0]
+        authority_query = next(
+            query.query
+            for query in issue.query_families
+            if query.lane in {"authority", "both"}
+            and query.family == "statutory_concept"
+        )
+
+        self.assertTrue(
+            {"kurs", "języka", "angielskiego", "programista"}.issubset(
+                set(issue.transactions)
+            )
+        )
+        self.assertLess(authority_query.index("kurs"), authority_query.index("PIT:"))
+        self.assertNotIn("Podaj aktualną podstawę prawną", authority_query)
 
     def test_explicit_cit_still_wins_for_company_penalty(self) -> None:
         self.assertEqual("CIT", cost_tax_domain(QUESTION))

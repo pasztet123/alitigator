@@ -117,6 +117,14 @@ class CorpusFtsBackendTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
             connection.execute(
+                "INSERT INTO chunks VALUES (?,?,?,?,?,?)",
+                (
+                    "vat-106ga-1-1", "vat-106ga", 1,
+                    "art. 106ga ust. 1 pkt 1\n" + "Bardzo długa jednostka podrzędna. " * 20,
+                    "art. 106ga ust. 1 pkt 1", "vat-106ga-1-1",
+                ),
+            )
+            connection.execute(
                 "INSERT INTO chunk_citations VALUES (?,?)",
                 ("chunk-a", "art. 21 ust. 30a"),
             )
@@ -203,7 +211,7 @@ class CorpusFtsBackendTests(unittest.IsolatedAsyncioTestCase):
                 source_types=frozenset({"statute"}),
                 metadata_filters={"tax_domains": ["VAT"]},
             )
-            self.assertEqual([item.document_id for item in ksef], ["vat-106ga"])
+            self.assertEqual(ksef[0].document_id, "vat-106ga")
             self.assertEqual(ksef[0].metadata["display_reference"], "art. 106ga ust. 1")
             self.assertEqual(ksef[0].metadata["legal_provisions"], ["art. 106ga ust. 1"])
 

@@ -158,7 +158,12 @@ urzędowe, a następnie ostrożne rozumowanie prawnicze. Odpowiedz wprost, jaki
 wynik jest najbardziej prawdopodobny i dlaczego. Wyjaśnij znaczenie faktów oraz
 wskaż praktyczne dokumenty lub działania. Nie wymyślaj przepisów, sygnatur ani
 interpretacji. Jeżeli materiałów wtórnych nie przekazano, powiedz to zamiast je
-tworzyć. W treści nie podawaj numerów artykułów ani sygnatur; zweryfikowana
+tworzyć. Jeżeli przekazano zweryfikowane interpretacje lub orzeczenia, omów ich
+rzeczywiste tezy, rozumowanie i istotne podobieństwa albo różnice faktyczne.
+Gdy dostępne są oba rodzaje źródeł, odróżnij praktykę organów od stanowiska
+sądów i wykorzystaj co najmniej po jednym relewantnym materiale każdego typu.
+Nie przedstawiaj samego numeru dokumentu jako wsparcia bez jego materialnej
+treści. W treści nie podawaj numerów artykułów ani sygnatur; zweryfikowana
 lista źródeł zostanie dodana przez aplikację. Zwróć wyłącznie:
 TEZA: jednoznaczna, zwięzła odpowiedź
 ANALIZA: konkretne uzasadnienie odpowiadające na wszystkie elementy pytania
@@ -231,7 +236,7 @@ class LegalRagV2Config:
     allow_legacy_fallback: bool = True
     primary_candidates_per_issue: int = 8
     authority_candidates_per_issue: int = 8
-    authority_extraction_candidates_per_issue: int = 2
+    authority_extraction_candidates_per_issue: int = 4
     authority_extraction_concurrency: int = 4
     model_authority_extraction: bool = False
     require_real_embeddings: bool = False
@@ -275,7 +280,7 @@ class LegalRagV2Config:
             # from retrieval so a multi-issue question cannot fan out into
             # dozens of serial model calls.
             authority_extraction_candidates_per_issue=max(
-                1, int(os.getenv("LEGAL_RAG_V2_AUTHORITY_EXTRACTION_LIMIT_PER_ISSUE", "2"))
+                1, int(os.getenv("LEGAL_RAG_V2_AUTHORITY_EXTRACTION_LIMIT_PER_ISSUE", "4"))
             ),
             authority_extraction_concurrency=max(
                 1, int(os.getenv("LEGAL_RAG_V2_AUTHORITY_EXTRACTION_CONCURRENCY", "4"))
@@ -1682,7 +1687,11 @@ def _build_evidence_bundles(
             if item.provision_id not in controlling_ids
         ]
 
-        cards = authority_cards.get(issue.issue_id, [])
+        cards = [
+            card
+            for card in authority_cards.get(issue.issue_id, [])
+            if _authority_card_has_material(card)
+        ]
         current_cards: list[AuthorityCard] = []
         historical_cards: list[AuthorityCard] = []
         for card in cards:
@@ -1696,6 +1705,8 @@ def _build_evidence_bundles(
         authority_lane = authority_by_issue.get(issue.issue_id)
         if not authority_lane or not authority_lane.candidates:
             missing_sources.append("authority")
+        elif not cards:
+            missing_sources.append("authority_material")
         required_dependency_patterns = _required_issue_dependency_patterns(issue)
         all_issue_provisions = (*controlling, *dependencies, *exceptions)
         missing_dependencies = [
@@ -2717,6 +2728,10 @@ def _best_effort_model_evidence(
                     "issue_id": bundle.issue_id,
                     "type": authority.document_type,
                     "signature": authority.signature or authority.document_id,
+                    "authority_holding": authority.authority_holding or "",
+                    "court_holding": authority.court_holding or "",
+                    "reasoning": authority.reasoning or "",
+                    "outcome": authority.outcome or "",
                     "material": material,
                 }
             )
@@ -2740,6 +2755,18 @@ def _best_effort_model_evidence(
             for fact in plan.missing_facts
         ],
     }
+
+
+def _authority_card_has_material(card: AuthorityCard) -> bool:
+    return any(
+        str(value or "").strip()
+        for value in (
+            card.authority_holding,
+            card.court_holding,
+            card.reasoning,
+            card.outcome,
+        )
+    )
 
 
 def _scrub_unverified_best_effort_references(

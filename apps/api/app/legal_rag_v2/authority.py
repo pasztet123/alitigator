@@ -201,6 +201,7 @@ class HeuristicAuthorityExtractor:
             (r"rozstrzygnięcie sądu", r"sąd zważył"),
         )
         outcome, outcome_spans = _extract_outcome(source)
+        reasoning, reasoning_spans = _extract_reasoning(source)
         provisions, provision_spans = _extract_provisions(source)
 
         metadata = dict(source.metadata)
@@ -212,6 +213,7 @@ class HeuristicAuthorityExtractor:
             authority_holding=authority_spans,
             court_holding=court_spans,
             outcome=outcome_spans,
+            reasoning=reasoning_spans,
         )
         card = AuthorityCard(
             document_id=source.document_id,
@@ -230,7 +232,7 @@ class HeuristicAuthorityExtractor:
             court_holding=court_holding,
             outcome=outcome,
             result_for_taxpayer=None,
-            reasoning=None,
+            reasoning=reasoning,
             distinguishing_facts=[],
             source_spans=source_spans,
             extraction_confidence=0.35,
@@ -393,6 +395,34 @@ def _extract_outcome(
             while start < end and source.text[start].isspace():
                 start += 1
             return source.text[start:end], [_span(source, start, end)]
+    return None, []
+
+
+def _extract_reasoning(
+    source: AuthorityDocument,
+) -> tuple[Optional[str], list[DocumentSourceSpan]]:
+    """Extract only an explicit conclusion-bearing source sentence.
+
+    Retrieval chunks frequently start inside an authority's analysis and no
+    longer contain the section heading used by ``_extract_section``.  A short
+    sentence carrying an unmistakable conclusion is still useful evidence,
+    but is deliberately labelled as reasoning rather than a holding.
+    """
+
+    patterns = (
+        r"[^.!?\n]*(?:w konsekwencji|zatem|tym samym)[^.!?\n]*(?:[.!?]|$)",
+        r"[^.!?\n]*(?:należy uznać|może stanowić koszt|mogą stanowić koszty|"
+        r"nie może zostać zalicz\w*|nie mogą zostać zalicz\w*)[^.!?\n]*(?:[.!?]|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, source.text, re.IGNORECASE)
+        if not match or not match.group(0).strip():
+            continue
+        start, end = match.span()
+        while start < end and source.text[start].isspace():
+            start += 1
+        value = source.text[start:end]
+        return value, [_span(source, start, end)]
     return None, []
 
 

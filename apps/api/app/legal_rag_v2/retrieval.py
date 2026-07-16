@@ -456,6 +456,41 @@ class _BaseLane:
         self.reranker = reranker or TransparentLegalReranker()
         self.config = config or RetrievalConfig()
 
+    def _source_type_groups(self, issue: LegalIssue) -> tuple[frozenset[str], ...]:
+        """Return independent source pools requested for this issue.
+
+        Tax treaties are stored in the statute table and interpretations tend
+        to outnumber judgments.  Passing every lane type to one query allowed
+        an unrelated treaty into ordinary PIT bundles and let interpretations
+        consume the whole authority top-k.  Each requested authority class is
+        therefore recalled independently, while the primary lane is narrowed
+        to the exact classes declared by the research plan.
+        """
+
+        requested = {str(value).lower() for value in issue.requested_source_types}
+        if self.lane_name == "authority":
+            interpretive = frozenset(
+                value
+                for value in {"interpretation", "general_interpretation"}
+                if value in self.source_types
+                and (
+                    value in requested
+                    or "interpretation" in requested
+                    or "general_interpretation" in requested
+                )
+            )
+            guidance = frozenset({"guidance"}) if "guidance" in requested else frozenset()
+            judicial = frozenset(
+                value
+                for value in {"judgment", "resolution"}
+                if value in self.source_types
+                and (value in requested or "judgment" in requested or "resolution" in requested)
+            )
+            groups = tuple(group for group in (interpretive, guidance, judicial) if group)
+            return groups or (self.source_types,)
+        allowed = frozenset(value for value in self.source_types if value in requested)
+        return (allowed or self.source_types,)
+
     async def retrieve(
         self, plan: LegalResearchPlan, issue: LegalIssue
     ) -> LaneResult:
@@ -466,37 +501,44 @@ class _BaseLane:
         }
         channel_lists: list[tuple[str, str, Sequence[RetrievalCandidate]]] = []
         trace: list[dict[str, Any]] = []
+        source_type_groups = self._source_type_groups(issue)
+        vector_source_types = frozenset(
+            value for group in source_type_groups for value in group
+        )
 
         for family in families:
             family_filters = dict(metadata_filters)
             explicit_target = _explicit_family_target(family)
             if explicit_target and explicit_target[0]:
                 family_filters["tax_domains"] = [explicit_target[0]]
-            lexical = await _call_backend(
-                self.backend,
-                family.query,
-                limit=self.config.lexical_limit_per_query,
-                source_types=self.source_types,
-                metadata_filters=family_filters,
-            )
-            lexical = [
-                item
-                for item in lexical
-                if item.source_type in self.source_types
-                and _effective_on(item.metadata, plan.target_date)
-            ]
-            channel_lists.append(("lexical", family.family, lexical))
-            trace.append(
-                {
-                    "event": "candidate_source",
-                    "lane": self.lane_name,
-                    "family": family.family,
-                    "channel": "lexical",
-                    "count": len(lexical),
-                    "backend": getattr(self.backend, "trace_marker", type(self.backend).__name__),
-                    "fallback_origin": family.origin == "fallback",
-                }
-            )
+            for source_group in source_type_groups:
+                lexical = await _call_backend(
+                    self.backend,
+                    family.query,
+                    limit=self.config.lexical_limit_per_query,
+                    source_types=source_group,
+                    metadata_filters=family_filters,
+                )
+                lexical = [
+                    item
+                    for item in lexical
+                    if item.source_type in source_group
+                    and _effective_on(item.metadata, plan.target_date)
+                ]
+                group_name = "+".join(sorted(source_group))
+                channel_lists.append((f"lexical:{group_name}", family.family, lexical))
+                trace.append(
+                    {
+                        "event": "candidate_source",
+                        "lane": self.lane_name,
+                        "family": family.family,
+                        "channel": "lexical",
+                        "source_type_group": sorted(source_group),
+                        "count": len(lexical),
+                        "backend": getattr(self.backend, "trace_marker", type(self.backend).__name__),
+                        "fallback_origin": family.origin == "fallback",
+                    }
+                )
 
             if self.embedding_index is not None:
                 try:
@@ -519,7 +561,7 @@ class _BaseLane:
                     vector_candidates = [
                         _candidate_from_embedding_hit(hit)
                         for hit in hits
-                        if _embedding_hit_allowed(hit, self.source_types, plan.target_date)
+                        if _embedding_hit_allowed(hit, vector_source_types, plan.target_date)
                     ]
                     channel_lists.append(("vector", family.family, vector_candidates))
                     trace.append(
@@ -589,6 +631,29 @@ class _BaseLane:
             fused,
             target_date=plan.target_date,
         )
+        if self.lane_name == "authority" and (
+            issue.transactions
+            or issue.positive_fact_constraints
+            or issue.possible_provision_concepts
+        ):
+            unfiltered_count = len(reranked)
+            reranked = [
+                candidate
+                for candidate in reranked
+                if (
+                    candidate.component_scores.get("transaction", 0.0) >= 0.15
+                    or candidate.component_scores.get("positive_constraints", 0.0)
+                    >= 0.15
+                    or candidate.component_scores.get("provision_concepts", 0.0) > 0.0
+                )
+            ]
+            trace.append(
+                {
+                    "event": "authority_material_relevance_filter",
+                    "candidate_count_before": unfiltered_count,
+                    "candidate_count_after": len(reranked),
+                }
+            )
         # A plan may declare more exact primary-law dependencies than the
         # ordinary top-k.  Never truncate below the number of independently
         # requested exact provisions; doing so makes completeness impossible

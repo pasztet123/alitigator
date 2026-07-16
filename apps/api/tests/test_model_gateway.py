@@ -430,19 +430,30 @@ class FallbackModelGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "fallback")
         self.assertEqual(fallback.text_calls[0]["model"], None)
 
-    async def test_fallback_is_not_used_for_schema_or_request_error(self) -> None:
-        expected = PlannedAnswer(title="unused", confidence=0.1)
-        for error in (ModelSchemaError("bad schema"), ModelRequestError("bad request")):
-            with self.subTest(error=type(error).__name__):
-                primary = StubGateway(structured_error=error)
-                fallback = StubGateway(structured=expected)
-                gateway = FallbackModelGateway(primary, fallback)
+    async def test_fallback_is_used_after_primary_schema_retries_are_exhausted(self) -> None:
+        expected = PlannedAnswer(title="fallback", confidence=0.9)
+        primary = StubGateway(structured_error=ModelSchemaError("bad schema"))
+        fallback = StubGateway(structured=expected)
+        gateway = FallbackModelGateway(primary, fallback)
 
-                with self.assertRaises(type(error)):
-                    await gateway.generate_structured(
-                        response_model=PlannedAnswer, input="q"
-                    )
-                self.assertEqual(fallback.structured_calls, [])
+        result = await gateway.generate_structured(
+            response_model=PlannedAnswer, input="q", model="gpt-5.6-terra"
+        )
+
+        self.assertEqual(expected, result)
+        self.assertEqual(fallback.structured_calls[0]["model"], None)
+
+    async def test_fallback_is_not_used_for_generic_request_error(self) -> None:
+        expected = PlannedAnswer(title="unused", confidence=0.1)
+        primary = StubGateway(structured_error=ModelRequestError("bad request"))
+        fallback = StubGateway(structured=expected)
+        gateway = FallbackModelGateway(primary, fallback)
+
+        with self.assertRaises(ModelRequestError):
+            await gateway.generate_structured(
+                response_model=PlannedAnswer, input="q"
+            )
+        self.assertEqual(fallback.structured_calls, [])
 
     async def test_fallback_is_used_for_provider_specific_request_rejection(self) -> None:
         primary = StubGateway(

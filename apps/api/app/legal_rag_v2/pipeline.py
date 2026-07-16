@@ -892,6 +892,7 @@ class LegalRagV2Pipeline:
         calculations: list[CalculationRecord],
     ) -> tuple[list[LegalClaim], ValidationRecord]:
         bundle_by_issue = {item.issue_id: item for item in bundles}
+        synthesis_payload_sizes: list[int] = []
         batches = [
             plan.issues[index : index + SYNTHESIS_MAX_ISSUES_PER_BATCH]
             for index in range(0, len(plan.issues), SYNTHESIS_MAX_ISSUES_PER_BATCH)
@@ -945,10 +946,13 @@ class LegalRagV2Pipeline:
                 payload["existing_validated_claims"] = [
                     item.model_dump(mode="json") for item in existing_claims or []
                 ]
+            compact_payload = _compact_model_payload(payload)
+            serialized_payload = json.dumps(compact_payload, ensure_ascii=False)
+            synthesis_payload_sizes.append(len(serialized_payload.encode("utf-8")))
             async with semaphore:
                 output = await self.gateway.generate_structured(
                     response_model=ClaimSet,
-                    input=json.dumps(payload, ensure_ascii=False),
+                    input=serialized_payload,
                     system_prompt=CLAIM_SYNTHESIS_RULES,
                     model=self.config.synthesis_model,
                     reasoning_effort="medium",
@@ -1019,6 +1023,8 @@ class LegalRagV2Pipeline:
         errors = [*synthesis_errors, *errors]
         warnings = [
             f"issue_scoped_synthesis_batches:{len(batches)}",
+            "synthesis_payload_bytes_max:"
+            f"{max(synthesis_payload_sizes, default=0)}",
             *synthesis_warnings,
             *warnings,
         ]
@@ -1094,10 +1100,11 @@ class LegalRagV2Pipeline:
             else value
             for key, value in writer_payload.items()
         }
+        compact_payload = _compact_model_payload(serializable)
         try:
             output = await self.gateway.generate_structured(
                 response_model=WriterOutput,
-                input=json.dumps(serializable, ensure_ascii=False),
+                input=json.dumps(compact_payload, ensure_ascii=False),
                 system_prompt=ANSWER_WRITER_RULES,
                 model=self.config.answer_writer_model,
                 reasoning_effort="medium",
@@ -1229,6 +1236,30 @@ def _candidate_presence_recall(
         return 0.0
     primary = {lane.issue_id: bool(lane.candidates) for lane in retrieval.primary_law}
     return sum(1 for issue in plan.issues if primary.get(issue.issue_id, False)) / len(plan.issues)
+
+
+def _compact_model_payload(value: Any) -> Any:
+    """Remove retrieval-only and duplicated provenance data from LLM inputs.
+
+    The canonical plan and evidence artifacts remain lossless.  Model stages,
+    however, do not need every retrieval query or a second copy of source text
+    inside ``source_span.quote``: the provision ``text`` plus exact offsets and
+    document IDs are sufficient for evidence binding.  Long multi-issue cases
+    previously repeated the entire user question in every fallback fact and
+    query family, inflating one synthesis request by hundreds of kilobytes.
+    """
+
+    if isinstance(value, dict):
+        return {
+            key: _compact_model_payload(item)
+            for key, item in value.items()
+            if key not in {"quote", "query_families", "user_query"}
+        }
+    if isinstance(value, list):
+        return [_compact_model_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [_compact_model_payload(item) for item in value]
+    return value
 
 
 def _claim_coverage_requirements(
@@ -2399,19 +2430,58 @@ def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:
     answer_plan: AnswerPlan = payload["answer_plan"]
     allowed = set(answer_plan.allowed_claim_ids)
     selected = [item for item in claims if item.claim_id in allowed]
-    thesis = " ".join(item.result for item in selected) or (
-        "Brak materialnej konkluzji, która przeszła walidację źródeł."
+    coverage_requirements = _claim_coverage_requirements(plan, bundles)
+    complete_primary_issues = {
+        bundle.issue_id
+        for bundle in bundles
+        if bundle.coverage_status == "complete" and bundle.controlling_provisions
+    }
+    fallback_source_ids = {
+        provision_id
+        for requirements in coverage_requirements.values()
+        for requirement in requirements
+        for provision_id in requirement["allowed_provision_ids"][:1]
+    }
+    fallback_source_ids.update(
+        bundle.controlling_provisions[0].provision_id
+        for bundle in bundles
+        if bundle.issue_id in complete_primary_issues and bundle.controlling_provisions
     )
+    thesis = " ".join(item.result for item in selected)
+    if not thesis:
+        thesis = (
+            "Źródła pierwotne zostały zweryfikowane, lecz synteza materialnych "
+            "konkluzji nie została ukończona. Tego wyniku nie należy traktować "
+            "jako zakończonej analizy podatkowej."
+            if complete_primary_issues
+            else "Nie uzyskano zweryfikowanych źródeł wystarczających do materialnej konkluzji."
+        )
+
+    def section_content(issue: Any) -> str:
+        approved = [claim for claim in selected if claim.issue_id == issue.issue_id]
+        if approved:
+            return "\n".join(f"- {claim.text} {claim.result}" for claim in approved)
+        requirements = coverage_requirements.get(issue.issue_id, [])
+        citations = list(
+            dict.fromkeys(
+                str(requirement["citation"])
+                for requirement in requirements
+                if requirement.get("citation")
+            )
+        )
+        if issue.issue_id in complete_primary_issues:
+            suffix = f" Zweryfikowane przepisy: {', '.join(citations)}." if citations else ""
+            return (
+                "Nie ukończono syntezy materialnego wniosku mimo kompletnego "
+                f"bundla prawa pierwotnego.{suffix}"
+            )
+        return "Brak kompletnego bundla prawa pierwotnego dla tej osi."
+
     sections = [
         WriterAnalysisSection(
             section_id=f"analysis_{issue.issue_id}",
             title=issue.label,
-            content="\n".join(
-                f"- {claim.text} {claim.result}"
-                for claim in selected
-                if claim.issue_id == issue.issue_id
-            )
-            or "Brak zatwierdzonego twierdzenia dla tej osi.",
+            content=section_content(issue),
             claim_ids_used=[
                 claim.claim_id
                 for claim in selected
@@ -2436,7 +2506,9 @@ def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:
             # from being noisy, mixing them into the final source list can
             # make two editorial units of one technical record look like a
             # citation substitution to the integrity gate.
-            if not claim_ids:
+            if not claim_ids and not (
+                not selected and provision.provision_id in fallback_source_ids
+            ):
                 continue
             sources.append(
                 WriterSource(
@@ -2480,11 +2552,19 @@ def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:
             for source in bundle.missing_sources
         )
     ]
+    synthesis_gap = (
+        [
+            "Kompletne źródła prawa pierwotnego są dostępne, ale synteza modelowa "
+            "nie została ukończona; należy ponowić analizę po przywróceniu providera."
+        ]
+        if not selected and complete_primary_issues
+        else []
+    )
     return WriterOutput(
         thesis=thesis,
         analysis_sections=sections,
         sources=_dedupe_writer_sources(sources),
-        risks_and_gaps=[*missing_questions, *source_gaps]
+        risks_and_gaps=[*missing_questions, *source_gaps, *synthesis_gap]
         or ["Nie znaleziono dodatkowych luk poza oznaczonymi statusami claimów."],
         claim_ids_used=[item.claim_id for item in selected],
     )

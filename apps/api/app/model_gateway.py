@@ -1058,7 +1058,11 @@ class FallbackModelGateway:
         }
         try:
             return await self.primary.generate_text(**kwargs)
-        except (ModelTechnicalError, ModelProviderRequestError) as primary_error:
+        except (
+            ModelTechnicalError,
+            ModelProviderRequestError,
+            ModelSchemaError,
+        ) as primary_error:
             # A primary-provider model id must never leak into a different provider.
             kwargs["model"] = None
             try:
@@ -1088,7 +1092,11 @@ class FallbackModelGateway:
         }
         try:
             return await self.primary.generate_structured(**kwargs)
-        except (ModelTechnicalError, ModelProviderRequestError) as primary_error:
+        except (
+            ModelTechnicalError,
+            ModelProviderRequestError,
+            ModelSchemaError,
+        ) as primary_error:
             kwargs["model"] = None
             try:
                 return await self.fallback.generate_structured(**kwargs)

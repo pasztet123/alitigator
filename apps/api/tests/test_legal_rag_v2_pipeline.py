@@ -62,6 +62,66 @@ class RuntimeDiagnosticTests(unittest.TestCase):
         ):
             self.assertEqual(_git_commit(), "cloud-run-revision")
 
+    def test_model_payload_compaction_removes_only_duplicated_retrieval_context(self) -> None:
+        payload = {
+            "question": "Pełne pytanie użytkownika pozostaje wejściem syntezy.",
+            "plan": {
+                "user_query": "duplikat pełnego pytania",
+                "facts": [
+                    {
+                        "fact_id": "fact_1",
+                        "value": "pożyczka",
+                        "source_span": {
+                            "start": 10,
+                            "end": 18,
+                            "quote": "pożyczka",
+                            "source_id": "user_question",
+                        },
+                    }
+                ],
+                "issues": [
+                    {
+                        "issue_id": "issue_1",
+                        "label": "Pożyczka",
+                        "query_families": [
+                            {"family": "natural_language", "query": "duplikat pytania"}
+                        ],
+                    }
+                ],
+            },
+            "evidence_bundles": [
+                {
+                    "issue_id": "issue_1",
+                    "controlling_provisions": [
+                        {
+                            "provision_id": "cit-art-24q",
+                            "citation": "art. 24q ust. 1",
+                            "text": "Podatek wynosi 15% podstawy opodatkowania.",
+                            "source_span": {
+                                "start": 0,
+                                "end": 45,
+                                "quote": "Podatek wynosi 15% podstawy opodatkowania.",
+                                "document_id": "cit-act",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+        compact = pipeline_module._compact_model_payload(payload)
+
+        self.assertEqual(payload["question"], compact["question"])
+        self.assertNotIn("user_query", compact["plan"])
+        self.assertNotIn("query_families", compact["plan"]["issues"][0])
+        fact_span = compact["plan"]["facts"][0]["source_span"]
+        self.assertNotIn("quote", fact_span)
+        self.assertEqual("user_question", fact_span["source_id"])
+        provision = compact["evidence_bundles"][0]["controlling_provisions"][0]
+        self.assertEqual("Podatek wynosi 15% podstawy opodatkowania.", provision["text"])
+        self.assertEqual("cit-act", provision["source_span"]["document_id"])
+        self.assertNotIn("quote", provision["source_span"])
+
 
 def research_plan() -> LegalResearchPlan:
     start = QUESTION.index("sprzedaż")
@@ -701,9 +761,10 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        self.assertIn("Brak materialnej konkluzji", output.thesis)
+        self.assertIn("Źródła pierwotne zostały zweryfikowane", output.thesis)
         self.assertNotIn("właściwy przepis", output.thesis)
         self.assertNotIn("art. 30e", output.thesis.casefold())
+        self.assertEqual([provision.provision_id], [item.source_id for item in output.sources])
         self.assertEqual([], validate_writer_output(output, answer_plan=answer_plan, bundles=bundles))
 
     def test_whole_article_binding_cannot_support_invented_point(self) -> None:

@@ -153,6 +153,37 @@ class EmbeddingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ProvisionGraphTests(unittest.TestCase):
+    def test_inline_first_section_and_wrapped_article_reference_keep_article_scope(self) -> None:
+        units = ProvisionParser().parse(
+            "Art. 86. 1. Reguła główna z zastrzeżeniem art. 114 oraz\n"
+            "art. 124.\n"
+            "2. Kwotę podatku określa faktura.\n"
+            "10. Prawo powstaje w odpowiednim okresie.\n",
+            document_id="vat-art-86",
+            metadata={"legal_provisions": ["art. 86"]},
+        )
+        citations = {unit.citation for unit in units}
+
+        self.assertIn("art. 86 ust. 1", citations)
+        self.assertIn("art. 86 ust. 2", citations)
+        self.assertIn("art. 86 ust. 10", citations)
+        self.assertNotIn("art. 124", citations)
+
+    def test_continuation_chunk_inherits_article_from_metadata(self) -> None:
+        units = ProvisionParser().parse(
+            "10. Reguła okresu.\n"
+            "10b. Prawo powstaje po otrzymaniu faktury:\n"
+            "1) dla zwykłego nabycia;\n"
+            "11. Trzy następne okresy.\n",
+            document_id="vat-art-86-part-2",
+            metadata={"legal_provisions": ["art. 86"]},
+        )
+        citations = {unit.citation for unit in units}
+
+        self.assertIn("art. 86 ust. 10", citations)
+        self.assertIn("art. 86 ust. 10b pkt 1", citations)
+        self.assertIn("art. 86 ust. 11", citations)
+
     def test_graph_marks_extension_of_referenced_rule_as_special_rule(self) -> None:
         graph = ProvisionParser().build_graph(
             "Art. 21.\n25. Reguła wydatków.\n30a. Wydatki, o których mowa w ust. 25, obejmują także spłatę kredytu.",

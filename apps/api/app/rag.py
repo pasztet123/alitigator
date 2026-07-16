@@ -2551,6 +2551,28 @@ def query_cost_tax_domain(query: str) -> str:
     return "CIT"
 
 
+def query_targets_input_vat_deduction_timing(query: str) -> bool:
+    normalized = normalize_whitespace(query or "")
+    has_vat_deduction = bool(
+        re.search(
+            r"(?:odlicz\w*.{0,40}\bVAT\b|\bVAT\b.{0,40}odlicz\w*|"
+            r"podat\w*\s+naliczon\w*|prawo\s+do\s+odliczeni\w*)",
+            normalized,
+            re.I,
+        )
+    )
+    has_timing = bool(
+        re.search(
+            r"(?:w\s+kt[óo]r\w*\s+okres|moment\w*\s+odliczeni|kiedy\s+.*odlicz|"
+            r"data\s+otrzymani\w*\s+faktur|otrzyma\w*.{0,30}faktur|"
+            r"deklaracj\w*\s+za|kolejn\w*\s+okres|miesi[ąa]c\w*)",
+            normalized,
+            re.I,
+        )
+    )
+    return has_vat_deduction and has_timing
+
+
 def query_targets_wht_pay_and_refund_services(query: str) -> bool:
     normalized = normalize_whitespace(query or "").lower()
     has_wht_context = bool(re.search(r"\b(wht|podatek u źr[óo]dła|withholding|certyfikat\w* rezydencji|beneficial owner|rzeczywist\w* właściciel\w*)\b", normalized))
@@ -7453,6 +7475,29 @@ def filter_treaty_country_chunks(chunks: list[RagChunk], query: str) -> list[Rag
 def decompose_query_into_legal_axes(query: str) -> list[LegalRetrievalAxis]:
     normalized = normalize_whitespace(query or "")
     axes: list[LegalRetrievalAxis] = []
+
+    if query_targets_input_vat_deduction_timing(query):
+        axes.append(
+            LegalRetrievalAxis(
+                axis_id="vat_input_deduction_timing",
+                label="VAT: moment i kolejne okresy odliczenia podatku naliczonego",
+                query=expand_search_query(
+                    f"{normalized} VAT art. 86 ust. 1 art. 86 ust. 2 pkt 1 "
+                    "art. 86 ust. 10 art. 86 ust. 10b pkt 1 art. 86 ust. 10e "
+                    "art. 86 ust. 11 art. 86 ust. 13 art. 19a ust. 1 "
+                    "art. 106na ust. 3 art. 106na ust. 4 art. 106nda ust. 11 "
+                    "otrzymanie faktury data zapłaty kolejne okresy KSeF"
+                ),
+                source_types={"statute", "interpretation", "judgment"},
+                tax_domains={"VAT"},
+                preferred_targets=(
+                    ("VAT", "86"),
+                    ("VAT", "19a"),
+                    ("VAT", "106na"),
+                    ("VAT", "106nda"),
+                ),
+            )
+        )
 
     if query_targets_cit_cost_deductibility(query):
         tax_domain = query_cost_tax_domain(query)

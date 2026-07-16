@@ -196,8 +196,24 @@ class ProvisionParser:
 
         units: list[ProvisionUnit] = []
         current: Optional[dict[str, Any]] = None
+        metadata = dict(metadata or {})
+        initial_article: Optional[str] = None
+        scoped_references = [metadata.get("display_reference")]
+        legal_provisions = metadata.get("legal_provisions")
+        if isinstance(legal_provisions, (list, tuple)):
+            scoped_references.extend(legal_provisions)
+        elif legal_provisions:
+            scoped_references.append(legal_provisions)
+        for reference in scoped_references:
+            match = re.match(r"^\s*art\.\s*(\d+[a-z]*)\b", str(reference or ""), re.I)
+            if match:
+                initial_article = match.group(1).casefold()
+                break
         context: dict[str, Optional[str]] = {
-            "article": None,
+            # Long articles are chunked across records.  Later chunks can
+            # legitimately begin with ``7.`` or ``10b.`` and therefore need
+            # the article scope carried in corpus metadata.
+            "article": initial_article,
             "paragraph": None,
             "section": None,
             "point": None,
@@ -214,26 +230,16 @@ class ProvisionParser:
             units.append(ProvisionUnit(**current))
             current = None
 
-        offset = 0
-        for raw_line in text.splitlines(keepends=True):
-            line = raw_line.rstrip("\r\n")
-            marker = self._parse_marker(line, context)
-            if marker is None:
-                if current is not None and line.strip():
-                    current["body"].append(line.strip())
-                offset += len(raw_line)
-                continue
-
-            finish(offset)
-            level, value, body = marker
+        def begin(
+            *,
+            level: str,
+            value: str,
+            body: str,
+            start: int,
+        ) -> None:
+            nonlocal current
             self._advance_context(context, level, value)
             citation = _format_citation(context)
-            parent_id = self._parent_id(
-                document_id=document_id,
-                version_id=version_id,
-                context=context,
-                level=level,
-            )
             current = {
                 "provision_id": _provision_id(document_id, version_id, context),
                 "document_id": document_id,
@@ -244,13 +250,58 @@ class ProvisionParser:
                 "section": context["section"],
                 "point": context["point"],
                 "letter": context["letter"],
-                "parent_id": parent_id,
+                "parent_id": self._parent_id(
+                    document_id=document_id,
+                    version_id=version_id,
+                    context=context,
+                    level=level,
+                ),
                 "effective_from": effective_from,
                 "effective_to": effective_to,
-                "source_span_start": offset,
-                "metadata": dict(metadata or {}),
+                "source_span_start": start,
+                "metadata": metadata,
                 "body": [body.strip()] if body.strip() else [],
             }
+
+        offset = 0
+        for raw_line in text.splitlines(keepends=True):
+            line = raw_line.rstrip("\r\n")
+            # Consolidated acts often put the first paragraph on the same
+            # physical line as the article heading (``Art. 86. 1. ...``).
+            # Preserve both editorial units; otherwise every later ``2.`` or
+            # ``10b.`` is detached from paragraph 1 and exact retrieval fails.
+            article_match = _ARTICLE_RE.match(line)
+            inline_section = (
+                _SECTION_RE.match(article_match.group(2)) if article_match else None
+            )
+            if article_match and inline_section:
+                finish(offset)
+                section_start = offset + article_match.start(2) + inline_section.start()
+                begin(
+                    level="article",
+                    value=article_match.group(1).casefold(),
+                    body=line[: article_match.start(2)],
+                    start=offset,
+                )
+                finish(section_start)
+                begin(
+                    level="section",
+                    value=inline_section.group(1).casefold(),
+                    body=inline_section.group(2),
+                    start=section_start,
+                )
+                offset += len(raw_line)
+                continue
+            marker = self._parse_marker(line, context)
+            if marker is None:
+                if current is not None and line.strip():
+                    current["body"].append(line.strip())
+                offset += len(raw_line)
+                continue
+
+            finish(offset)
+            level, value, body = marker
+            begin(level=level, value=value, body=body, start=offset)
             offset += len(raw_line)
         finish(len(text))
         return tuple(units)
@@ -289,6 +340,14 @@ class ProvisionParser:
             ("point", _EXPLICIT_POINT_RE),
             ("letter", _EXPLICIT_LETTER_RE),
         ):
+            # A lower-case ``art.`` at the start of a wrapped line inside an
+            # existing article is a cross-reference, not a new heading.
+            if (
+                level == "article"
+                and context.get("article")
+                and line.lstrip().startswith("art.")
+            ):
+                continue
             match = pattern.match(line)
             if match:
                 return level, match.group(1).casefold(), match.group(2)

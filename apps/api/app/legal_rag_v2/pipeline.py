@@ -67,6 +67,7 @@ from .schemas import (
 )
 from .trace import TraceWriter
 from .transfer_pricing import enrich_transfer_pricing_plan, question_targets_transfer_pricing
+from .vat import enrich_input_vat_deduction_plan
 from .wht import WhtPayAndRefundCalculationEngine, enrich_crossborder_wht_plan
 
 
@@ -405,10 +406,13 @@ class LegalRagV2Pipeline:
             force_fallback=force_planner_fallback,
         )
         timings["planner"] = _elapsed_ms(stage)
-        plan = enrich_cit_cost_plan(
-            enrich_transfer_pricing_plan(
-                enrich_family_foundation_plan(
-                    enrich_crossborder_wht_plan(planner_outcome.plan, question),
+        plan = enrich_input_vat_deduction_plan(
+            enrich_cit_cost_plan(
+                enrich_transfer_pricing_plan(
+                    enrich_family_foundation_plan(
+                        enrich_crossborder_wht_plan(planner_outcome.plan, question),
+                        question,
+                    ),
                     question,
                 ),
                 question,
@@ -457,10 +461,13 @@ class LegalRagV2Pipeline:
             )
             if augmented.fallback_trace.fallback_used:
                 planner_outcome = augmented
-                plan = enrich_cit_cost_plan(
-                    enrich_transfer_pricing_plan(
-                        enrich_family_foundation_plan(
-                            enrich_crossborder_wht_plan(augmented.plan, question),
+                plan = enrich_input_vat_deduction_plan(
+                    enrich_cit_cost_plan(
+                        enrich_transfer_pricing_plan(
+                            enrich_family_foundation_plan(
+                                enrich_crossborder_wht_plan(augmented.plan, question),
+                                question,
+                            ),
                             question,
                         ),
                         question,
@@ -1780,6 +1787,20 @@ def _required_issue_dependency_patterns(
         return (
             ("pit_art_22_1", r"art\.\s*22\s+ust\.\s*1(?:\s|$)", pit_act),
             ("pit_art_23_1", r"art\.\s*23\s+ust\.\s*1(?:\s|$)", pit_act),
+        )
+    if issue_id == "vat_input_deduction_timing" or "input_vat_deduction_timing" in issue_concepts:
+        return (
+            ("vat_art_86_1", r"art\.\s*86\s+ust\.\s*1(?:\s|$)", vat_act),
+            ("vat_art_86_2_1", r"art\.\s*86\s+ust\.\s*2\s+pkt\s*1(?:\s|$)", vat_act),
+            ("vat_art_86_10", r"art\.\s*86\s+ust\.\s*10(?:\s|$)", vat_act),
+            ("vat_art_86_10b_1", r"art\.\s*86\s+ust\.\s*10b\s+pkt\s*1", vat_act),
+            ("vat_art_86_10e", r"art\.\s*86\s+ust\.\s*10e(?:\s|$)", vat_act),
+            ("vat_art_86_11", r"art\.\s*86\s+ust\.\s*11(?:\s|$)", vat_act),
+            ("vat_art_86_13", r"art\.\s*86\s+ust\.\s*13(?:\s|$)", vat_act),
+            ("vat_art_19a_1", r"art\.\s*19a\s+ust\.\s*1(?:\s|$)", vat_act),
+            ("vat_art_106na_3", r"art\.\s*106na\s+ust\.\s*3(?:\s|$)", vat_act),
+            ("vat_art_106na_4", r"art\.\s*106na\s+ust\.\s*4(?:\s|$)", vat_act),
+            ("vat_art_106nda_11", r"art\.\s*106nda\s+ust\.\s*11(?:\s|$)", vat_act),
         )
     if issue_id == "wht_pay_and_refund_procedure":
         return (

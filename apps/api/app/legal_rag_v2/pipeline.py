@@ -82,6 +82,7 @@ SYNTHESIS_BATCH_CONCURRENCY = 3
 SYNTHESIS_MAX_INPUT_BYTES = 70_000
 SYNTHESIS_MAX_OUTPUT_TOKENS = 12_000
 WRITER_MAX_OUTPUT_TOKENS = 8_000
+BEST_EFFORT_MAX_OUTPUT_TOKENS = 4_000
 
 
 class SynthesisPayloadTooLargeError(ModelGatewayError):
@@ -146,6 +147,21 @@ perform a calculation, create a citation or infer a missing fact. Put material
 uncertainty in risks_and_gaps and list every claim ID you actually use. The
 thesis must be a short, coherent legal conclusion, not a concatenation of claim
 labels, sentence fragments or repeated definitions.
+"""
+
+BEST_EFFORT_ANSWER_RULES = """\
+Jesteś polskim asystentem podatkowym. Udziel użytecznej, wstępnej odpowiedzi
+na pytanie użytkownika nawet wtedy, gdy wcześniejsza synteza strukturalna nie
+powiodła się. W pierwszej kolejności stosuj przekazane teksty prawa i materiały
+urzędowe, a następnie ostrożne rozumowanie prawnicze. Odpowiedz wprost, jaki
+wynik jest najbardziej prawdopodobny i dlaczego. Wyjaśnij znaczenie faktów oraz
+wskaż praktyczne dokumenty lub działania. Nie wymyślaj przepisów, sygnatur ani
+interpretacji. Jeżeli materiałów wtórnych nie przekazano, powiedz to zamiast je
+tworzyć. W treści nie podawaj numerów artykułów ani sygnatur; zweryfikowana
+lista źródeł zostanie dodana przez aplikację. Zwróć wyłącznie:
+TEZA: jednoznaczna, zwięzła odpowiedź
+ANALIZA: konkretne uzasadnienie odpowiadające na wszystkie elementy pytania
+DOKUMENTY: praktyczna lista dowodów lub działań, jeżeli jest relewantna
 """
 
 
@@ -620,7 +636,14 @@ class LegalRagV2Pipeline:
         trace.write_json("writer_payload.json", writer_payload)
 
         stage = time.monotonic()
-        writer_output, writer_validation = await self._write_answer(writer_payload)
+        if answer_plan.allowed_claim_ids:
+            writer_output, writer_validation = await self._write_answer(writer_payload)
+        else:
+            writer_output, writer_validation = await self._write_best_effort_answer(
+                question=question,
+                plan=plan,
+                bundles=bundles,
+            )
         timings["answer_writer"] = _elapsed_ms(stage)
         validations.append(writer_validation)
         trace.write_json("writer_output.json", writer_output)
@@ -1166,6 +1189,59 @@ class LegalRagV2Pipeline:
             warnings=["deterministic_renderer_fallback"] if errors else [],
         )
 
+    async def _write_best_effort_answer(
+        self,
+        *,
+        question: str,
+        plan: LegalResearchPlan,
+        bundles: list[EvidenceBundle],
+    ) -> tuple[WriterOutput, ValidationRecord]:
+        """Always return a useful degraded answer when strict claims are empty.
+
+        This lane is intentionally less authoritative than validated claims,
+        but it remains source-bounded: the model writes only the reasoning and
+        the application adds the retrieved source list deterministically.
+        """
+
+        model_evidence = _best_effort_model_evidence(plan, bundles)
+        try:
+            raw = await self.gateway.generate_text(
+                input=json.dumps(
+                    {"question": question, "evidence": model_evidence},
+                    ensure_ascii=False,
+                ),
+                system_prompt=BEST_EFFORT_ANSWER_RULES,
+                model=self.config.answer_writer_model,
+                reasoning_effort="low",
+                max_output_tokens=BEST_EFFORT_MAX_OUTPUT_TOKENS,
+            )
+        except ModelGatewayError as exc:
+            return _deterministic_writer_output(
+                {
+                    "validated_claims": [],
+                    "legal_research_plan": plan,
+                    "evidence_bundles": bundles,
+                    "answer_plan": AnswerPlan(),
+                }
+            ), ValidationRecord(
+                stage="writer_validation",
+                passed=False,
+                errors=["best_effort_writer_failed"],
+                warnings=[f"{type(exc).__name__}:{exc}"],
+            )
+
+        output = _best_effort_writer_output(raw, plan=plan, bundles=bundles)
+        errors = validate_writer_output(output, answer_plan=AnswerPlan(), bundles=bundles)
+        return output, ValidationRecord(
+            stage="writer_validation",
+            passed=not errors,
+            errors=errors,
+            warnings=[
+                "best_effort_mode",
+                "strict_claim_synthesis_produced_no_approved_claims",
+            ],
+        )
+
 
 def create_default_pipeline(
     *,
@@ -1699,6 +1775,11 @@ def _required_issue_dependency_patterns(
         return (
             ("cit_art_15_1", r"art\.\s*15\s+ust\.\s*1(?:\s|$)", cit_act),
             ("cit_art_16_1", r"art\.\s*16\s+ust\.\s*1(?:\s|$)", cit_act),
+        )
+    if issue_id == "pit_cost_deductibility" or "pit_cost_deductibility" in issue_concepts:
+        return (
+            ("pit_art_22_1", r"art\.\s*22\s+ust\.\s*1(?:\s|$)", pit_act),
+            ("pit_art_23_1", r"art\.\s*23\s+ust\.\s*1(?:\s|$)", pit_act),
         )
     if issue_id == "wht_pay_and_refund_procedure":
         return (
@@ -2548,6 +2629,190 @@ def validate_writer_output(
             errors.append("writer_invented_judgment_signature")
             break
     return list(dict.fromkeys(errors))
+
+
+def _best_effort_model_evidence(
+    plan: LegalResearchPlan,
+    bundles: list[EvidenceBundle],
+) -> dict[str, Any]:
+    provisions: list[dict[str, str]] = []
+    authorities: list[dict[str, str]] = []
+    seen_provisions: set[tuple[str, str]] = set()
+    seen_authorities: set[str] = set()
+    remaining_chars = 42_000
+    for bundle in bundles:
+        for provision in (
+            *bundle.controlling_provisions,
+            *bundle.dependency_provisions,
+            *bundle.exception_provisions,
+        ):
+            key = (provision.provision_id, _normalize_citation(provision.citation))
+            if key in seen_provisions or remaining_chars <= 0:
+                continue
+            seen_provisions.add(key)
+            text = " ".join((provision.text or "").split())[:5_000]
+            remaining_chars -= len(text)
+            provisions.append(
+                {
+                    "issue_id": bundle.issue_id,
+                    "act": _writer_source_label(provision),
+                    "citation": provision.citation,
+                    "text": text,
+                }
+            )
+        for authority in (*bundle.supporting_authorities, *bundle.contrary_authorities):
+            if authority.document_id in seen_authorities or remaining_chars <= 0:
+                continue
+            seen_authorities.add(authority.document_id)
+            material = " ".join(
+                value
+                for value in (
+                    authority.authority_holding,
+                    authority.court_holding,
+                    authority.reasoning,
+                    authority.outcome,
+                )
+                if value
+            )[:3_000]
+            remaining_chars -= len(material)
+            authorities.append(
+                {
+                    "issue_id": bundle.issue_id,
+                    "type": authority.document_type,
+                    "signature": authority.signature or authority.document_id,
+                    "material": material,
+                }
+            )
+    return {
+        "issues": [
+            {
+                "issue_id": issue.issue_id,
+                "label": issue.label,
+                "mechanism": issue.legal_mechanism,
+            }
+            for issue in plan.issues
+        ],
+        "primary_law": provisions,
+        "authorities": authorities,
+    }
+
+
+def _scrub_unverified_best_effort_references(
+    text: str,
+    *,
+    citations: Iterable[str],
+    signatures: Iterable[str],
+) -> str:
+    allowed_citations = list(citations)
+
+    def provision_replacement(match: re.Match[str]) -> str:
+        reference = match.group(0)
+        if any(_citations_are_compatible(reference, citation) for citation in allowed_citations):
+            return reference
+        return "właściwy przepis"
+
+    result = _RENDERED_PROVISION_RE.sub(provision_replacement, text)
+    known_signatures = {" ".join(value.casefold().split()) for value in signatures if value}
+
+    def signature_replacement(match: re.Match[str]) -> str:
+        signature = " ".join(match.group(0).casefold().split())
+        return match.group(0) if signature in known_signatures else "orzecznictwo sądowe"
+
+    return re.sub(
+        r"\b(?:I|II)?\s*(?:FSK|SA/[A-Z]{1,3})\s+\d+/\d+\b",
+        signature_replacement,
+        result,
+        flags=re.I,
+    )
+
+
+def _best_effort_writer_output(
+    raw: str,
+    *,
+    plan: LegalResearchPlan,
+    bundles: list[EvidenceBundle],
+) -> WriterOutput:
+    cleaned = re.sub(r"```(?:json|markdown)?|```", "", raw, flags=re.I)
+    cleaned = cleaned.replace("**", "").strip()
+    parts = re.split(r"(?im)^\s*(TEZA|ANALIZA|DOKUMENTY)\s*:\s*", cleaned)
+    parsed: dict[str, str] = {}
+    for index in range(1, len(parts) - 1, 2):
+        parsed[parts[index].casefold()] = parts[index + 1].strip()
+    thesis = parsed.get("teza") or cleaned.splitlines()[0].strip()
+    analysis = parsed.get("analiza") or cleaned
+    documents = parsed.get("dokumenty", "")
+    if documents:
+        analysis = f"{analysis}\n\nDokumentacja i działania:\n{documents}"
+
+    sources: list[WriterSource] = []
+    citations: list[str] = []
+    signatures: list[str] = []
+    for bundle in bundles:
+        for provision in (
+            *bundle.controlling_provisions,
+            *bundle.dependency_provisions,
+            *bundle.exception_provisions,
+        ):
+            citations.append(provision.citation)
+            sources.append(
+                WriterSource(
+                    source_id=provision.provision_id,
+                    label=_writer_source_label(provision),
+                    citation=provision.citation,
+                    claim_ids=[],
+                )
+            )
+        for authority in (*bundle.supporting_authorities, *bundle.contrary_authorities):
+            signature = authority.signature or authority.document_id
+            signatures.append(signature)
+            sources.append(
+                WriterSource(
+                    source_id=authority.document_id,
+                    label=authority.document_type,
+                    citation=signature,
+                    claim_ids=[],
+                )
+            )
+    sources = _dedupe_writer_sources(sources)[:30]
+    rendered_citations = [source.citation for source in sources]
+    rendered_signatures = [
+        source.citation for source in sources if source.label not in {"Ustawa o CIT", "Ustawa o PIT", "Ustawa o VAT", "Ustawa o fundacji rodzinnej", "UPO", "UPO Polska–Niemcy", "Przepis"}
+    ]
+    thesis = _scrub_unverified_best_effort_references(
+        thesis, citations=rendered_citations, signatures=rendered_signatures
+    )
+    analysis = _scrub_unverified_best_effort_references(
+        analysis, citations=rendered_citations, signatures=rendered_signatures
+    )
+    missing = list(
+        dict.fromkeys(
+            source
+            for bundle in bundles
+            for source in bundle.missing_sources
+            if source
+        )
+    )
+    risks = [
+        "Odpowiedź została przygotowana w trybie best effort, ponieważ ścisła "
+        "synteza claimów nie zwróciła zatwierdzonej konkluzji; wymaga weryfikacji "
+        "przed podjęciem decyzji podatkowej."
+    ]
+    if missing:
+        risks.append("Niepełne elementy bundla źródłowego: " + ", ".join(missing[:8]) + ".")
+    return WriterOutput(
+        thesis="Odpowiedź wstępna (tryb best effort): " + thesis.strip(),
+        analysis_sections=[
+            WriterAnalysisSection(
+                section_id="best_effort_analysis",
+                title="Wstępna analiza materialna",
+                content=analysis.strip(),
+                claim_ids_used=[],
+            )
+        ],
+        sources=sources,
+        risks_and_gaps=risks,
+        claim_ids_used=[],
+    )
 
 
 def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:

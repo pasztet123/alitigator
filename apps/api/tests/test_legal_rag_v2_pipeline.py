@@ -18,6 +18,7 @@ from app.legal_rag_v2.pipeline import (
     ClaimSet,
     LegalRagV2Config,
     LegalRagV2Pipeline,
+    _best_effort_writer_output,
     _build_evidence_bundles,
     _build_provision_graph,
     _git_commit,
@@ -295,6 +296,97 @@ class FakeAuthorityExtractor:
 
 
 class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_pipeline_serves_best_effort_answer_when_claim_synthesis_fails(self) -> None:
+        class ClaimFailureGateway(FakeGateway):
+            async def generate_structured(self, *, response_model, **kwargs):
+                if response_model is ClaimSet:
+                    raise ModelRequestError("structured synthesis unavailable")
+                if response_model is WriterOutput:
+                    raise AssertionError("strict writer must not run without approved claims")
+                return await super().generate_structured(response_model=response_model, **kwargs)
+
+            async def generate_text(self, **kwargs):
+                return (
+                    "TEZA: Najbardziej prawdopodobny wynik można wskazać wstępnie.\n"
+                    "ANALIZA: Dostępny przepis należy zastosować do opisanych faktów, "
+                    "a nie kończyć analizę komunikatem technicznym.\n"
+                    "DOKUMENTY: Zachowaj dowody potwierdzające stan faktyczny."
+                )
+
+        gateway = ClaimFailureGateway()
+        planner = LegalQueryPlanner(gateway, model="gpt-5.6-terra")
+        retriever = LegalRetriever(FakeBackend(), config=RetrievalConfig(selected_limit_per_issue=4))
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = LegalRagV2Pipeline(
+                gateway=gateway,
+                planner=planner,
+                retriever=retriever,
+                authority_extractor=FakeAuthorityExtractor(),
+                config=LegalRagV2Config(
+                    artifact_root=Path(directory),
+                    allow_legacy_fallback=False,
+                ),
+            )
+            result = await pipeline.run(QUESTION, run_id="best-effort-integration")
+
+        self.assertIn("Odpowiedź wstępna (tryb best effort)", result.final_answer or "")
+        self.assertIn("Najbardziej prawdopodobny wynik", result.final_answer or "")
+        self.assertNotIn("synteza materialnych konkluzji nie została ukończona", result.final_answer or "")
+        self.assertTrue(result.validation[-1].passed)
+
+    async def test_best_effort_lane_returns_material_answer_without_approved_claims(self) -> None:
+        plan = research_plan()
+        provision = ProvisionReference(
+            provision_id="pit_art_22_1",
+            document_id="ustawa-o-podatku-dochodowym-od-osob-fizycznych",
+            citation="art. 22 ust. 1",
+            text="Koszt musi pozostawać w związku z przychodem.",
+            status="active",
+        )
+        bundle = EvidenceBundle(
+            issue_id="pit_sale",
+            controlling_provisions=[provision],
+            coverage_status="complete",
+        )
+
+        class BestEffortGateway(FakeGateway):
+            async def generate_text(self, **kwargs):
+                return (
+                    "TEZA: Wydatek można rozliczyć tylko po wykazaniu związku z działalnością.\n"
+                    "ANALIZA: Sam dokument zakupu nie przesądza wyniku; znaczenie ma cel "
+                    "wydatku i jego gospodarcze wykorzystanie.\n"
+                    "DOKUMENTY: Zachowaj fakturę i dowody związku wydatku z działalnością."
+                )
+
+        gateway = BestEffortGateway()
+        pipeline = LegalRagV2Pipeline(
+            gateway=gateway,
+            planner=LegalQueryPlanner(gateway),
+            retriever=LegalRetriever(FakeBackend()),
+            config=LegalRagV2Config(),
+        )
+        output, validation = await pipeline._write_best_effort_answer(
+            question="Czy wydatek jest kosztem?",
+            plan=plan,
+            bundles=[bundle],
+        )
+
+        self.assertTrue(validation.passed)
+        self.assertIn("best effort", output.thesis)
+        self.assertIn("Sam dokument zakupu", output.analysis_sections[0].content)
+        self.assertEqual("art. 22 ust. 1", output.sources[0].citation)
+
+    async def test_best_effort_scrubs_invented_article(self) -> None:
+        plan = research_plan()
+        output = _best_effort_writer_output(
+            "TEZA: Stosuje się art. 999 ust. 1.\nANALIZA: To wynik wstępny.",
+            plan=plan,
+            bundles=[],
+        )
+
+        self.assertNotIn("art. 999", output.thesis)
+        self.assertIn("właściwy przepis", output.thesis)
+
     async def test_special_rule_is_controlling_and_general_rule_is_dependency_across_chunks(self) -> None:
         shared = {
             "legal_provisions": ["art. 21"],

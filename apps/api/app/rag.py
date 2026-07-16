@@ -2535,6 +2535,22 @@ def query_targets_contractual_penalty_cost(query: str) -> bool:
     )
 
 
+def query_cost_tax_domain(query: str) -> str:
+    normalized = normalize_whitespace(query or "")
+    if re.search(r"\bPIT\b|podat\w*\s+dochodow\w*\s+od\s+os[óo]b\s+fizycz", normalized, re.I):
+        return "PIT"
+    if re.search(r"\bCIT\b|podat\w*\s+dochodow\w*\s+od\s+os[óo]b\s+prawn", normalized, re.I):
+        return "CIT"
+    if re.search(
+        r"jednoosobow\w*\s+działalno\w*|\bJDG\b|osob\w*\s+fizycz\w*|"
+        r"prowadz[ęe]\s+(?:własn\w*\s+)?działalno\w*|moj\w*\s+działalno\w*",
+        normalized,
+        re.I,
+    ):
+        return "PIT"
+    return "CIT"
+
+
 def query_targets_wht_pay_and_refund_services(query: str) -> bool:
     normalized = normalize_whitespace(query or "").lower()
     has_wht_context = bool(re.search(r"\b(wht|podatek u źr[óo]dła|withholding|certyfikat\w* rezydencji|beneficial owner|rzeczywist\w* właściciel\w*)\b", normalized))
@@ -7439,32 +7455,39 @@ def decompose_query_into_legal_axes(query: str) -> list[LegalRetrievalAxis]:
     axes: list[LegalRetrievalAxis] = []
 
     if query_targets_cit_cost_deductibility(query):
-        penalty = query_targets_contractual_penalty_cost(query)
+        tax_domain = query_cost_tax_domain(query)
+        penalty = tax_domain == "CIT" and query_targets_contractual_penalty_cost(query)
         axes.append(
             LegalRetrievalAxis(
                 axis_id=(
                     "cit_contractual_penalty_cost"
                     if penalty
-                    else "cit_cost_deductibility"
+                    else f"{tax_domain.lower()}_cost_deductibility"
                 ),
                 label=(
                     "CIT: kara umowna — koszt podatkowy i ustawowe wyłączenie"
                     if penalty
-                    else "CIT: koszt uzyskania przychodów i ustawowe wyłączenia"
+                    else f"{tax_domain}: koszt uzyskania przychodów i ustawowe wyłączenia"
                 ),
                 query=expand_search_query(
-                    f"{normalized} art. 15 ust. 1 art. 16 ust. 1 "
+                    f"{normalized} "
                     + (
-                        "art. 16 ust. 1 pkt 22 kara umowna opóźnienie dostawy "
+                        "CIT art. 15 ust. 1 art. 16 ust. 1 art. 16 ust. 1 pkt 22 "
+                        "kara umowna opóźnienie dostawy "
                         "wady towarów zwłoka w usunięciu wad należyta staranność"
-                        if penalty
-                        else "koszty poniesione w celu osiągnięcia przychodów wyłączenia"
+                        if penalty else
+                        "PIT art. 22 ust. 1 art. 23 ust. 1 koszty poniesione w celu "
+                        "osiągnięcia przychodów wyłączenia wydatki osobiste"
+                        if tax_domain == "PIT" else
+                        "CIT art. 15 ust. 1 art. 16 ust. 1 koszty poniesione w celu "
+                        "osiągnięcia przychodów wyłączenia"
                     )
                 ),
                 source_types={"statute", "interpretation", "judgment"},
-                tax_domains={"CIT"},
+                tax_domains={tax_domain},
                 preferred_targets=(
-                    (("CIT", "15"), ("CIT", "16"))
+                    (("CIT", "15"), ("CIT", "16")) if tax_domain == "CIT"
+                    else (("PIT", "22"), ("PIT", "23"))
                 ),
             )
         )

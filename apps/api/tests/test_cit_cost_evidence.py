@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.legal_rag_v2.cit_costs import enrich_cit_cost_plan
+from app.legal_rag_v2.cit_costs import cost_tax_domain, enrich_cit_cost_plan
 from app.legal_rag_v2.schemas import (
     Clarification,
     LegalIssue,
@@ -63,6 +63,33 @@ class CitCostEvidenceTests(unittest.TestCase):
         plan = generic_plan().model_copy(update={"user_query": question})
 
         self.assertIs(plan, enrich_cit_cost_plan(plan, question))
+
+    def test_jdg_cost_question_routes_to_pit_in_both_planners(self) -> None:
+        question = (
+            "Prowadzę jednoosobową działalność gospodarczą. Czy okulary "
+            "korekcyjne mogę zaliczyć do kosztów uzyskania przychodów?"
+        )
+        plan = generic_plan().model_copy(update={"user_query": question})
+        enriched = enrich_cit_cost_plan(plan, question)
+
+        self.assertEqual("PIT", cost_tax_domain(question))
+        self.assertEqual("pit_cost_deductibility", enriched.issues[0].issue_id)
+        self.assertEqual(["PIT"], enriched.issues[0].tax_domains)
+        self.assertIn(
+            "PIT art. 22 ust. 1",
+            {query.query for query in enriched.issues[0].query_families},
+        )
+        self.assertTrue(
+            any("okulary" in query.query for query in enriched.issues[0].query_families)
+        )
+        axes = decompose_query_into_legal_axes(question)
+        axis = next(item for item in axes if item.axis_id == "pit_cost_deductibility")
+        self.assertEqual({"PIT"}, axis.tax_domains)
+        self.assertEqual((("PIT", "22"), ("PIT", "23")), axis.preferred_targets)
+        self.assertNotIn("CIT art. 15", axis.query)
+
+    def test_explicit_cit_still_wins_for_company_penalty(self) -> None:
+        self.assertEqual("CIT", cost_tax_domain(QUESTION))
 
 
 if __name__ == "__main__":

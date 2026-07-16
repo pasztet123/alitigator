@@ -1132,7 +1132,7 @@ def _extract_json_payload(value: str) -> str:
 
 
 class StructuredCompatibilityGateway:
-    """Falls back to JSON text only when native structured format is rejected."""
+    """Recover native structured failures with validated JSON on one provider."""
 
     def __init__(self, gateway: ModelGateway) -> None:
         self.gateway = gateway
@@ -1162,6 +1162,12 @@ class StructuredCompatibilityGateway:
         }
         try:
             return await self.gateway.generate_structured(**kwargs)
+        except ModelSchemaError:
+            # Native parsing can fail after the provider produced a response
+            # (for example on a long multi-claim object).  Give the same,
+            # already-authorized provider one controlled JSON-only attempt
+            # before routing to a different provider.
+            pass
         except ModelProviderRequestError as exc:
             if exc.category != "request_format":
                 raise

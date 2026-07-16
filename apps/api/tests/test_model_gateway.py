@@ -509,6 +509,26 @@ class FallbackModelGatewayTests(unittest.IsolatedAsyncioTestCase):
 
 
 class StructuredCompatibilityGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_schema_failure_retries_as_validated_json_on_same_provider(self) -> None:
+        expected = PlannedAnswer(title="json recovery", confidence=0.85)
+        provider = StubGateway(
+            text='{"title":"json recovery","confidence":0.85}',
+            structured_error=ModelSchemaError("native parse failed"),
+        )
+        gateway = StructuredCompatibilityGateway(provider)
+
+        result = await gateway.generate_structured(
+            response_model=PlannedAnswer,
+            input="q",
+            system_prompt="system",
+            max_output_tokens=12000,
+        )
+
+        self.assertEqual(expected, result)
+        self.assertEqual(len(provider.structured_calls), 1)
+        self.assertEqual(len(provider.text_calls), 1)
+        self.assertEqual(provider.text_calls[0]["max_output_tokens"], 12000)
+
     async def test_request_format_rejection_falls_back_to_validated_json_text(self) -> None:
         expected = PlannedAnswer(title="json fallback", confidence=0.9)
         provider = StubGateway(

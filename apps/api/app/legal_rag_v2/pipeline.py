@@ -72,21 +72,28 @@ from .wht import WhtPayAndRefundCalculationEngine, enrich_crossborder_wht_plan
 PIPELINE_VERSION = "legal_rag_v2_1"
 SYNTHESIS_PROMPT_VERSION = "legal_claim_synthesis_v1"
 ANSWER_PROMPT_VERSION = "legal_answer_writer_v1"
-# A single structured call is substantially cheaper in provider token budgets
-# than reserving the same output allowance for several concurrent batches.
-# Larger plans still split, but never fan out by default.
+# Keep ordinary cases in one call, but preflight genuinely large structured
+# payloads before they reach a provider.  The byte cap also bounds the number
+# of claims expected in one structured response; large multi-axis cases are
+# independently synthesized with controlled concurrency.
 SYNTHESIS_MAX_ISSUES_PER_BATCH = 12
-SYNTHESIS_BATCH_CONCURRENCY = 1
+SYNTHESIS_BATCH_CONCURRENCY = 3
+SYNTHESIS_MAX_INPUT_BYTES = 70_000
+SYNTHESIS_MAX_OUTPUT_TOKENS = 12_000
+WRITER_MAX_OUTPUT_TOKENS = 8_000
+
+
+class SynthesisPayloadTooLargeError(ModelGatewayError):
+    pass
 
 
 def _non_splittable_model_failure(error: Optional[ModelGatewayError]) -> bool:
     if error is None:
         return False
     if isinstance(error, ModelFallbackError):
-        return (
-            _non_splittable_model_failure(error.primary_error)
-            or _non_splittable_model_failure(error.fallback_error)
-        )
+        # Splitting is a decision about the primary request.  An unavailable
+        # fallback must not prevent recovery from a primary schema/size error.
+        return _non_splittable_model_failure(error.primary_error)
     if isinstance(error, ModelRateLimitError):
         return True
     if isinstance(error, ModelProviderRequestError):
@@ -948,7 +955,12 @@ class LegalRagV2Pipeline:
                 ]
             compact_payload = _compact_model_payload(payload)
             serialized_payload = json.dumps(compact_payload, ensure_ascii=False)
-            synthesis_payload_sizes.append(len(serialized_payload.encode("utf-8")))
+            payload_bytes = len(serialized_payload.encode("utf-8"))
+            synthesis_payload_sizes.append(payload_bytes)
+            if len(issues) > 1 and payload_bytes > SYNTHESIS_MAX_INPUT_BYTES:
+                raise SynthesisPayloadTooLargeError(
+                    f"structured synthesis payload exceeds {SYNTHESIS_MAX_INPUT_BYTES} bytes"
+                )
             async with semaphore:
                 output = await self.gateway.generate_structured(
                     response_model=ClaimSet,
@@ -956,7 +968,7 @@ class LegalRagV2Pipeline:
                     system_prompt=CLAIM_SYNTHESIS_RULES,
                     model=self.config.synthesis_model,
                     reasoning_effort="medium",
-                    max_output_tokens=6000,
+                    max_output_tokens=SYNTHESIS_MAX_OUTPUT_TOKENS,
                 )
             return [item for item in output.claims if item.issue_id in issue_ids]
 
@@ -979,9 +991,9 @@ class LegalRagV2Pipeline:
             # transport failures must never be split: doing so turns one 429
             # into a burst of additional calls.
             if len(issues) > 1 and not _non_splittable_model_failure(failure):
-                children = []
-                for issue in issues:
-                    children.append(await synthesize_batch([issue]))
+                children = await asyncio.gather(
+                    *(synthesize_batch([issue]) for issue in issues)
+                )
                 return (
                     [claim for claims, _, _ in children for claim in claims],
                     [item for _, errors, _ in children for item in errors],
@@ -1108,7 +1120,7 @@ class LegalRagV2Pipeline:
                 system_prompt=ANSWER_WRITER_RULES,
                 model=self.config.answer_writer_model,
                 reasoning_effort="medium",
-                max_output_tokens=6000,
+                max_output_tokens=WRITER_MAX_OUTPUT_TOKENS,
             )
         except ModelGatewayError as exc:
             output = _deterministic_writer_output(writer_payload)

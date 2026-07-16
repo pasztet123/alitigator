@@ -12,6 +12,7 @@ from app.model_gateway import (
     ModelProviderRequestError,
     ModelRateLimitError,
     ModelRequestError,
+    ModelSchemaError,
 )
 from app.legal_rag_v2.pipeline import (
     ClaimSet,
@@ -518,6 +519,102 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(item.status == "conditional_missing_fact" for item in claims))
         self.assertTrue(any("batch_split_after:ModelRequestError" in item for item in validation.warnings))
 
+    async def test_oversized_synthesis_is_split_before_provider_call(self) -> None:
+        issues = [
+            LegalIssue(
+                issue_id=f"large_{index}",
+                label=f"Duże zagadnienie {index}",
+                legal_mechanism="general",
+            )
+            for index in range(2)
+        ]
+        plan = LegalResearchPlan(
+            user_query="Obszerny kazus podatkowy.",
+            intent=ResearchIntent(mode="mixed_analysis"),
+            issues=issues,
+            clarification=Clarification(),
+            confidence=0.9,
+        )
+        bundles = []
+        for index, issue in enumerate(issues):
+            source_text = "Zweryfikowana treść normy. " * 1500
+            provision = ProvisionReference(
+                provision_id=f"large_provision_{index}",
+                document_id=f"large_document_{index}",
+                citation=f"art. {index + 1}",
+                text=source_text,
+                status="active",
+                source_span=DocumentSourceSpan(
+                    start=0,
+                    end=len(source_text),
+                    document_id=f"large_document_{index}",
+                ),
+            )
+            bundles.append(
+                EvidenceBundle(
+                    issue_id=issue.issue_id,
+                    controlling_provisions=[provision],
+                    coverage_status="complete",
+                )
+            )
+
+        class RecordingGateway(FakeGateway):
+            claim_payload_sizes: list[int] = []
+
+            async def generate_structured(self, *, response_model, input, **kwargs):
+                if response_model is not ClaimSet:
+                    return await super().generate_structured(
+                        response_model=response_model, input=input, **kwargs
+                    )
+                self.claim_payload_sizes.append(len(input.encode("utf-8")))
+                payload = pipeline_module.json.loads(input)
+                issue_id = payload["plan"]["issues"][0]["issue_id"]
+                bundle = next(item for item in bundles if item.issue_id == issue_id)
+                provision = bundle.controlling_provisions[0]
+                return ClaimSet(
+                    claims=[
+                        LegalClaim(
+                            claim_id=f"claim_{issue_id}",
+                            issue_id=issue_id,
+                            claim_type="normative_rule",
+                            text="Zweryfikowana norma dla pojedynczej osi.",
+                            result="Oś została przeanalizowana.",
+                            status="approved",
+                            controlling_provision_ids=[provision.provision_id],
+                            source_spans=[provision.source_span],
+                            confidence=0.9,
+                        )
+                    ]
+                )
+
+        gateway = RecordingGateway()
+        pipeline = LegalRagV2Pipeline(
+            gateway=gateway,
+            planner=LegalQueryPlanner(gateway),
+            retriever=LegalRetriever(FakeBackend()),
+            config=LegalRagV2Config(),
+        )
+
+        claims, validation = await pipeline._synthesize_and_validate_claims(
+            plan.user_query,
+            plan,
+            bundles,
+            [],
+        )
+
+        self.assertTrue(validation.passed)
+        self.assertEqual(2, len(gateway.claim_payload_sizes))
+        self.assertTrue(
+            all(
+                size <= pipeline_module.SYNTHESIS_MAX_INPUT_BYTES
+                for size in gateway.claim_payload_sizes
+            )
+        )
+        self.assertEqual({item.issue_id for item in issues}, {item.issue_id for item in claims})
+        self.assertTrue(
+            any("batch_split_after:SynthesisPayloadTooLargeError" in item for item in validation.warnings)
+        )
+
     async def test_rate_limit_failure_does_not_fan_out_into_per_issue_calls(self) -> None:
         issues = [
             LegalIssue(
@@ -573,6 +670,103 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(claims), len(issues))
         self.assertEqual(len(validation.errors), len(issues))
         self.assertFalse(any("batch_split_after" in item for item in validation.warnings))
+
+    async def test_primary_schema_failure_splits_even_when_fallback_billing_fails(self) -> None:
+        issues = [
+            LegalIssue(
+                issue_id=f"schema_{index}",
+                label=f"Zagadnienie {index}",
+                legal_mechanism="general",
+            )
+            for index in range(3)
+        ]
+        plan = LegalResearchPlan(
+            user_query="Wielowątkowy kazus podatkowy.",
+            intent=ResearchIntent(mode="mixed_analysis"),
+            issues=issues,
+            clarification=Clarification(),
+            confidence=0.9,
+        )
+        bundles = []
+        for index, issue in enumerate(issues):
+            provision = ProvisionReference(
+                provision_id=f"schema_provision_{index}",
+                document_id=f"schema_document_{index}",
+                citation=f"art. {index + 1}",
+                status="active",
+                source_span=DocumentSourceSpan(
+                    start=0,
+                    end=10,
+                    document_id=f"schema_document_{index}",
+                ),
+            )
+            bundles.append(
+                EvidenceBundle(
+                    issue_id=issue.issue_id,
+                    controlling_provisions=[provision],
+                    coverage_status="complete",
+                )
+            )
+
+        class SchemaRecoveringGateway(FakeGateway):
+            claim_calls = 0
+
+            async def generate_structured(self, *, response_model, input, **kwargs):
+                if response_model is not ClaimSet:
+                    return await super().generate_structured(
+                        response_model=response_model, input=input, **kwargs
+                    )
+                self.claim_calls += 1
+                payload = pipeline_module.json.loads(input)
+                batch_issues = payload["plan"]["issues"]
+                if len(batch_issues) > 1:
+                    raise ModelFallbackError(
+                        ModelSchemaError("OpenAI returned invalid structured output"),
+                        ModelProviderRequestError(
+                            "Anthropic",
+                            status_code=400,
+                            category="billing",
+                            error_code="invalid_request_error",
+                        ),
+                    )
+                issue_id = batch_issues[0]["issue_id"]
+                bundle = next(item for item in bundles if item.issue_id == issue_id)
+                provision = bundle.controlling_provisions[0]
+                return ClaimSet(
+                    claims=[
+                        LegalClaim(
+                            claim_id=f"claim_{issue_id}",
+                            issue_id=issue_id,
+                            claim_type="normative_rule",
+                            text="Zweryfikowana norma ma zastosowanie do wskazanej osi.",
+                            result="Oś została przeanalizowana niezależnie.",
+                            status="approved",
+                            controlling_provision_ids=[provision.provision_id],
+                            source_spans=[provision.source_span],
+                            confidence=0.9,
+                        )
+                    ]
+                )
+
+        gateway = SchemaRecoveringGateway()
+        pipeline = LegalRagV2Pipeline(
+            gateway=gateway,
+            planner=LegalQueryPlanner(gateway),
+            retriever=LegalRetriever(FakeBackend()),
+            config=LegalRagV2Config(),
+        )
+
+        claims, validation = await pipeline._synthesize_and_validate_claims(
+            plan.user_query,
+            plan,
+            bundles,
+            [],
+        )
+
+        self.assertTrue(validation.passed)
+        self.assertEqual(4, gateway.claim_calls)
+        self.assertEqual({item.issue_id for item in issues}, {item.issue_id for item in claims})
+        self.assertTrue(any("batch_split_after:ModelFallbackError" in item for item in validation.warnings))
 
     async def test_family_synthesis_repairs_missing_verified_claim_coverage(self) -> None:
         question = "Fundacja rodzinna wypłaca świadczenie beneficjentowi."

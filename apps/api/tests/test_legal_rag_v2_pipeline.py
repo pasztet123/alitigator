@@ -742,7 +742,108 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("blocked_invalid_provision", validated[0].status)
         self.assertTrue(any("unbound_textual_provision_reference" in item for item in errors))
 
-    def test_claim_validator_requires_both_ends_of_provision_range(self) -> None:
+    def test_claim_validator_auto_binds_unique_exact_retrieved_point(self) -> None:
+        article = ProvisionReference(
+            provision_id="cit-art-11n",
+            document_id="cit-art-11n-document",
+            citation="art. 11n",
+            status="active",
+            source_span=DocumentSourceSpan(
+                start=0,
+                end=10,
+                document_id="cit-art-11n-document",
+            ),
+        )
+        point = ProvisionReference(
+            provision_id="cit-art-11n-point-1",
+            document_id="cit-art-11n-document",
+            citation="art. 11n pkt 1",
+            text="Warunki zwolnienia dokumentacyjnego określone w punkcie 1.",
+            status="active",
+            source_span=DocumentSourceSpan(
+                start=11,
+                end=68,
+                document_id="cit-art-11n-document",
+            ),
+        )
+        claim = LegalClaim(
+            claim_id="exact-child-in-bundle",
+            issue_id="pit_sale",
+            claim_type="normative_rule",
+            text="Zwolnienie dokumentacyjne wynika z art. 11n pkt 1.",
+            result="Należy zbadać wszystkie warunki punktu pierwszego.",
+            status="approved",
+            controlling_provision_ids=[article.provision_id],
+            source_spans=[article.source_span],
+            confidence=0.9,
+        )
+        bundle = EvidenceBundle(
+            issue_id="pit_sale",
+            controlling_provisions=[article, point],
+            coverage_status="complete",
+        )
+
+        validated, errors, warnings = pipeline_module.validate_claims(
+            [claim], plan=research_plan(), bundles=[bundle], calculations=[]
+        )
+
+        self.assertEqual([], errors)
+        self.assertEqual("approved", validated[0].status)
+        self.assertEqual(
+            [article.provision_id, point.provision_id],
+            validated[0].controlling_provision_ids,
+        )
+        self.assertIn(point.source_span, validated[0].source_spans)
+        self.assertTrue(any("auto_bound_exact_provision:art. 11n pkt 1" in item for item in warnings))
+
+    def test_claim_validator_does_not_auto_bind_ambiguous_exact_reference(self) -> None:
+        bound_article = ProvisionReference(
+            provision_id="first-act-art-6",
+            document_id="first-act",
+            citation="art. 6",
+            status="active",
+            source_span=DocumentSourceSpan(start=2, end=3, document_id="first-act"),
+        )
+        first = ProvisionReference(
+            provision_id="first-act-art-5",
+            document_id="first-act",
+            citation="art. 5 ust. 1",
+            status="active",
+            source_span=DocumentSourceSpan(start=0, end=1, document_id="first-act"),
+        )
+        second = ProvisionReference(
+            provision_id="second-act-art-5",
+            document_id="second-act",
+            citation="art. 5 ust. 1",
+            status="active",
+            source_span=DocumentSourceSpan(start=0, end=1, document_id="second-act"),
+        )
+        claim = LegalClaim(
+            claim_id="ambiguous-exact-reference",
+            issue_id="pit_sale",
+            claim_type="normative_rule",
+            text="Reguła wynika z art. 5 ust. 1.",
+            result="Należy zastosować wskazaną regułę.",
+            status="approved",
+            controlling_provision_ids=[bound_article.provision_id],
+            source_spans=[bound_article.source_span],
+            confidence=0.8,
+        )
+        bundle = EvidenceBundle(
+            issue_id="pit_sale",
+            controlling_provisions=[bound_article, first, second],
+            coverage_status="complete",
+        )
+
+        validated, errors, warnings = pipeline_module.validate_claims(
+            [claim], plan=research_plan(), bundles=[bundle], calculations=[]
+        )
+
+        self.assertEqual("blocked_invalid_provision", validated[0].status)
+        self.assertTrue(any("unbound_textual_provision_reference" in item for item in errors))
+        self.assertFalse(any("auto_bound_exact_provision" in item for item in warnings))
+
+    def test_claim_validator_auto_binds_both_ends_of_retrieved_provision_range(self) -> None:
         article_12_5 = ProvisionReference(
             provision_id="cit-art-12-5",
             document_id="pl-ustawa-o-podatku-dochodowym-od-osob-prawnych-art-12",
@@ -774,11 +875,16 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
             confidence=0.9,
         )
 
-        blocked, errors, _ = pipeline_module.validate_claims(
+        approved, errors, warnings = pipeline_module.validate_claims(
             [claim], plan=research_plan(), bundles=[bundle], calculations=[]
         )
-        self.assertEqual("blocked_invalid_provision", blocked[0].status)
-        self.assertTrue(any("unbound_textual_provision_reference" in item for item in errors))
+        self.assertEqual([], errors)
+        self.assertEqual("approved", approved[0].status)
+        self.assertEqual(
+            [article_12_5.provision_id, article_12_6a.provision_id],
+            approved[0].controlling_provision_ids,
+        )
+        self.assertTrue(any("auto_bound_exact_provision:art. 12 ust. 6a" in item for item in warnings))
 
         complete_claim = claim.model_copy(
             update={

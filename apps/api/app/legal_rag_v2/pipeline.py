@@ -1886,6 +1886,14 @@ def validate_claims(
     for claim in claims:
         claim_errors: list[str] = []
         bundle = bundle_by_issue.get(claim.issue_id)
+        claim, auto_bound = _auto_bind_exact_claim_references(
+            claim,
+            provision_references_by_issue.get(claim.issue_id, {}),
+        )
+        warnings.extend(
+            f"{claim.claim_id}:auto_bound_exact_provision:{citation}"
+            for citation in auto_bound
+        )
         if claim.claim_id in seen:
             claim_errors.append("duplicate_claim_id")
         seen.add(claim.claim_id)
@@ -2540,6 +2548,83 @@ def _unbound_claim_provision_references(
         ):
             result.append(reference)
     return result
+
+
+def _expanded_rendered_provision_references(text: str) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for match in _RENDERED_PROVISION_RE.finditer(text):
+        reference = _normalize_citation(match.group(0)).rstrip(".,;:")
+        range_match = _RANGED_SECTION_RE.fullmatch(reference)
+        values = (
+            [
+                f"{range_match.group('prefix')}{range_match.group('start')}",
+                f"{range_match.group('prefix')}{range_match.group('end')}",
+            ]
+            if range_match
+            else [reference]
+        )
+        for value in values:
+            normalized = _normalize_citation(value).rstrip(".,;:")
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                result.append(normalized)
+    return result
+
+
+def _auto_bind_exact_claim_references(
+    claim: LegalClaim,
+    available: dict[str, ProvisionReference],
+) -> tuple[LegalClaim, list[str]]:
+    """Attach an exact retrieved unit when the model bound only its ancestor.
+
+    The repair is deliberately conservative.  It never searches another issue
+    or creates a citation: an exact normalized citation must occur uniquely in
+    the current EvidenceBundle.  A single finer unit is accepted only when no
+    exact unit exists.  Ambiguous article numbers remain invalid.
+    """
+
+    bound_ids = list(claim.controlling_provision_ids)
+    bound = [available[item] for item in bound_ids if item in available]
+    source_spans = list(claim.source_spans)
+    repaired: list[str] = []
+    for reference in _expanded_rendered_provision_references(
+        f"{claim.text} {claim.result}"
+    ):
+        if any(_citations_are_compatible(reference, item.citation) for item in bound):
+            continue
+        compatible = [
+            item
+            for item in available.values()
+            if _citations_are_compatible(reference, item.citation)
+        ]
+        exact = [
+            item
+            for item in compatible
+            if _normalize_citation(item.citation).rstrip(".,;:") == reference
+        ]
+        candidates = exact if exact else compatible
+        unique = {item.provision_id: item for item in candidates}
+        if len(unique) != 1:
+            continue
+        provision = next(iter(unique.values()))
+        if provision.provision_id not in bound_ids:
+            bound_ids.append(provision.provision_id)
+            bound.append(provision)
+        if provision.source_span is not None and provision.source_span not in source_spans:
+            source_spans.append(provision.source_span)
+        repaired.append(reference)
+    if not repaired:
+        return claim, []
+    return (
+        claim.model_copy(
+            update={
+                "controlling_provision_ids": bound_ids,
+                "source_spans": source_spans,
+            }
+        ),
+        repaired,
+    )
 
 
 def render_structured_answer(output: WriterOutput) -> str:

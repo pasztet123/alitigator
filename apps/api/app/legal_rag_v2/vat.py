@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 
 from .family_foundation import _dedupe, _with_targets
-from .schemas import LegalIssue, LegalResearchPlan, QueryFamily
+from .schemas import LegalIssue, LegalResearchPlan, MissingFact, QueryFamily
 
 
 VAT_INPUT_DEDUCTION_TIMING_TARGETS = (
@@ -22,9 +22,24 @@ VAT_INPUT_DEDUCTION_TIMING_TARGETS = (
     ("VAT", "art. 86 ust. 11"),
     ("VAT", "art. 86 ust. 13"),
     ("VAT", "art. 19a ust. 1"),
+)
+
+VAT_2026_INVOICE_CHANNEL_TARGETS = (
+    ("VAT", "art. 106ga ust. 1"),
+    ("VAT", "art. 106ga ust. 2 pkt 1"),
+    ("VAT", "art. 106ga ust. 2 pkt 2"),
+    ("VAT", "art. 106ga ust. 2 pkt 3"),
+    ("VAT", "art. 106ga ust. 2 pkt 4"),
+    ("VAT", "art. 106ga ust. 2 pkt 5"),
+    ("VAT", "art. 106ga ust. 2 pkt 6"),
+    ("VAT", "art. 145m ust. 1"),
+    ("VAT", "art. 145m ust. 2"),
     ("VAT", "art. 106na ust. 3"),
     ("VAT", "art. 106na ust. 4"),
     ("VAT", "art. 106nda ust. 11"),
+    ("VAT", "art. 106nf ust. 10"),
+    ("VAT", "art. 106nh ust. 4"),
+    ("VAT", "art. 106ng"),
 )
 
 
@@ -70,6 +85,29 @@ def _is_input_vat_timing_issue(issue: LegalIssue) -> bool:
     return question_targets_input_vat_deduction_timing(text) or bool(
         re.search(r"input_vat_deduction|vat_deduction_timing", text, re.I)
     )
+
+
+def _needs_2026_ksef_lane(plan: LegalResearchPlan, question: str) -> bool:
+    if re.search(r"\b202[0-5]\b", question):
+        return False
+    if re.search(r"\b20(?:2[6-9]|[3-9]\d)\b", question):
+        return True
+    return bool(plan.target_date and plan.target_date >= "2026-02-01")
+
+
+def _with_missing_fact(
+    missing_facts: list[MissingFact],
+    *,
+    fact_id: str,
+    question: str,
+    materiality: str = "outcome_determinative",
+) -> list[MissingFact]:
+    if any(item.fact_id == fact_id for item in missing_facts):
+        return missing_facts
+    return [
+        *missing_facts,
+        MissingFact(fact_id=fact_id, question=question, materiality=materiality),
+    ]
 
 
 def enrich_input_vat_deduction_plan(
@@ -123,11 +161,83 @@ def enrich_input_vat_deduction_plan(
         )
         issues.append(_with_targets(issue, VAT_INPUT_DEDUCTION_TIMING_TARGETS))
 
-    return plan.model_copy(update={"issues": issues})
+    missing_facts = list(plan.missing_facts)
+    missing_facts = _with_missing_fact(
+        missing_facts,
+        fact_id="vat_cash_method_status",
+        question=(
+            "Czy nabywca rozlicza VAT metodą kasową albo faktura dokumentuje "
+            "transakcję objętą metodą kasową?"
+        ),
+        materiality="retrieval_relevant",
+    )
+
+    if _needs_2026_ksef_lane(plan, question):
+        ksef_issue_id = "vat_invoice_channel_2026"
+        if not any(issue.issue_id == ksef_issue_id for issue in issues):
+            ksef_issue = LegalIssue(
+                issue_id=ksef_issue_id,
+                label="VAT/KSeF 2026: kanał wystawienia i data otrzymania faktury",
+                tax_domains=["VAT"],
+                legal_mechanism="invoice_delivery_channel_classification",
+                possible_provision_concepts=_dedupe(
+                    [
+                        f"{domain} {citation}"
+                        for domain, citation in VAT_2026_INVOICE_CHANNEL_TARGETS
+                    ]
+                ),
+                possible_legal_concepts=[
+                    "ksef_online",
+                    "ksef_offline24",
+                    "ksef_unavailability",
+                    "ksef_failure",
+                    "legally_outside_ksef",
+                    "invoice_channel_unknown",
+                ],
+                requested_source_types=["statute", "guidance", "interpretation", "judgment"],
+                query_families=[
+                    QueryFamily(
+                        family="fact_contrast",
+                        query=(
+                            "KSeF 2026 data otrzymania faktury online offline24 "
+                            "niedostępność awaria legalnie poza KSeF limit 10 000 zł. "
+                            + question.strip()
+                        ),
+                        lane="both",
+                        origin="fallback",
+                    )
+                ],
+                priority="high",
+            )
+            issues.insert(0, _with_targets(ksef_issue, VAT_2026_INVOICE_CHANNEL_TARGETS))
+        missing_facts = _with_missing_fact(
+            missing_facts,
+            fact_id="invoice_delivery_channel",
+            question=(
+                "Czy faktura była wystawiona online w KSeF, w trybie offline24, "
+                "podczas niedostępności/awarii, czy legalnie poza KSeF?"
+            ),
+        )
+        missing_facts = _with_missing_fact(
+            missing_facts,
+            fact_id="ksef_number_assignment_date",
+            question="Kiedy KSeF przydzielił fakturze numer identyfikujący?",
+        )
+        missing_facts = _with_missing_fact(
+            missing_facts,
+            fact_id="seller_ksef_exception_status",
+            question=(
+                "Czy wystawca lub transakcja korzystali z ustawowego wyłączenia "
+                "albo przejściowego limitu 10 000 zł brutto miesięcznie?"
+            ),
+        )
+
+    return plan.model_copy(update={"issues": issues, "missing_facts": missing_facts})
 
 
 __all__ = [
     "VAT_INPUT_DEDUCTION_TIMING_TARGETS",
+    "VAT_2026_INVOICE_CHANNEL_TARGETS",
     "enrich_input_vat_deduction_plan",
     "question_targets_input_vat_deduction_timing",
 ]

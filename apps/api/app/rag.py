@@ -2573,6 +2573,13 @@ def query_targets_input_vat_deduction_timing(query: str) -> bool:
     return has_vat_deduction and has_timing
 
 
+def query_needs_2026_ksef_lane(query: str) -> bool:
+    normalized = normalize_whitespace(query or "")
+    if re.search(r"\b202[0-5]\b", normalized):
+        return False
+    return bool(re.search(r"\b20(?:2[6-9]|[3-9]\d)\b", normalized))
+
+
 def query_targets_wht_pay_and_refund_services(query: str) -> bool:
     normalized = normalize_whitespace(query or "").lower()
     has_wht_context = bool(re.search(r"\b(wht|podatek u źr[óo]dła|withholding|certyfikat\w* rezydencji|beneficial owner|rzeczywist\w* właściciel\w*)\b", normalized))
@@ -7485,19 +7492,41 @@ def decompose_query_into_legal_axes(query: str) -> list[LegalRetrievalAxis]:
                     f"{normalized} VAT art. 86 ust. 1 art. 86 ust. 2 pkt 1 "
                     "art. 86 ust. 10 art. 86 ust. 10b pkt 1 art. 86 ust. 10e "
                     "art. 86 ust. 11 art. 86 ust. 13 art. 19a ust. 1 "
-                    "art. 106na ust. 3 art. 106na ust. 4 art. 106nda ust. 11 "
-                    "otrzymanie faktury data zapłaty kolejne okresy KSeF"
+                    "otrzymanie faktury data zapłaty kolejne okresy"
                 ),
                 source_types={"statute", "interpretation", "judgment"},
                 tax_domains={"VAT"},
                 preferred_targets=(
                     ("VAT", "86"),
                     ("VAT", "19a"),
-                    ("VAT", "106na"),
-                    ("VAT", "106nda"),
                 ),
             )
         )
+        if query_needs_2026_ksef_lane(query):
+            axes.append(
+                LegalRetrievalAxis(
+                    axis_id="vat_invoice_channel_2026",
+                    label="VAT/KSeF 2026: kanał wystawienia i data otrzymania faktury",
+                    query=expand_search_query(
+                        f"{normalized} VAT art. 106ga ust. 1 art. 106ga ust. 2 "
+                        "art. 145m ust. 1 art. 145m ust. 2 art. 106na ust. 3 "
+                        "art. 106na ust. 4 art. 106nda ust. 11 art. 106nf ust. 10 "
+                        "art. 106nh ust. 4 art. 106ng KSeF online offline24 "
+                        "niedostępność awaria legalnie poza KSeF limit 10 000 zł"
+                    ),
+                    source_types={"statute", "guidance", "interpretation", "judgment"},
+                    tax_domains={"VAT"},
+                    preferred_targets=(
+                        ("VAT", "106ga"),
+                        ("VAT", "145m"),
+                        ("VAT", "106na"),
+                        ("VAT", "106nda"),
+                        ("VAT", "106nf"),
+                        ("VAT", "106nh"),
+                        ("VAT", "106ng"),
+                    ),
+                )
+            )
 
     if query_targets_cit_cost_deductibility(query):
         tax_domain = query_cost_tax_domain(query)

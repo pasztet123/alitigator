@@ -17,9 +17,9 @@ from app.rag import decompose_query_into_legal_axes
 
 
 QUESTION = """
-Prowadzę działalność gospodarczą i jestem czynnym podatnikiem VAT. Laptop
-dostarczono 30 czerwca, fakturę otrzymałem e-mailem 4 lipca, a zapłaciłem 10
-lipca. Czy VAT naliczony mogę odliczyć za czerwiec czy za lipiec i w jakich
+Prowadzę działalność gospodarczą i jestem czynnym podatnikiem VAT. W 2026 r.
+laptop dostarczono 30 czerwca, fakturę otrzymałem e-mailem 4 lipca, a zapłaciłem
+10 lipca. Czy VAT naliczony mogę odliczyć za czerwiec czy za lipiec i w jakich
 kolejnych okresach mogę dokonać odliczenia?
 """
 
@@ -46,8 +46,10 @@ class VatInputDeductionEvidenceTests(unittest.TestCase):
         self.assertTrue(question_targets_input_vat_deduction_timing(QUESTION))
         enriched = enrich_input_vat_deduction_plan(generic_vat_plan(), QUESTION)
 
-        self.assertEqual(1, len(enriched.issues))
-        issue = enriched.issues[0]
+        self.assertEqual(2, len(enriched.issues))
+        issue = next(
+            issue for issue in enriched.issues if issue.issue_id == "vat_input_deduction_timing"
+        )
         self.assertEqual("vat_input_deduction_timing", issue.issue_id)
         self.assertEqual(["VAT"], issue.tax_domains)
         queries = {query.query for query in issue.query_families}
@@ -57,16 +59,37 @@ class VatInputDeductionEvidenceTests(unittest.TestCase):
             "VAT art. 86 ust. 11",
             "VAT art. 86 ust. 13",
             "VAT art. 19a ust. 1",
-            "VAT art. 106na ust. 3",
-            "VAT art. 106nda ust. 11",
         ):
             self.assertIn(citation, queries)
-        self.assertTrue(any("Laptop" in query for query in queries))
+        self.assertTrue(any("laptop" in query.casefold() for query in queries))
+        ksef_issue = next(
+            issue for issue in enriched.issues if issue.issue_id == "vat_invoice_channel_2026"
+        )
+        ksef_queries = {query.query for query in ksef_issue.query_families}
+        self.assertIn("VAT art. 106ga ust. 1", ksef_queries)
+        self.assertIn("VAT art. 145m ust. 1", ksef_queries)
+        self.assertIn("VAT art. 106na ust. 3", ksef_queries)
+        self.assertIn("VAT art. 106nda ust. 11", ksef_queries)
+        self.assertIn("VAT art. 106nf ust. 10", ksef_queries)
+        self.assertIn("VAT art. 106nh ust. 4", ksef_queries)
+        self.assertEqual(
+            {
+                "invoice_delivery_channel",
+                "ksef_number_assignment_date",
+                "seller_ksef_exception_status",
+                "vat_cash_method_status",
+            },
+            {fact.fact_id for fact in enriched.missing_facts},
+        )
 
     def test_required_bundle_covers_receipt_payment_and_later_periods(self) -> None:
-        issue = enrich_input_vat_deduction_plan(
-            generic_vat_plan(), QUESTION
-        ).issues[0]
+        issue = next(
+            issue
+            for issue in enrich_input_vat_deduction_plan(
+                generic_vat_plan(), QUESTION
+            ).issues
+            if issue.issue_id == "vat_input_deduction_timing"
+        )
         requirement_ids = {
             requirement_id
             for requirement_id, _citation_pattern, _act_pattern
@@ -81,8 +104,6 @@ class VatInputDeductionEvidenceTests(unittest.TestCase):
                 "vat_art_86_11",
                 "vat_art_86_13",
                 "vat_art_19a_1",
-                "vat_art_106na_3",
-                "vat_art_106nda_11",
             }.issubset(requirement_ids)
         )
         self.assertNotIn("unresolved_generic_issue", requirement_ids)
@@ -99,12 +120,44 @@ class VatInputDeductionEvidenceTests(unittest.TestCase):
             (
                 ("VAT", "86"),
                 ("VAT", "19a"),
-                ("VAT", "106na"),
-                ("VAT", "106nda"),
             ),
             axis.preferred_targets,
         )
         self.assertIn("art. 86 ust. 10b pkt 1", axis.query)
+        ksef_axis = next(
+            axis
+            for axis in decompose_query_into_legal_axes(QUESTION)
+            if axis.axis_id == "vat_invoice_channel_2026"
+        )
+        self.assertIn(("VAT", "106ga"), ksef_axis.preferred_targets)
+        self.assertIn(("VAT", "145m"), ksef_axis.preferred_targets)
+        self.assertIn("art. 106nf ust. 10", ksef_axis.query)
+
+    def test_ksef_channel_bundle_covers_online_offline_and_exceptions(self) -> None:
+        enriched = enrich_input_vat_deduction_plan(generic_vat_plan(), QUESTION)
+        issue = next(
+            issue for issue in enriched.issues if issue.issue_id == "vat_invoice_channel_2026"
+        )
+        requirement_ids = {
+            requirement_id
+            for requirement_id, _citation_pattern, _act_pattern
+            in _required_issue_dependency_patterns(issue)
+        }
+
+        self.assertTrue(
+            {
+                "vat_art_106ga_1",
+                "vat_art_106ga_2_1",
+                "vat_art_106ga_2_6",
+                "vat_art_145m_1",
+                "vat_art_145m_2",
+                "vat_art_106na_3",
+                "vat_art_106nda_11",
+                "vat_art_106nf_10",
+                "vat_art_106nh_4",
+                "vat_art_106ng",
+            }.issubset(requirement_ids)
+        )
 
     def test_non_timing_vat_question_is_not_overwritten(self) -> None:
         question = "Czy sprzedaż laptopa podlega VAT według stawki 23%?"

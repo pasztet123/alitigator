@@ -1397,7 +1397,8 @@ def _claim_coverage_requirements(
                 )
             )
         )
-        if not family_kind and not transfer_pricing:
+        required_vat_timing = issue.issue_id == "vat_input_deduction_timing"
+        if not family_kind and not transfer_pricing and not required_vat_timing:
             continue
         bundle = bundle_by_issue.get(issue.issue_id)
         if bundle is None:
@@ -1798,9 +1799,24 @@ def _required_issue_dependency_patterns(
             ("vat_art_86_11", r"art\.\s*86\s+ust\.\s*11(?:\s|$)", vat_act),
             ("vat_art_86_13", r"art\.\s*86\s+ust\.\s*13(?:\s|$)", vat_act),
             ("vat_art_19a_1", r"art\.\s*19a\s+ust\.\s*1(?:\s|$)", vat_act),
+        )
+    if issue_id == "vat_invoice_channel_2026" or "invoice_delivery_channel_classification" in issue_concepts:
+        return (
+            ("vat_art_106ga_1", r"art\.\s*106ga\s+ust\.\s*1(?:\s|$)", vat_act),
+            ("vat_art_106ga_2_1", r"art\.\s*106ga\s+ust\.\s*2\s+pkt\s*1", vat_act),
+            ("vat_art_106ga_2_2", r"art\.\s*106ga\s+ust\.\s*2\s+pkt\s*2", vat_act),
+            ("vat_art_106ga_2_3", r"art\.\s*106ga\s+ust\.\s*2\s+pkt\s*3", vat_act),
+            ("vat_art_106ga_2_4", r"art\.\s*106ga\s+ust\.\s*2\s+pkt\s*4", vat_act),
+            ("vat_art_106ga_2_5", r"art\.\s*106ga\s+ust\.\s*2\s+pkt\s*5", vat_act),
+            ("vat_art_106ga_2_6", r"art\.\s*106ga\s+ust\.\s*2\s+pkt\s*6", vat_act),
+            ("vat_art_145m_1", r"art\.\s*145m\s+ust\.\s*1(?:\s|$)", vat_act),
+            ("vat_art_145m_2", r"art\.\s*145m\s+ust\.\s*2(?:\s|$)", vat_act),
             ("vat_art_106na_3", r"art\.\s*106na\s+ust\.\s*3(?:\s|$)", vat_act),
             ("vat_art_106na_4", r"art\.\s*106na\s+ust\.\s*4(?:\s|$)", vat_act),
             ("vat_art_106nda_11", r"art\.\s*106nda\s+ust\.\s*11(?:\s|$)", vat_act),
+            ("vat_art_106nf_10", r"art\.\s*106nf\s+ust\.\s*10(?:\s|$)", vat_act),
+            ("vat_art_106nh_4", r"art\.\s*106nh\s+ust\.\s*4(?:\s|$)", vat_act),
+            ("vat_art_106ng", r"art\.\s*106ng(?:\s|$)", vat_act),
         )
     if issue_id == "wht_pay_and_refund_procedure":
         return (
@@ -2715,6 +2731,14 @@ def _best_effort_model_evidence(
         ],
         "primary_law": provisions,
         "authorities": authorities,
+        "missing_facts": [
+            {
+                "fact_id": fact.fact_id,
+                "question": fact.question,
+                "materiality": fact.materiality,
+            }
+            for fact in plan.missing_facts
+        ],
     }
 
 

@@ -121,6 +121,13 @@ the complete text of every bound provision: if it expressly states a statutory
 rate, threshold or deadline material to the issue, report that rule and never
 claim that the supplied provision omits it. A statutory percentage quoted
 directly from primary law is a legal rule, not a newly performed calculation.
+The payload may contain ``claim_coverage_requirements`` and a
+``completion_request``. Produce separate substantive claims for every listed
+requirement, using one of its exact provision IDs. A definition alone does not
+complete an issue that also lists a tax charge, exemption, rate, threshold or
+filing rule. Never describe primary law as absent when the current issue bundle
+contains it, and never make a global evidence-absence statement based only on
+the scope of one issue.
 """
 
 ANSWER_WRITER_RULES = GLOBAL_LEGAL_SYSTEM_RULES + """
@@ -128,7 +135,9 @@ ANSWER_WRITER_RULES = GLOBAL_LEGAL_SYSTEM_RULES + """
 Write a structured answer plan result, not free-form Markdown. You may
 paraphrase only the supplied validated claims. Do not change claim status,
 perform a calculation, create a citation or infer a missing fact. Put material
-uncertainty in risks_and_gaps and list every claim ID you actually use.
+uncertainty in risks_and_gaps and list every claim ID you actually use. The
+thesis must be a short, coherent legal conclusion, not a concatenation of claim
+labels, sentence fragments or repeated definitions.
 """
 
 
@@ -901,7 +910,12 @@ class LegalRagV2Pipeline:
                 if not item.dependencies or bool(issue_ids.intersection(item.dependencies))
             ]
 
-        async def call_once(issues: list[Any]) -> list[LegalClaim]:
+        async def call_once(
+            issues: list[Any],
+            *,
+            completion_request: Optional[dict[str, list[dict[str, Any]]]] = None,
+            existing_claims: Optional[list[LegalClaim]] = None,
+        ) -> list[LegalClaim]:
             issue_ids = {item.issue_id for item in issues}
             scoped_plan = subplan(issues)
             scoped_bundles = [
@@ -918,7 +932,19 @@ class LegalRagV2Pipeline:
                     item.model_dump(mode="json")
                     for item in batch_calculations(issue_ids)
                 ],
+                "claim_coverage_requirements": {
+                    issue_id: requirements
+                    for issue_id, requirements in _claim_coverage_requirements(
+                        scoped_plan,
+                        scoped_bundles,
+                    ).items()
+                },
             }
+            if completion_request:
+                payload["completion_request"] = completion_request
+                payload["existing_validated_claims"] = [
+                    item.model_dump(mode="json") for item in existing_claims or []
+                ]
             async with semaphore:
                 output = await self.gateway.generate_structured(
                     response_model=ClaimSet,
@@ -996,6 +1022,52 @@ class LegalRagV2Pipeline:
             *synthesis_warnings,
             *warnings,
         ]
+        missing_claim_coverage = _claim_coverage_requirements(plan, bundles, claims)
+        if missing_claim_coverage and not synthesis_errors:
+            repair_issues = [
+                issue for issue in plan.issues if issue.issue_id in missing_claim_coverage
+            ]
+            try:
+                repair_claims = await call_once(
+                    repair_issues,
+                    completion_request=missing_claim_coverage,
+                    existing_claims=[
+                        claim
+                        for claim in claims
+                        if claim.issue_id in missing_claim_coverage
+                        and claim.status in {"approved", "conditional_missing_fact"}
+                    ],
+                )
+            except ModelGatewayError as exc:
+                warnings.append(f"claim_coverage_repair_failed:{type(exc).__name__}")
+            else:
+                retained = [
+                    claim
+                    for claim in claims
+                    if claim.issue_id not in missing_claim_coverage
+                    or claim.status in {"approved", "conditional_missing_fact"}
+                ]
+                merged_by_id = {claim.claim_id: claim for claim in retained}
+                merged_by_id.update({claim.claim_id: claim for claim in repair_claims})
+                repaired, repair_errors, repair_warnings = validate_claims(
+                    list(merged_by_id.values()),
+                    plan=plan,
+                    bundles=bundles,
+                    calculations=calculations,
+                )
+                repaired_gaps = _claim_coverage_requirements(plan, bundles, repaired)
+                if sum(map(len, repaired_gaps.values())) < sum(
+                    map(len, missing_claim_coverage.values())
+                ):
+                    claims = repaired
+                    errors = repair_errors
+                    warnings.extend(repair_warnings)
+                    warnings.append(
+                        "claim_coverage_repair_applied:"
+                        + ",".join(sorted(missing_claim_coverage))
+                    )
+                else:
+                    warnings.append("claim_coverage_repair_no_improvement")
         claims, completion_warnings = _ensure_required_issue_claims(
             claims,
             plan=plan,
@@ -1157,6 +1229,85 @@ def _candidate_presence_recall(
         return 0.0
     primary = {lane.issue_id: bool(lane.candidates) for lane in retrieval.primary_law}
     return sum(1 for issue in plan.issues if primary.get(issue.issue_id, False)) / len(plan.issues)
+
+
+def _claim_coverage_requirements(
+    plan: LegalResearchPlan,
+    bundles: list[EvidenceBundle],
+    claims: Optional[list[LegalClaim]] = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """List retrieved primary rules that still need a substantive claim.
+
+    This is evidence-driven: it selects only exact provisions already present
+    in a bundle.  It does not state their legal outcome.  The second synthesis
+    pass can therefore repair an omission without introducing benchmark
+    answers or relying on model memory.
+    """
+
+    bundle_by_issue = {bundle.issue_id: bundle for bundle in bundles}
+    approved_statuses = {"approved", "conditional_missing_fact"}
+    claims_by_issue: dict[str, list[LegalClaim]] = {}
+    for claim in claims or []:
+        if claim.status in approved_statuses:
+            claims_by_issue.setdefault(claim.issue_id, []).append(claim)
+
+    result: dict[str, list[dict[str, Any]]] = {}
+    for issue in plan.issues:
+        family_kind = family_foundation_issue_kind(issue)
+        transfer_pricing = question_targets_transfer_pricing(
+            " ".join(
+                (
+                    issue.issue_id,
+                    issue.label,
+                    issue.legal_mechanism,
+                    *issue.possible_provision_concepts,
+                )
+            )
+        )
+        if not family_kind and not transfer_pricing:
+            continue
+        bundle = bundle_by_issue.get(issue.issue_id)
+        if bundle is None:
+            continue
+        provisions = [
+            *bundle.controlling_provisions,
+            *bundle.dependency_provisions,
+            *bundle.exception_provisions,
+        ]
+        bound_ids = {
+            provision_id
+            for claim in claims_by_issue.get(issue.issue_id, [])
+            for provision_id in claim.controlling_provision_ids
+        }
+        bound = [
+            provision for provision in provisions if provision.provision_id in bound_ids
+        ]
+        requirements: list[dict[str, Any]] = []
+        for requirement_id, citation_pattern, document_pattern in _required_issue_dependency_patterns(issue):
+            matches = [
+                provision
+                for provision in provisions
+                if re.search(citation_pattern, provision.citation, re.I)
+                and re.search(document_pattern, provision.document_id, re.I)
+            ]
+            if not matches:
+                continue
+            representative = min(matches, key=lambda item: (len(item.citation), item.citation))
+            if any(
+                _citations_are_compatible(representative.citation, provision.citation)
+                for provision in bound
+            ):
+                continue
+            requirements.append(
+                {
+                    "requirement_id": requirement_id,
+                    "citation": representative.citation,
+                    "allowed_provision_ids": [item.provision_id for item in matches],
+                }
+            )
+        if requirements:
+            result[issue.issue_id] = requirements
+    return result
 
 
 def _build_provision_graph(
@@ -1505,7 +1656,7 @@ def _required_issue_dependency_patterns(
         return (("ufr_art_5", r"art\.\s*5(?:\s|$)", ufr_act),)
     if family_issue_id == "family_foundation_cit_hidden_profit":
         return (
-            ("cit_art_24q", r"art\.\s*24q(?:\s|$)", cit_act),
+            ("cit_art_24q_1", r"art\.\s*24q\s+ust\.\s*1(?:\s|$)", cit_act),
             ("ufr_art_2_2", r"art\.\s*2\s+ust\.\s*2", ufr_act),
         )
     if family_issue_id == "family_foundation_disallowed_income_25_percent":
@@ -1734,6 +1885,7 @@ def validate_claims(
     seen: set[str] = set()
     for claim in claims:
         claim_errors: list[str] = []
+        bundle = bundle_by_issue.get(claim.issue_id)
         if claim.claim_id in seen:
             claim_errors.append("duplicate_claim_id")
         seen.add(claim.claim_id)
@@ -1765,11 +1917,31 @@ def validate_claims(
         bound_text = " ".join(
             item.text or "" for item in bound_references if item is not None
         )
+        bundle_text = " ".join(
+            item.text or ""
+            for item in (
+                *bundle.controlling_provisions,
+                *bundle.dependency_provisions,
+                *bundle.exception_provisions,
+            )
+        ) if bundle is not None else bound_text
         if (
             re.search(r"\b(?:nie\s+wynika|brak\w*|nie\s+określa\w*).{0,80}\bstawk", claim_text, re.I)
-            and re.search(r"\bwynosi\s+\d+(?:[,.]\d+)?\s*(?:%|procent)", bound_text, re.I)
+            and re.search(r"\bwynosi\s+\d+(?:[,.]\d+)?\s*(?:%|procent)", bundle_text, re.I)
         ):
             claim_errors.append("claim_denies_rate_expressly_present_in_primary_law")
+        bundle_has_complete_primary = bool(bundle) and not any(
+            source == "primary_law" or source.startswith("required_primary:")
+            for source in bundle.missing_sources
+        )
+        if bundle_has_complete_primary and re.search(
+            r"(?:brak\s+(?:jest\s+)?(?:pierwotn\w*\s+)?przepis\w*|"
+            r"materiał\s+nie\s+zawiera\s+(?:pełn\w*\s+)?art\.|"
+            r"niewłączon\w*\s+do\s+materiału\s+(?:przesłan\w*|przepis\w*))",
+            claim_text,
+            re.I,
+        ):
+            claim_errors.append("claim_denies_primary_law_present_in_issue_bundle")
         authority_ids = set(claim.supporting_authority_ids) | set(
             claim.contrary_authority_ids
         )
@@ -1789,7 +1961,6 @@ def validate_claims(
             warnings.append(f"{claim.claim_id}:downgraded_for_missing_fact")
         if claim.claim_type == "calculation" and not claim.calculation_ids:
             claim_errors.append("numeric_claim_without_calculation")
-        bundle = bundle_by_issue.get(claim.issue_id)
         if claim.status in {"approved", "conditional_missing_fact"} and bundle is not None:
             missing_required = [
                 item for item in bundle.missing_sources
@@ -2326,13 +2497,16 @@ _RANGED_SECTION_RE = re.compile(
 
 
 def _citations_are_compatible(reference: str, citation: str) -> bool:
-    """Allow exact units and their verified ancestors, never a sibling unit."""
+    """Require the bound source to be exact or finer than the written label.
+
+    A verified paragraph may support the statement that its article applies,
+    but a whole-article ID cannot support an invented paragraph or point.
+    """
 
     normalized_reference = _normalize_citation(reference).rstrip(".,;:")
     normalized_citation = _normalize_citation(citation).rstrip(".,;:")
     return (
         normalized_reference == normalized_citation
-        or normalized_reference.startswith(f"{normalized_citation} ")
         or normalized_citation.startswith(f"{normalized_reference} ")
     )
 

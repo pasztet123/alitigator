@@ -514,6 +514,106 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(validation.errors), len(issues))
         self.assertFalse(any("batch_split_after" in item for item in validation.warnings))
 
+    async def test_family_synthesis_repairs_missing_verified_claim_coverage(self) -> None:
+        question = "Fundacja rodzinna wypłaca świadczenie beneficjentowi."
+        issue = LegalIssue(
+            issue_id="family_foundation_cit_hidden_profit",
+            label="fundacja rodzinna: CIT 24q / ukryte zyski / świadczenia",
+            tax_domains=["CIT", "UFR"],
+            legal_mechanism="family_foundation",
+        )
+        plan = LegalResearchPlan(
+            user_query=question,
+            intent=ResearchIntent(mode="mixed_analysis"),
+            issues=[issue],
+            clarification=Clarification(),
+            confidence=0.9,
+        )
+        ufr = ProvisionReference(
+            provision_id="ufr-2-2",
+            document_id="pl-ustawa-o-fundacji-rodzinnej-art-2",
+            citation="art. 2 ust. 2",
+            text="Świadczenie oznacza składniki majątkowe przekazane beneficjentowi.",
+            status="active",
+            source_span=DocumentSourceSpan(
+                start=0,
+                end=66,
+                document_id="pl-ustawa-o-fundacji-rodzinnej-art-2",
+            ),
+        )
+        cit = ProvisionReference(
+            provision_id="cit-24q-1",
+            document_id="pl-ustawa-o-podatku-dochodowym-od-osob-prawnych-art-24q",
+            citation="art. 24q ust. 1",
+            text="Podatek dochodowy od świadczenia wynosi 15% podstawy opodatkowania.",
+            status="active",
+            source_span=DocumentSourceSpan(
+                start=0,
+                end=69,
+                document_id="pl-ustawa-o-podatku-dochodowym-od-osob-prawnych-art-24q",
+            ),
+        )
+        bundle = EvidenceBundle(
+            issue_id=issue.issue_id,
+            controlling_provisions=[ufr],
+            dependency_provisions=[cit],
+            coverage_status="complete",
+        )
+
+        class CoverageRepairGateway(FakeGateway):
+            claim_calls = 0
+
+            async def generate_structured(self, *, response_model, input, **kwargs):
+                if response_model is not ClaimSet:
+                    return await super().generate_structured(
+                        response_model=response_model, input=input, **kwargs
+                    )
+                self.claim_calls += 1
+                payload = pipeline_module.json.loads(input)
+                if "completion_request" not in payload:
+                    provision = ufr
+                    claim_id = "definition_only"
+                    text = "Świadczenie obejmuje składniki przekazane beneficjentowi."
+                else:
+                    provision = cit
+                    claim_id = "completed_tax_charge"
+                    text = "Art. 24q ust. 1 ustanawia podatek w wysokości 15%."
+                return ClaimSet(
+                    claims=[
+                        LegalClaim(
+                            claim_id=claim_id,
+                            issue_id=issue.issue_id,
+                            claim_type="normative_rule",
+                            text=text,
+                            status="approved",
+                            result="Reguła wynika z podanej jednostki.",
+                            controlling_provision_ids=[provision.provision_id],
+                            source_spans=[provision.source_span],
+                            confidence=0.9,
+                        )
+                    ]
+                )
+
+        gateway = CoverageRepairGateway()
+        pipeline = LegalRagV2Pipeline(
+            gateway=gateway,
+            planner=LegalQueryPlanner(gateway),
+            retriever=LegalRetriever(FakeBackend()),
+            config=LegalRagV2Config(),
+        )
+
+        claims, validation = await pipeline._synthesize_and_validate_claims(
+            question, plan, [bundle], []
+        )
+
+        self.assertTrue(validation.passed)
+        self.assertEqual(2, gateway.claim_calls)
+        self.assertEqual(
+            {ufr.provision_id, cit.provision_id},
+            {provision_id for claim in claims for provision_id in claim.controlling_provision_ids},
+        )
+        self.assertTrue(any("claim_coverage_repair_applied" in item for item in validation.warnings))
+
     def test_writer_integrity_accepts_multiple_verified_citations_for_one_source_id(self) -> None:
         article_21 = ProvisionReference(
             provision_id="cit-source",
@@ -605,6 +705,42 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("właściwy przepis", output.thesis)
         self.assertNotIn("art. 30e", output.thesis.casefold())
         self.assertEqual([], validate_writer_output(output, answer_plan=answer_plan, bundles=bundles))
+
+    def test_whole_article_binding_cannot_support_invented_point(self) -> None:
+        provision = ProvisionReference(
+            provision_id="cit-art-11n",
+            document_id="pl-ustawa-o-podatku-dochodowym-od-osob-prawnych-art-11n",
+            citation="art. 11n",
+            status="active",
+            source_span=DocumentSourceSpan(
+                start=0,
+                end=10,
+                document_id="pl-ustawa-o-podatku-dochodowym-od-osob-prawnych-art-11n",
+            ),
+        )
+        claim = LegalClaim(
+            claim_id="invented-child",
+            issue_id="pit_sale",
+            claim_type="normative_rule",
+            text="Zwolnienie wynika z art. 11n pkt 1.",
+            result="Należy zastosować punkt pierwszy.",
+            status="approved",
+            controlling_provision_ids=[provision.provision_id],
+            source_spans=[provision.source_span],
+            confidence=0.8,
+        )
+        bundle = EvidenceBundle(
+            issue_id="pit_sale",
+            controlling_provisions=[provision],
+            coverage_status="complete",
+        )
+
+        validated, errors, _ = pipeline_module.validate_claims(
+            [claim], plan=research_plan(), bundles=[bundle], calculations=[]
+        )
+
+        self.assertEqual("blocked_invalid_provision", validated[0].status)
+        self.assertTrue(any("unbound_textual_provision_reference" in item for item in errors))
 
     def test_claim_validator_requires_both_ends_of_provision_range(self) -> None:
         article_12_5 = ProvisionReference(

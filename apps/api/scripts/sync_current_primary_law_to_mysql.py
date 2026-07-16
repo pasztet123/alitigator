@@ -9,6 +9,7 @@ and every unrelated document remain untouched.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import sys
 from pathlib import Path
@@ -36,6 +37,25 @@ REQUIRED_REFERENCES = {
 }
 
 
+def read_source_records(raw_path: str) -> tuple[Path, list[dict]]:
+    """Read a tracked JSONL source, preferring plain text when available."""
+
+    path = Path(raw_path)
+    if path.exists():
+        text = path.read_text(encoding="utf-8")
+        source_path = path
+    else:
+        compressed = path.with_suffix(path.suffix + ".gz")
+        if not compressed.exists():
+            raise SystemExit(
+                f"Current primary-law source is missing: {path} (or {compressed})"
+            )
+        with gzip.open(compressed, "rt", encoding="utf-8") as handle:
+            text = handle.read()
+        source_path = compressed
+    return source_path, [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", default="apps/api/.env")
@@ -60,14 +80,7 @@ def main() -> int:
     act_titles: set[str] = set()
     seen_document_ids: set[str] = set()
     for raw_path in DEFAULT_PATHS:
-        path = Path(raw_path)
-        if not path.exists():
-            raise SystemExit(f"Current primary-law source is missing: {path}")
-        file_records = [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        path, file_records = read_source_records(raw_path)
         file_titles = {str(record.get("act_title") or "").strip() for record in file_records}
         if not file_records or len(file_titles) != 1 or "" in file_titles:
             raise SystemExit(f"Refusing ambiguous primary-law source: {path}")

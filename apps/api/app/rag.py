@@ -2527,6 +2527,18 @@ def query_targets_wht_pay_and_refund_services(query: str) -> bool:
     return has_wht_context and has_pay_and_refund and has_service_or_distribution
 
 
+def query_targets_transfer_pricing_documentation(query: str) -> bool:
+    normalized = normalize_whitespace(query or "").lower()
+    return bool(
+        re.search(
+            r"\b(cen\w*\s+transferow\w*|dokumentacj\w*\s+cen\w*\s+transferow\w*|"
+            r"lokaln\w*\s+dokumentacj\w*|local\s+file|transakcj\w*\s+kontrolowan\w*|"
+            r"zwolnieni\w*\s+dokumentacyjn\w*|art\.\s*11[klnt]\b)\b",
+            normalized,
+        )
+    )
+
+
 def is_procedural_interpretation_chunk_text(text: str) -> bool:
     normalized = normalize_whitespace(text).lower()
     if not normalized:
@@ -5617,6 +5629,8 @@ def resolve_statute_tax_domains(query: str) -> set[str]:
         domains.update({"CIT", "PIT", "VAT"})
     if query_targets_wht_pay_and_refund_services(query):
         domains.add("CIT")
+    if query_targets_transfer_pricing_documentation(query):
+        domains.add("CIT")
     return domains
 
 
@@ -5639,6 +5653,8 @@ def infer_retrieval_tax_domains(query: str) -> set[str]:
     if query_targets_family_foundation_mechanism(query):
         domains.update({"CIT", "PIT", "VAT"})
     if query_targets_wht_pay_and_refund_services(query):
+        domains.add("CIT")
+    if query_targets_transfer_pricing_documentation(query):
         domains.add("CIT")
     return domains
 
@@ -7535,6 +7551,26 @@ def decompose_query_into_legal_axes(query: str) -> list[LegalRetrievalAxis]:
                     preferred_targets=(("VAT", "32"), ("VAT", "43"), ("VAT", "29a"), ("VAT", "5")),
                 ),
             ]
+        )
+
+    if query_targets_transfer_pricing_documentation(query):
+        axes.append(
+            LegalRetrievalAxis(
+                axis_id="transfer_pricing_documentation",
+                label="Ceny transferowe: obowiązek i zwolnienie dokumentacyjne",
+                query=expand_search_query(
+                    f"{normalized} ceny transferowe transakcja kontrolowana local file "
+                    "art. 11k art. 11l art. 11n art. 11t"
+                ),
+                source_types={"statute", "interpretation", "judgment"},
+                tax_domains={"CIT"},
+                preferred_targets=(
+                    ("CIT", "11k"),
+                    ("CIT", "11l"),
+                    ("CIT", "11n"),
+                    ("CIT", "11t"),
+                ),
+            )
         )
 
     if query_targets_spolka_komandytowa_cit_status(query):

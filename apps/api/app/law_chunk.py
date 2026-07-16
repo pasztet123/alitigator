@@ -48,9 +48,15 @@ _INLINE_POINT_LETTER_RE = re.compile(
     r"(?im)^(?P<parent>[ \t]*(?:pkt[ \t]*)?\d+[a-z]*\))"
     r"(?P<gap>[ \t]+)(?=(?:lit\.[ \t]*)?[a-z]\)[ \t]+)"
 )
-_PROVISION_ARTICLE_RE = re.compile(r"^\s*art\.\s*(\d+[a-z]*)\.?\s*(.*)$", re.IGNORECASE)
+_PROVISION_ARTICLE_RE = re.compile(
+    r"^\s*(?P<label>art\.)\s*(?P<number>\d+[a-z]*)(?P<terminal>\.)?\s*(?P<rest>.*)$",
+    re.IGNORECASE,
+)
 _PROVISION_PARAGRAPH_RE = re.compile(r"^\s*§\s*(\d+[a-z]*)\.?\s*(.*)$", re.IGNORECASE)
-_PROVISION_EXPLICIT_SECTION_RE = re.compile(r"^\s*ust\.\s*(\d+[a-z]*)\.?\s*(.*)$", re.IGNORECASE)
+_PROVISION_EXPLICIT_SECTION_RE = re.compile(
+    r"^\s*(?P<label>ust\.)\s*(?P<number>\d+[a-z]*)(?P<terminal>\.)?\s*(?P<rest>.*)$",
+    re.IGNORECASE,
+)
 _PROVISION_EXPLICIT_POINT_RE = re.compile(r"^\s*pkt\s*(\d+[a-z]*)\.?\s*(.*)$", re.IGNORECASE)
 _PROVISION_EXPLICIT_LETTER_RE = re.compile(r"^\s*lit\.\s*([a-z])\)?\s*(.*)$", re.IGNORECASE)
 _PROVISION_SECTION_RE = re.compile(r"^\s*(\d+[a-z]*)\.\s+(.+)$", re.IGNORECASE)
@@ -64,6 +70,7 @@ _SOURCE_NOTE_RE = re.compile(
     r"W\s+brzmieniu\s+ustalonym|"
     r"Dodany\s+przez|"
     r"Uchylony\s+przez"
+    r"|Ze\s+zmian[ąa]\s+wprowadzon[ąa]"
     r")",
     re.IGNORECASE,
 )
@@ -131,10 +138,34 @@ def _parse_provision_marker(
     line: str,
     context: dict[str, str | None],
 ) -> tuple[str, str] | None:
+    article_match = _PROVISION_ARTICLE_RE.match(line)
+    if article_match:
+        rest = article_match.group("rest").lstrip()
+        # PDF line wrapping frequently puts an in-text cross-reference at the
+        # start of a line (``art. 92 ust. 3 ...``).  It is not a new article
+        # and must not reset the ancestry of every following paragraph/point.
+        is_child_reference = bool(
+            re.match(r"^(?:ust\.|pkt\b|lit\.|§)", rest, re.IGNORECASE)
+        )
+        is_lowercase_inline_reference = bool(
+            rest
+            and not article_match.group("terminal")
+            and line.lstrip().startswith("art.")
+        )
+        if not is_child_reference and not is_lowercase_inline_reference:
+            return "article", article_match.group("number").casefold()
+    section_match = _PROVISION_EXPLICIT_SECTION_RE.match(line)
+    if section_match:
+        rest = section_match.group("rest").lstrip()
+        is_lowercase_inline_reference = bool(
+            not section_match.group("terminal")
+            and line.lstrip().startswith("ust.")
+        )
+        is_reference_tail = bool(re.match(r"^(?:[;,]|tej\b|pkt\b|lit\.)", rest, re.I))
+        if not is_lowercase_inline_reference and not is_reference_tail:
+            return "section", section_match.group("number").casefold()
     for level, pattern in (
-        ("article", _PROVISION_ARTICLE_RE),
         ("paragraph", _PROVISION_PARAGRAPH_RE),
-        ("section", _PROVISION_EXPLICIT_SECTION_RE),
         ("point", _PROVISION_EXPLICIT_POINT_RE),
         ("letter", _PROVISION_EXPLICIT_LETTER_RE),
     ):
@@ -145,7 +176,7 @@ def _parse_provision_marker(
     if match and (context["article"] or context["paragraph"]):
         return "section", match.group(1).casefold()
     match = _PROVISION_POINT_RE.match(line)
-    if match and (context["section"] or context["paragraph"]):
+    if match and (context["article"] or context["section"] or context["paragraph"]):
         return "point", match.group(1).casefold()
     match = _PROVISION_LETTER_RE.match(line)
     if match and context["point"]:

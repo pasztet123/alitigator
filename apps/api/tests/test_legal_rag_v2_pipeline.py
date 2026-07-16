@@ -659,6 +659,67 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], errors)
         self.assertEqual("approved", approved[0].status)
 
+    def test_claim_validator_rejects_denial_of_rate_present_in_bound_law(self) -> None:
+        provision = ProvisionReference(
+            provision_id="cit-art-24q-1",
+            document_id="pl-ustawa-o-podatku-dochodowym-od-osob-prawnych-art-24q",
+            citation="art. 24q ust. 1",
+            text="Podatek dochodowy wynosi 15 % podstawy opodatkowania.",
+            status="active",
+            source_span=DocumentSourceSpan(
+                start=0,
+                end=58,
+                document_id="pl-ustawa-o-podatku-dochodowym-od-osob-prawnych-art-24q",
+            ),
+        )
+        plan = research_plan()
+        claim = LegalClaim(
+            claim_id="rate-denial",
+            issue_id="pit_sale",
+            claim_type="normative_rule",
+            text="Z art. 24q ust. 1 nie wynika jednak stawka podatku.",
+            result="Stawka pozostaje nieustalona.",
+            status="approved",
+            controlling_provision_ids=[provision.provision_id],
+            source_spans=[provision.source_span],
+            confidence=0.9,
+        )
+        bundle = EvidenceBundle(
+            issue_id="pit_sale",
+            controlling_provisions=[provision],
+            coverage_status="complete",
+        )
+
+        validated, errors, _ = pipeline_module.validate_claims(
+            [claim], plan=plan, bundles=[bundle], calculations=[]
+        )
+
+        self.assertEqual("blocked_invalid_provision", validated[0].status)
+        self.assertTrue(any("claim_denies_rate" in item for item in errors))
+
+    def test_deterministic_risks_do_not_expose_internal_dependency_ids(self) -> None:
+        plan = research_plan()
+        bundle = EvidenceBundle(
+            issue_id="pit_sale",
+            missing_sources=["required_primary:pit_internal_dependency_id"],
+            coverage_status="partial",
+        )
+        answer_plan = pipeline_module._build_answer_plan(plan, [], [])
+
+        output = pipeline_module._deterministic_writer_output(
+            {
+                "validated_claims": [],
+                "legal_research_plan": plan,
+                "evidence_bundles": [bundle],
+                "answer_plan": answer_plan,
+            }
+        )
+
+        rendered_risks = " ".join(output.risks_and_gaps)
+        self.assertIn("kompletnego zestawu przepisów", rendered_risks)
+        self.assertNotIn("required_primary", rendered_risks)
+        self.assertNotIn("internal_dependency_id", rendered_risks)
+
 
 if __name__ == "__main__":
     unittest.main()

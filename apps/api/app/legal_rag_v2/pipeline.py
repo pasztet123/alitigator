@@ -65,6 +65,7 @@ from .schemas import (
     WriterSource,
 )
 from .trace import TraceWriter
+from .transfer_pricing import enrich_transfer_pricing_plan, question_targets_transfer_pricing
 from .wht import WhtPayAndRefundCalculationEngine, enrich_crossborder_wht_plan
 
 
@@ -115,7 +116,11 @@ provisions to the explicitly grounded facts, but do not write the final answer.
 Every material approved or conditional claim needs primary-law IDs and source
 spans from the payload. An authority-pattern claim needs concrete authority
 document IDs. A numeric result needs a calculation ID produced by code. If the
-evidence is insufficient, return a blocked status rather than guessing.
+evidence is insufficient, return a blocked status rather than guessing. Read
+the complete text of every bound provision: if it expressly states a statutory
+rate, threshold or deadline material to the issue, report that rule and never
+claim that the supplied provision omits it. A statutory percentage quoted
+directly from primary law is a legal rule, not a newly performed calculation.
 """
 
 ANSWER_WRITER_RULES = GLOBAL_LEGAL_SYSTEM_RULES + """
@@ -367,8 +372,11 @@ class LegalRagV2Pipeline:
             force_fallback=force_planner_fallback,
         )
         timings["planner"] = _elapsed_ms(stage)
-        plan = enrich_family_foundation_plan(
-            enrich_crossborder_wht_plan(planner_outcome.plan, question),
+        plan = enrich_transfer_pricing_plan(
+            enrich_family_foundation_plan(
+                enrich_crossborder_wht_plan(planner_outcome.plan, question),
+                question,
+            ),
             question,
         )
         trace.write_json("legal_research_plan.json", plan)
@@ -413,8 +421,11 @@ class LegalRagV2Pipeline:
             )
             if augmented.fallback_trace.fallback_used:
                 planner_outcome = augmented
-                plan = enrich_family_foundation_plan(
-                    enrich_crossborder_wht_plan(augmented.plan, question),
+                plan = enrich_transfer_pricing_plan(
+                    enrich_family_foundation_plan(
+                        enrich_crossborder_wht_plan(augmented.plan, question),
+                        question,
+                    ),
                     question,
                 )
                 trace.write_json("legal_research_plan.json", plan)
@@ -1523,6 +1534,21 @@ def _required_issue_dependency_patterns(
             ("vat_art_43_1_36", r"art\.\s*43\s+ust\.\s*1\s+pkt\s*36", vat_act),
             ("vat_art_86_1", r"art\.\s*86\s+ust\.\s*1", vat_act),
         )
+    transfer_pricing_haystack = " ".join(
+        (
+            issue.issue_id,
+            issue.label,
+            issue.legal_mechanism,
+            *issue.possible_provision_concepts,
+        )
+    )
+    if question_targets_transfer_pricing(transfer_pricing_haystack):
+        return (
+            ("cit_art_11k_1", r"art\.\s*11k\s+ust\.\s*1", cit_act),
+            ("cit_art_11l_1", r"art\.\s*11l\s+ust\.\s*1", cit_act),
+            ("cit_art_11n_1", r"art\.\s*11n\s+pkt\s*1", cit_act),
+            ("cit_art_11t_1", r"art\.\s*11t\s+ust\.\s*1", cit_act),
+        )
     return ()
 
 
@@ -1735,6 +1761,15 @@ def validate_claims(
                 "unbound_textual_provision_reference:"
                 + ",".join(unbound_textual_references)
             )
+        claim_text = f"{claim.text} {claim.result}"
+        bound_text = " ".join(
+            item.text or "" for item in bound_references if item is not None
+        )
+        if (
+            re.search(r"\b(?:nie\s+wynika|brak\w*|nie\s+określa\w*).{0,80}\bstawk", claim_text, re.I)
+            and re.search(r"\bwynosi\s+\d+(?:[,.]\d+)?\s*(?:%|procent)", bound_text, re.I)
+        ):
+            claim_errors.append("claim_denies_rate_expressly_present_in_primary_law")
         authority_ids = set(claim.supporting_authority_ids) | set(
             claim.contrary_authority_ids
         )
@@ -2256,11 +2291,15 @@ def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:
                 )
             )
     missing_questions = [item.question for item in plan.missing_facts]
+    issue_labels = {issue.issue_id: issue.label for issue in plan.issues}
     source_gaps = [
-        f"{bundle.issue_id}: {source}"
+        "Nie udało się potwierdzić kompletnego zestawu przepisów pierwotnych dla: "
+        f"{issue_labels.get(bundle.issue_id, bundle.issue_id)}."
         for bundle in bundles
-        for source in bundle.missing_sources
-        if source == "primary_law" or source.startswith("required_primary:")
+        if any(
+            source == "primary_law" or source.startswith("required_primary:")
+            for source in bundle.missing_sources
+        )
     ]
     return WriterOutput(
         thesis=thesis,

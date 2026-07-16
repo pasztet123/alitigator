@@ -305,6 +305,10 @@ _ISSUE_EXPLICIT_REFERENCE_RE = re.compile(
     r"(?:\s*lit\.\s*[a-z])?",
     re.IGNORECASE,
 )
+_EXPLICIT_QUERY_DOMAIN_RE = re.compile(
+    r"^\s*(CIT|PIT|VAT|UFR|PCC|SD|ORDYNACJA|OP|AKCYZA|EXCISE)\b",
+    re.IGNORECASE,
+)
 
 
 def _normalise_reference(value: str) -> str:
@@ -328,6 +332,28 @@ def _issue_explicit_references(issue: LegalIssue) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _explicit_family_target(family: QueryFamily) -> tuple[str, str] | None:
+    """Return the act domain and citation declared by one exact query.
+
+    Article numbers repeat across Polish statutes.  The domain in ``UFR art.
+    5`` therefore scopes that individual lookup; using every domain attached
+    to the wider issue can silently substitute VAT or CIT art. 5.
+    """
+
+    if family.lane not in {"primary_law", "both"}:
+        return None
+    if family.family not in {"explicit_provision_reference", "explicit_provision"}:
+        return None
+    reference_match = _ISSUE_EXPLICIT_REFERENCE_RE.search(family.query)
+    if not reference_match:
+        return None
+    domain_match = _EXPLICIT_QUERY_DOMAIN_RE.search(family.query)
+    return (
+        domain_match.group(1).upper() if domain_match else "",
+        _normalise_reference(reference_match.group(0)),
+    )
+
+
 def _candidate_references(candidate: RetrievalCandidate) -> tuple[str, ...]:
     values: list[str] = []
     display = str(candidate.metadata.get("display_reference") or "")
@@ -348,6 +374,67 @@ def _reference_match_specificity(required: str, found: str) -> float:
     if found.startswith(required + " "):
         return 1.0
     return 0.0
+
+
+def _candidate_matches_exact_target(
+    candidate: RetrievalCandidate,
+    *,
+    domain: str,
+    reference: str,
+) -> bool:
+    candidate_domains = {
+        str(value).upper()
+        for value in candidate.metadata.get("tax_domains") or []
+        if str(value).strip()
+    }
+    if domain and domain not in candidate_domains:
+        return False
+    return any(
+        _reference_match_specificity(reference, found) > 0
+        for found in _candidate_references(candidate)
+    )
+
+
+def _select_with_exact_targets(
+    issue: LegalIssue,
+    families: Sequence[QueryFamily],
+    candidates: Sequence[RetrievalCandidate],
+    *,
+    ordinary_limit: int,
+) -> tuple[RetrievalCandidate, ...]:
+    """Pin one verified candidate per exact act-and-provision target.
+
+    Raising top-k to the number of dependencies is insufficient: many child
+    units of one long article can still occupy every slot.  Pinning happens
+    only after normal retrieval and reranking and never manufactures evidence.
+    """
+
+    targets = [target for family in families if (target := _explicit_family_target(family))]
+    pinned: list[RetrievalCandidate] = []
+    pinned_ids: set[str] = set()
+    for domain, reference in targets:
+        match = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.candidate_id not in pinned_ids
+                and _candidate_matches_exact_target(
+                    candidate,
+                    domain=domain,
+                    reference=reference,
+                )
+            ),
+            None,
+        )
+        if match is None:
+            continue
+        pinned.append(match)
+        pinned_ids.add(match.candidate_id)
+    selected_limit = max(ordinary_limit, len(targets), len(pinned))
+    remainder = [
+        candidate for candidate in candidates if candidate.candidate_id not in pinned_ids
+    ]
+    return tuple((*pinned, *remainder[: max(0, selected_limit - len(pinned))]))
 
 
 class _BaseLane:
@@ -381,12 +468,16 @@ class _BaseLane:
         trace: list[dict[str, Any]] = []
 
         for family in families:
+            family_filters = dict(metadata_filters)
+            explicit_target = _explicit_family_target(family)
+            if explicit_target and explicit_target[0]:
+                family_filters["tax_domains"] = [explicit_target[0]]
             lexical = await _call_backend(
                 self.backend,
                 family.query,
                 limit=self.config.lexical_limit_per_query,
                 source_types=self.source_types,
-                metadata_filters=metadata_filters,
+                metadata_filters=family_filters,
             )
             lexical = [
                 item
@@ -502,17 +593,17 @@ class _BaseLane:
         # ordinary top-k.  Never truncate below the number of independently
         # requested exact provisions; doing so makes completeness impossible
         # before evidence validation even begins.
-        exact_primary_targets = sum(
-            family.lane == "primary_law"
-            and family.family in {"explicit_provision_reference", "explicit_provision"}
-            for family in families
+        selected = _select_with_exact_targets(
+            issue,
+            families,
+            reranked,
+            ordinary_limit=self.config.selected_limit_per_issue,
         )
-        selected_limit = max(self.config.selected_limit_per_issue, exact_primary_targets)
         return LaneResult(
             issue_id=issue.issue_id,
             lane=self.lane_name,
             query_families=families,
-            candidates=tuple(reranked[:selected_limit]),
+            candidates=selected,
             candidate_count_before_rerank=before_rerank,
             trace=tuple(trace),
         )
@@ -711,12 +802,18 @@ class LegalRetriever:
                 continue
             merged_candidates = _unique_candidates((*original.candidates, *retry.candidates))
             reranked = lane_impl.reranker.rerank(issue, merged_candidates, target_date=plan.target_date)
+            merged_families = tuple((*original.query_families, *retry.query_families))
             retried.append(
                 LaneResult(
                     issue_id=issue.issue_id,
                     lane=lane,
-                    query_families=tuple((*original.query_families, *retry.query_families)),
-                    candidates=tuple(reranked[: lane_impl.config.selected_limit_per_issue]),
+                    query_families=merged_families,
+                    candidates=_select_with_exact_targets(
+                        issue,
+                        merged_families,
+                        reranked,
+                        ordinary_limit=lane_impl.config.selected_limit_per_issue,
+                    ),
                     candidate_count_before_rerank=original.candidate_count_before_rerank + retry.candidate_count_before_rerank,
                     trace=tuple((*original.trace, *retry.trace, {"event": "backreference_candidates_merged", "lane": lane, "preserved_initial_candidates": len(original.candidates), "references": cited})),
                 )

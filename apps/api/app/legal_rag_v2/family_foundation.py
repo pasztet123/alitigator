@@ -8,6 +8,7 @@ and bound to an approved claim by the normal v2 pipeline.
 from __future__ import annotations
 
 from collections.abc import Iterable
+import re
 
 from .schemas import LegalIssue, LegalResearchPlan, QueryFamily
 
@@ -57,6 +58,28 @@ FAMILY_FOUNDATION_ISSUE_TARGETS: dict[str, tuple[tuple[str, str], ...]] = {
         ("VAT", "art. 86 ust. 1"),
     ),
 }
+
+_LEGACY_WHT_ISSUE_IDS = frozenset(
+    {
+        "wht_interest",
+        "wht_management_services",
+        "pay_and_refund",
+        "interest_royalties_exemption",
+        "beneficial_owner",
+    }
+)
+
+
+def _question_requests_wht(question: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(wht|podatek\s+u\s+[źz]r[óo]d[łl]a|withholding|beneficial\s+owner|"
+            r"certyfikat\w*\s+rezydencji|nierezydent\w*|upo\b|"
+            r"umow\w*\s+o\s+unikaniu\s+podw[óo]jnego\s+opodatkowania)\b",
+            question,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _dedupe(values: Iterable[str]) -> list[str]:
@@ -148,6 +171,13 @@ def enrich_family_foundation_plan(
     changed = False
     issues: list[LegalIssue] = []
     for issue in plan.issues:
+        # The bounded legacy planner used to confuse domestic loans, interest,
+        # management services and a generic "limit" with WHT.  Keep genuine
+        # WHT axes when the question says so, but do not expose five unrelated
+        # empty sections in a domestic family-foundation analysis.
+        if issue.issue_id in _LEGACY_WHT_ISSUE_IDS and not _question_requests_wht(question):
+            changed = True
+            continue
         kind = family_foundation_issue_kind(issue)
         targets = FAMILY_FOUNDATION_ISSUE_TARGETS.get(kind or "")
         if not targets:

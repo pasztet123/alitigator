@@ -292,6 +292,73 @@ class FakeBackend:
 
 
 class RetrievalTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exact_targets_are_scoped_and_pinned_per_act(self) -> None:
+        class RepeatingArticleBackend:
+            def __init__(self) -> None:
+                self.filters: dict[str, list[str]] = {}
+
+            async def search(self, query, *, limit, source_types, metadata_filters):
+                self.filters[query] = list(metadata_filters.get("tax_domains") or [])
+                if source_types != PRIMARY_SOURCE_TYPES:
+                    return []
+                if query == "UFR art. 5":
+                    return [
+                        RetrievalCandidate(
+                            candidate_id="ufr-art-5",
+                            document_id="ufr-act",
+                            chunk_id="ufr-art-5",
+                            text="Art. 5. Katalog działalności.",
+                            source_type="statute",
+                            metadata={"tax_domains": ["UFR"], "legal_provisions": ["art. 5"]},
+                        )
+                    ]
+                if query == "VAT art. 32 ust. 2":
+                    return [
+                        RetrievalCandidate(
+                            candidate_id="vat-art-32-2",
+                            document_id="vat-act",
+                            chunk_id="vat-art-32-2",
+                            text="Art. 32 ust. 2. Definicja powiązań.",
+                            source_type="statute",
+                            metadata={
+                                "tax_domains": ["VAT"],
+                                "legal_provisions": ["art. 32 ust. 2"],
+                            },
+                        )
+                    ]
+                return []
+
+        backend = RepeatingArticleBackend()
+        base = research_plan()
+        issue = base.issues[0].model_copy(
+            update={
+                "tax_domains": ["CIT", "VAT", "UFR"],
+                "query_families": [
+                    QueryFamily(
+                        family="explicit_provision_reference",
+                        query="UFR art. 5",
+                        lane="primary_law",
+                    ),
+                    QueryFamily(
+                        family="explicit_provision_reference",
+                        query="VAT art. 32 ust. 2",
+                        lane="primary_law",
+                    ),
+                ],
+            }
+        )
+        result = await LegalRetriever(
+            backend,
+            config=RetrievalConfig(selected_limit_per_issue=1),
+        ).retrieve(base.model_copy(update={"issues": [issue]}))
+
+        self.assertEqual(["UFR"], backend.filters["UFR art. 5"])
+        self.assertEqual(["VAT"], backend.filters["VAT art. 32 ust. 2"])
+        self.assertEqual(
+            {"ufr-art-5", "vat-art-32-2"},
+            {item.candidate_id for item in result.primary_law[0].candidates},
+        )
+
     async def test_exact_primary_targets_expand_selection_limit(self) -> None:
         class ExactBackend:
             async def search(self, query, *, limit, source_types, metadata_filters):

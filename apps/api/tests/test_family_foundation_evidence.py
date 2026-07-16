@@ -9,6 +9,7 @@ from pathlib import Path
 from app.law_chunk import build_provision_units
 from app.legal_rag_v2.backends import CorpusFtsBackend
 from app.legal_rag_v2.family_foundation import enrich_family_foundation_plan
+from app.legal_rag_v2.transfer_pricing import enrich_transfer_pricing_plan
 from app.legal_rag_v2.schemas import (
     Clarification,
     LegalIssue,
@@ -16,7 +17,13 @@ from app.legal_rag_v2.schemas import (
     QueryFamily,
     ResearchIntent,
 )
-from app.rag import derive_tax_domain, get_connection, get_rag_config, index_record
+from app.rag import (
+    decompose_query_into_legal_axes,
+    derive_tax_domain,
+    get_connection,
+    get_rag_config,
+    index_record,
+)
 
 
 UFR_PATH = Path("apps/api/data/laws/processed/family_foundation_primary_bundle.jsonl")
@@ -96,6 +103,50 @@ class FamilyFoundationEvidenceTests(unittest.TestCase):
         self.assertIn("PIT art. 21 ust. 1 pkt 157", beneficiary_queries)
         self.assertIn("UFR art. 29 ust. 1", beneficiary_queries)
 
+    def test_domestic_family_plan_drops_legacy_wht_noise(self) -> None:
+        base = plan()
+        wht_issue = LegalIssue(
+            issue_id="wht_interest",
+            label="WHT: odsetki i należności bierne",
+            tax_domains=["CIT"],
+            legal_mechanism="wht",
+        )
+        noisy = base.model_copy(update={"issues": [*base.issues, wht_issue]})
+
+        domestic = enrich_family_foundation_plan(
+            noisy,
+            "Fundacja rodzinna udziela beneficjentowi krajowej pożyczki.",
+        )
+        cross_border = enrich_family_foundation_plan(
+            noisy,
+            "Fundacja rodzinna płaci odsetki nierezydentowi i analizuje WHT.",
+        )
+
+        self.assertNotIn("wht_interest", {item.issue_id for item in domestic.issues})
+        self.assertIn("wht_interest", {item.issue_id for item in cross_border.issues})
+
+    def test_transfer_pricing_gets_its_own_axis_instead_of_wht(self) -> None:
+        axes = decompose_query_into_legal_axes(
+            "Fundacja rodzinna pyta o zwolnienie dokumentacyjne z art. 11n CIT."
+        )
+        by_id = {axis.axis_id: axis for axis in axes}
+
+        self.assertIn("transfer_pricing_documentation", by_id)
+        self.assertNotIn("wht_interest", by_id)
+        self.assertIn(("CIT", "11n"), by_id["transfer_pricing_documentation"].preferred_targets)
+
+    def test_model_plan_is_augmented_with_transfer_pricing_issue_and_exact_law(self) -> None:
+        question = "Czy transakcja kontrolowana korzysta ze zwolnienia dokumentacyjnego z art. 11n?"
+        enriched = enrich_transfer_pricing_plan(plan(), question)
+        issue = next(
+            item for item in enriched.issues if item.issue_id == "transfer_pricing_documentation"
+        )
+        queries = {item.query for item in issue.query_families}
+
+        self.assertIn("CIT art. 11k ust. 1", queries)
+        self.assertIn("CIT art. 11n pkt 1", queries)
+        self.assertIn("CIT art. 11t ust. 1", queries)
+
     def test_numbered_source_note_is_not_a_provision_unit(self) -> None:
         text = """Art. 5. 1. Reguła główna:
 1) prawidłowy punkt;
@@ -109,6 +160,35 @@ class FamilyFoundationEvidenceTests(unittest.TestCase):
         )
         self.assertFalse(any("Zmiany tekstu jednolitego" in unit["text"] for unit in units))
         self.assertTrue(any("drugi prawidłowy punkt" in unit["text"] for unit in units))
+
+    def test_wrapped_inline_article_reference_does_not_reset_ancestry(self) -> None:
+        units = build_provision_units(
+            """Art. 32. 1. Reguła podstawowa.
+1) pierwszy przypadek odwołujący się do
+art. 92 ust. 3 innej ustawy.
+2. Przez powiązania rozumie się określone relacje.
+""",
+            article_document_id="vat-art-32",
+            record_document_id="vat-art-32",
+        )
+        citations = {unit["citation"] for unit in units}
+
+        self.assertIn("art. 32 ust. 2", citations)
+        self.assertFalse(any(citation.startswith("art. 92") for citation in citations))
+
+    def test_point_can_be_a_direct_child_of_article(self) -> None:
+        units = build_provision_units(
+            """Art. 11n. Obowiązek nie ma zastosowania do transakcji:
+1) zawieranych wyłącznie przez podmioty krajowe;
+2) objętych innym wyjątkiem.
+""",
+            article_document_id="cit-art-11n",
+            record_document_id="cit-art-11n",
+        )
+        citations = {unit["citation"] for unit in units}
+
+        self.assertIn("art. 11n pkt 1", citations)
+        self.assertIn("art. 11n pkt 2", citations)
 
 
 class FamilyFoundationRetrievalTests(unittest.IsolatedAsyncioTestCase):

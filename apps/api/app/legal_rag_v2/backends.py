@@ -156,6 +156,10 @@ def _normalized_source_type(row: Mapping[str, Any]) -> str:
     source_subtype = str(row.get("source_subtype") or "").lower()
     if source_type == "statute" and source_subtype == "tax_treaty":
         return "tax_treaty"
+    if source_type == "interpretation" and source_subtype == "general":
+        # Backward compatibility for local indexes created before general MF
+        # interpretations received their own canonical authority type.
+        return "general_interpretation"
     return source_type
 
 
@@ -322,6 +326,11 @@ class CorpusFtsBackend:
         values = {value.lower() for value in source_types}
         if "tax_treaty" in values or "regulation" in values:
             values.add("statute")
+        if "general_interpretation" in values:
+            # The local SQLite corpus may still contain pre-migration rows
+            # marked as interpretation + source_subtype=general.  They are
+            # normalized at candidate construction and filtered by the lane.
+            values.add("interpretation")
         return sorted(values - {"tax_treaty", "regulation"})
 
     @staticmethod

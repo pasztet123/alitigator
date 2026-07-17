@@ -56,6 +56,7 @@ from app.rag import (
     index_content_fingerprint,
     join_search_text,
     normalize_source_type,
+    expand_retrieval_source_types,
     normalize_provision_reference,
     query_targets_interpretation_procedure,
     query_targets_ksef_current_law,
@@ -648,7 +649,9 @@ def authority_citation_targets(
     its broader recall path.
     """
     normalized_types = {value.lower() for value in source_types or set() if value}
-    if not normalized_types or not normalized_types.issubset({"interpretation", "judgment"}):
+    if not normalized_types or not normalized_types.issubset(
+        {"interpretation", "general_interpretation", "judgment"}
+    ):
         return []
     return extract_normalized_provision_references(query)
 
@@ -899,7 +902,7 @@ def build_type_and_domain_clause(
     detection_query: str,
     config: Any,
 ) -> tuple[str, list[Any], set[str]]:
-    allowed_types = sorted({value.lower() for value in source_types or set() if value})
+    allowed_types = expand_retrieval_source_types(source_types)
     clauses: list[str] = []
     values: list[Any] = []
     if allowed_types:

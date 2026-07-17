@@ -2677,7 +2677,7 @@ def build_resolution_section_score(text: str, *, source_type: str = "") -> float
 
     lowered = normalized.lower()
     score = 0.0
-    if source_type == "interpretation":
+    if is_interpretation_source_type(source_type):
         score += build_interpretation_section_score(normalized)
     if source_type == "judgment":
         if re.search(r"\b(oddala skarg[ęe] kasacyjn[ąa]|uchyla zaskarżony wyrok|uchyla decyzj[ęe]|oddala skarg[ęe])\b", lowered):
@@ -4040,7 +4040,13 @@ def build_small_taxpayer_foreign_vat_match_score(row: sqlite3.Row, *, query: str
         elif candidate_domains:
             score -= 0.8
 
-    if str(row["source_type"] or "") == "interpretation":
+    if is_interpretation_source_type(
+        normalize_source_type({
+            "source_type": str(row["source_type"] or ""),
+            "source_subtype": str(row["source_subtype"] or ""),
+            "category": str(row["category"] or ""),
+        })
+    ):
         score += 0.3
     if str(row["source_type"] or "") == "judgment" and "mały podatnik" not in candidate_text and "maly podatnik" not in candidate_text:
         score -= 0.4
@@ -4131,7 +4137,7 @@ def build_overlap_tail(text: str, overlap_chars: int) -> str:
 
 
 def filter_index_chunks(record: dict[str, Any], chunks: list[str]) -> list[str]:
-    if normalize_source_type(record) != "interpretation":
+    if normalize_source_type(record) not in {"interpretation", "general_interpretation"}:
         return chunks
     filtered = [chunk for chunk in chunks if not is_procedural_interpretation_chunk_text(chunk)]
     return filtered or chunks
@@ -4612,6 +4618,8 @@ def derive_source_subtype(record: dict[str, Any]) -> str:
         return explicit
     source_type = normalize_whitespace(str(record.get("source_type") or "interpretation")).lower()
     category = normalize_whitespace(str(record.get("category") or "")).lower()
+    if source_type == "general_interpretation":
+        return "general"
     if source_type == "interpretation":
         return "general" if "ogóln" in category else "individual"
     if source_type == "judgment":
@@ -4625,8 +4633,36 @@ def derive_source_subtype(record: dict[str, Any]) -> str:
 
 def normalize_source_type(record: dict[str, Any]) -> str:
     value = normalize_whitespace(str(record.get("source_type") or "interpretation")).lower()
-    allowed = {"interpretation", "statute", "judgment", "commentary"}
+    if value == "interpretation" and derive_source_subtype(record) == "general":
+        return "general_interpretation"
+    allowed = {"interpretation", "general_interpretation", "statute", "judgment", "commentary"}
     return value if value in allowed else "interpretation"
+
+
+def is_interpretation_source_type(source_type: str) -> bool:
+    """Return whether a canonical source type is an MF/KIS interpretation.
+
+    General interpretations are an independent authority class in the legal
+    research pipeline, but they share the document structure and conclusion
+    markers of individual interpretations.
+    """
+    return normalize_whitespace(source_type).lower() in {
+        "interpretation",
+        "general_interpretation",
+    }
+
+
+def expand_retrieval_source_types(source_types: Optional[set[str]]) -> list[str]:
+    """Expand generic interpretation requests to include MF general guidance.
+
+    Callers historically asked for ``interpretation`` only.  Retain that
+    contract while allowing the canonical ``general_interpretation`` rows to
+    participate in the same authority lane.
+    """
+    values = {value.lower() for value in source_types or set() if value}
+    if "interpretation" in values:
+        values.add("general_interpretation")
+    return sorted(values)
 
 
 def build_record_index_chunks(
@@ -5947,8 +5983,12 @@ def build_subject_phrase_match_score(row: sqlite3.Row, *, query: str) -> float:
 
 
 def build_interpretation_section_match_score(row: sqlite3.Row) -> float:
-    source_type = str(row["source_type"] or "")
-    if source_type not in {"interpretation", "judgment"}:
+    source_type = normalize_source_type({
+        "source_type": str(row["source_type"] or ""),
+        "source_subtype": str(row["source_subtype"] or ""),
+        "category": str(row["category"] or ""),
+    })
+    if source_type not in {"interpretation", "general_interpretation", "judgment"}:
         return 0.0
     return build_resolution_section_score(str(row["chunk_text"] or ""), source_type=source_type)
 
@@ -5963,7 +6003,12 @@ def build_mechanism_match_score(row: sqlite3.Row, *, query: str, config: RagConf
 
 
 def build_pcc_interpretation_match_score(row: sqlite3.Row, *, query: str) -> float:
-    if str(row["source_type"] or "") != "interpretation" or "PCC" not in row_tax_domains(row):
+    source_type = normalize_source_type({
+        "source_type": str(row["source_type"] or ""),
+        "source_subtype": str(row["source_subtype"] or ""),
+        "category": str(row["category"] or ""),
+    })
+    if not is_interpretation_source_type(source_type) or "PCC" not in row_tax_domains(row):
         return 0.0
 
     normalized_query = normalize_whitespace(query).lower()
@@ -6533,7 +6578,7 @@ def fetch_local_candidate_rows(
     candidate_limit = max(config.candidate_pool_limit, effective_limit * 20)
     if source_types == {"statute"}:
         candidate_limit = min(candidate_limit, max(effective_limit * 8, 48))
-    allowed_types = sorted({value.lower() for value in source_types or set() if value})
+    allowed_types = expand_retrieval_source_types(source_types)
     type_clause = ""
     type_values: list[str] = []
     if allowed_types:
@@ -7916,7 +7961,10 @@ def chunk_matches_axis_domain(axis: LegalRetrievalAxis, chunk: RagChunk) -> bool
 def chunk_matches_axis_source_type(axis: LegalRetrievalAxis, chunk: RagChunk) -> bool:
     if not axis.source_types:
         return True
-    return str(chunk.source_type or "").lower() in axis.source_types
+    source_type = str(chunk.source_type or "").lower()
+    return source_type in axis.source_types or (
+        source_type == "general_interpretation" and "interpretation" in axis.source_types
+    )
 
 
 def chunk_has_axis_preferred_target(axis: LegalRetrievalAxis, chunk: RagChunk) -> bool:
@@ -8392,7 +8440,7 @@ def row_to_rag_chunk(row: sqlite3.Row | dict[str, Any], *, score: float = 100.0,
         source_url=str(row["source_url"] or "") or None,
         category=str(row["category"] or "") or None,
         source=str(row["source"] or ""),
-        source_type=str(row["source_type"] or "interpretation"),
+        source_type=normalize_source_type(dict(row)),
         source_subtype=str(row["source_subtype"] or "") or None,
         authority=str(row["authority"] or "") or None,
         publication=str(row["publication"] or "") or None,
@@ -8900,7 +8948,13 @@ def rank_hybrid_local_candidates(
             row
             for row in rows
             if not (
-                str(row["source_type"] or "") == "interpretation"
+                is_interpretation_source_type(
+                    normalize_source_type({
+                        "source_type": str(row["source_type"] or ""),
+                        "source_subtype": str(row["source_subtype"] or ""),
+                        "category": str(row["category"] or ""),
+                    })
+                )
                 and is_procedural_interpretation_chunk_text(str(row["chunk_text"] or ""))
             )
         ]
@@ -9135,7 +9189,7 @@ def rank_hybrid_local_candidates(
             source_url=str(row["source_url"] or "") or None,
             category=str(row["category"] or "") or None,
             source=str(row["source"] or ""),
-            source_type=str(row["source_type"] or "interpretation"),
+            source_type=normalize_source_type(dict(row)),
             source_subtype=str(row["source_subtype"] or "") or None,
             authority=str(row["authority"] or "") or None,
             publication=str(row["publication"] or "") or None,

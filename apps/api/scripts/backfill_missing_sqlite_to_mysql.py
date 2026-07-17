@@ -64,7 +64,11 @@ def main() -> int:
     )
     parser.add_argument("--env-file", default="apps/api/.env")
     parser.add_argument("--sqlite-path", default="apps/api/data/processed/eureka_rag.sqlite3")
-    parser.add_argument("--source-type", action="append", choices=("statute", "interpretation", "judgment"))
+    parser.add_argument(
+        "--source-type",
+        action="append",
+        choices=("statute", "interpretation", "general_interpretation", "judgment"),
+    )
     parser.add_argument("--document-batch-size", type=int, default=40)
     parser.add_argument("--chunk-batch-size", type=int, default=1500)
     parser.add_argument("--citation-batch-size", type=int, default=2000)
@@ -88,7 +92,7 @@ def main() -> int:
     sqlite_path = Path(args.sqlite_path)
     if not sqlite_path.exists():
         raise SystemExit("Local SQLite index is unavailable")
-    selected_types = set(args.source_type or ("statute", "interpretation", "judgment"))
+    selected_types = set(args.source_type or ("statute", "interpretation", "general_interpretation", "judgment"))
     if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
         raise SystemExit("Invalid shard selection")
     sqlite_connection = sqlite3.connect(sqlite_path)

@@ -1043,7 +1043,7 @@ def _generate_authority_candidates(
 ) -> dict[str, Any]:
     source_types: set[str] = set()
     if include_interpretations:
-        source_types.add("interpretation")
+        source_types.update({"interpretation", "general_interpretation"})
     if include_judgments is not False:
         source_types.add("judgment")
     if not source_types:
@@ -1400,7 +1400,7 @@ def _extract_taxpayer_position(text: str) -> tuple[Optional[str], Optional[dict[
 
 
 def _extract_authority_holding(text: str, source_type: str) -> tuple[Optional[str], Optional[dict[str, int]]]:
-    if source_type != "interpretation":
+    if source_type not in {"interpretation", "general_interpretation"}:
         return None, None
     return _extract_first_span(
         text,

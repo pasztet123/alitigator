@@ -335,7 +335,7 @@ def _select_candidate(
     issue: ControlledAuthorityIssue,
 ) -> dict[str, object] | None:
     source_type = str(chunk.source_type or "").lower()
-    if source_type not in {"interpretation", "judgment"}:
+    if source_type not in {"interpretation", "general_interpretation", "judgment"}:
         return None
     text = _source_text(chunk)
     holding, holding_span, holding_section = _extract_complete_holding(chunk, issue)
@@ -706,7 +706,7 @@ def _extract_complete_holding(
     text = chunk.chunk_text
     source_type = str(chunk.source_type or "").lower()
     sections: list[tuple[str, int, int]] = []
-    if source_type == "interpretation":
+    if source_type in {"interpretation", "general_interpretation"}:
         interpretation_stops = (
             "Dodatkowe informacje",
             "Informacja o zakresie rozstrzygnięcia",
@@ -751,7 +751,9 @@ def _extract_complete_holding(
     candidates: list[tuple[tuple[float, ...], str, dict[str, int], str]] = []
     seen_spans: set[tuple[int, int]] = set()
     search_sections = [*sections, (
-        "assessment_reasoning" if source_type == "interpretation" else "judicial_reasoning",
+        "assessment_reasoning"
+        if source_type in {"interpretation", "general_interpretation"}
+        else "judicial_reasoning",
         0,
         len(text),
     )]
@@ -853,7 +855,8 @@ def _holding_candidate_rank(
     ) else 0.0
     section_score = 1.0 if section_name in {"assessment_reasoning", "judicial_reasoning"} else 0.5
     source_specific = 1.0 if (
-        source_type == "interpretation" and re.search(r"uprawnia|stanowisko|zwoln", lowered)
+        source_type in {"interpretation", "general_interpretation"}
+        and re.search(r"uprawnia|stanowisko|zwoln", lowered)
     ) or (
         source_type == "judgment" and re.search(r"sąd|należy|nie jest|stanowi|prawidłow", lowered)
     ) else 0.0

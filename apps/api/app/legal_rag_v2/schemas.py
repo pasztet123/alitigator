@@ -441,6 +441,11 @@ class LegalClaim(V2Schema):
     contrary_authority_ids: list[str] = Field(default_factory=list)
     fact_dependencies: list[str] = Field(default_factory=list)
     calculation_ids: list[str] = Field(default_factory=list)
+    # Coverage requirements are generated from the issue type and the
+    # evidence actually retrieved. Explicit acknowledgements let the
+    # pipeline distinguish a real fact application from another generic
+    # paraphrase of the same provision.
+    coverage_requirement_ids: list[str] = Field(default_factory=list)
     source_spans: list[DocumentSourceSpan] = Field(default_factory=list)
     confidence: Confidence
     material: bool = True

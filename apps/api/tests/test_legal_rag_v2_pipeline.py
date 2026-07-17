@@ -18,9 +18,11 @@ from app.legal_rag_v2.pipeline import (
     ClaimSet,
     LegalRagV2Config,
     LegalRagV2Pipeline,
+    _balanced_authority_extraction_candidates,
     _best_effort_writer_output,
     _build_evidence_bundles,
     _build_provision_graph,
+    _claim_coverage_requirements,
     _git_commit,
     validate_writer_output,
 )
@@ -33,6 +35,8 @@ from app.legal_rag_v2.retrieval import (
     RetrievalConfig,
 )
 from app.legal_rag_v2.schemas import (
+    AnswerPlan,
+    AnswerSection,
     AuthorityCard,
     AuthoritySourceSpans,
     Clarification,
@@ -123,6 +127,60 @@ class RuntimeDiagnosticTests(unittest.TestCase):
         self.assertEqual("Podatek wynosi 15% podstawy opodatkowania.", provision["text"])
         self.assertEqual("cit-act", provision["source_span"]["document_id"])
         self.assertNotIn("quote", provision["source_span"])
+
+    def test_authority_extraction_limit_preserves_interpretation_and_judgment(self) -> None:
+        candidates = [
+            RetrievalCandidate(
+                candidate_id=f"interpretation-{index}",
+                document_id=f"interpretation-{index}",
+                source_type="interpretation",
+                text="Interpretacja.",
+            )
+            for index in range(4)
+        ] + [
+            RetrievalCandidate(
+                candidate_id="judgment-1",
+                document_id="judgment-1",
+                source_type="judgment",
+                text="Wyrok.",
+            )
+        ]
+
+        selected = _balanced_authority_extraction_candidates(candidates, limit=4)
+
+        self.assertEqual(4, len(selected))
+        self.assertIn("interpretation", {item.source_type for item in selected})
+        self.assertIn("judgment", {item.source_type for item in selected})
+
+    def test_writer_cannot_drop_a_required_validated_reasoning_claim(self) -> None:
+        answer_plan = AnswerPlan(
+            allowed_claim_ids=["application", "judgment"],
+            sections=[
+                AnswerSection(
+                    section_id="analysis_cost",
+                    title="Koszt",
+                    purpose="Zastosuj prawo i orzecznictwo.",
+                    required_claim_ids=["application", "judgment"],
+                )
+            ],
+        )
+        output = WriterOutput(
+            thesis="Wydatek wymaga oceny.",
+            analysis_sections=[
+                WriterAnalysisSection(
+                    section_id="analysis_cost",
+                    title="Koszt",
+                    content="Zastosowano regułę ustawową.",
+                    claim_ids_used=["application"],
+                )
+            ],
+            claim_ids_used=["application"],
+        )
+
+        self.assertIn(
+            "writer_omitted_required_claim",
+            validate_writer_output(output, answer_plan=answer_plan, bundles=[]),
+        )
 
 
 def research_plan() -> LegalResearchPlan:
@@ -959,6 +1017,141 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
             {provision_id for claim in claims for provision_id in claim.controlling_provision_ids},
         )
         self.assertTrue(any("claim_coverage_repair_applied" in item for item in validation.warnings))
+
+    def test_cost_coverage_requires_application_evidence_and_both_authority_types(self) -> None:
+        issue = LegalIssue(
+            issue_id="pit_cost_deductibility",
+            label="PIT: koszt uzyskania przychodów i ustawowe wyłączenia",
+            tax_domains=["PIT"],
+            legal_mechanism="pit_cost_deductibility",
+            requested_source_types=["statute", "interpretation", "judgment"],
+        )
+        plan = LegalResearchPlan(
+            user_query="Czy zawodowy kurs języka jest kosztem w JDG?",
+            intent=ResearchIntent(mode="mixed_analysis"),
+            issues=[issue],
+            clarification=Clarification(),
+            confidence=0.9,
+        )
+        art_22_span = DocumentSourceSpan(
+            start=0,
+            end=27,
+            document_id="pl-ustawa-o-podatku-dochodowym-od-osob-fizycznych-art-22",
+        )
+        art_23_span = DocumentSourceSpan(
+            start=0,
+            end=25,
+            document_id="pl-ustawa-o-podatku-dochodowym-od-osob-fizycznych-art-23",
+        )
+        art_22 = ProvisionReference(
+            provision_id="pit-22-1",
+            document_id=art_22_span.document_id,
+            citation="art. 22 ust. 1",
+            text="Koszt poniesiony w celu osiągnięcia przychodów.",
+            status="active",
+            source_span=art_22_span,
+        )
+        art_23 = ProvisionReference(
+            provision_id="pit-23-1",
+            document_id=art_23_span.document_id,
+            citation="art. 23 ust. 1",
+            text="Nie uważa się za koszty wskazanych wydatków.",
+            status="active",
+            source_span=art_23_span,
+        )
+
+        def authority_card(document_id: str, document_type: str) -> AuthorityCard:
+            material = "Zweryfikowane rozumowanie organu albo sądu."
+            span = DocumentSourceSpan(
+                start=0,
+                end=len(material),
+                document_id=document_id,
+            )
+            return AuthorityCard(
+                document_id=document_id,
+                signature=f"sig-{document_id}",
+                document_type=document_type,
+                authority_holding=material if document_type == "interpretation" else None,
+                court_holding=material if document_type == "judgment" else None,
+                source_spans=AuthoritySourceSpans(
+                    authority_holding=[span] if document_type == "interpretation" else [],
+                    court_holding=[span] if document_type == "judgment" else [],
+                ),
+                extraction_confidence=0.8,
+            )
+
+        interpretation = authority_card("interpretation-1", "interpretation")
+        judgment = authority_card("judgment-1", "judgment")
+        bundle = EvidenceBundle(
+            issue_id=issue.issue_id,
+            controlling_provisions=[art_22],
+            dependency_provisions=[art_23],
+            supporting_authorities=[interpretation, judgment],
+            coverage_status="complete",
+        )
+
+        initial = _claim_coverage_requirements(plan, [bundle])
+        requirement_ids = {
+            item["requirement_id"] for item in initial[issue.issue_id]
+        }
+        self.assertTrue(
+            {
+                "pit_art_22_1",
+                "pit_art_23_1",
+                "cost_fact_application",
+                "cost_personal_boundary",
+                "cost_evidence_and_documentation",
+                "cost_material_fact_variants",
+                "cost_interpretation_analysis",
+                "cost_judgment_analysis",
+            }.issubset(requirement_ids)
+        )
+
+        claims = [
+            LegalClaim(
+                claim_id="cost_framework",
+                issue_id=issue.issue_id,
+                claim_type="normative_rule",
+                text="Ustawa ustanawia celowościową regułę kosztową i wyłączenia.",
+                status="approved",
+                result="Najpierw bada się związek i ustawowe wyłączenia.",
+                controlling_provision_ids=[art_22.provision_id, art_23.provision_id],
+                source_spans=[art_22_span, art_23_span],
+                confidence=0.9,
+            )
+        ]
+        still_missing = _claim_coverage_requirements(plan, [bundle], claims)
+        self.assertEqual(
+            {
+                item
+                for item in requirement_ids
+                if item.startswith("cost_")
+            },
+            {
+                item["requirement_id"]
+                for item in still_missing[issue.issue_id]
+            },
+        )
+
+        for requirement in still_missing[issue.issue_id]:
+            authority_ids = requirement["allowed_authority_ids"]
+            claims.append(
+                LegalClaim(
+                    claim_id=f"claim_{requirement['requirement_id']}",
+                    issue_id=issue.issue_id,
+                    claim_type=requirement["allowed_claim_types"][0],
+                    text=f"Analiza wymogu {requirement['requirement_id']}.",
+                    status="approved",
+                    result="Wymóg został zastosowany do faktów i dowodów.",
+                    controlling_provision_ids=[art_22.provision_id],
+                    supporting_authority_ids=authority_ids[:1],
+                    coverage_requirement_ids=[requirement["requirement_id"]],
+                    source_spans=[art_22_span],
+                    confidence=0.85,
+                )
+            )
+
+        self.assertEqual({}, _claim_coverage_requirements(plan, [bundle], claims))
 
     def test_writer_integrity_accepts_multiple_verified_citations_for_one_source_id(self) -> None:
         article_21 = ProvisionReference(

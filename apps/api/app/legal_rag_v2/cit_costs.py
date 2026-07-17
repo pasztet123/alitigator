@@ -176,7 +176,7 @@ def enrich_cit_cost_plan(plan: LegalResearchPlan, question: str) -> LegalResearc
     )
     mechanism = "contractual_penalty_cost" if penalty else issue_id
     salient_terms = _salient_cost_terms(question)
-    authority_query = " ".join(
+    factual_authority_query = " ".join(
         (
             *salient_terms,
             label,
@@ -184,10 +184,46 @@ def enrich_cit_cost_plan(plan: LegalResearchPlan, question: str) -> LegalResearc
         )
     )
     if penalty:
-        authority_query += (
+        factual_authority_query += (
             " opóźnienie dostawy wady towarów zwłoka w usunięciu wad "
             "należyta staranność związek z przychodem"
         )
+    legal_standard_query = " ".join(
+        (
+            label,
+            "celowość racjonalność gospodarcza związek przyczynowy",
+            "wydatek osobisty zachowanie zabezpieczenie źródła przychodów",
+            *salient_terms[:6],
+        )
+    )
+    evidence_query = " ".join(
+        (
+            label,
+            "ciężar dowodu dokumentowanie związku z działalnością",
+            "okoliczności poniesienia wydatku faktura dowody wykorzystania",
+            *salient_terms[:6],
+        )
+    )
+    authority_queries = [
+        QueryFamily(
+            family="fact_signature",
+            query=factual_authority_query,
+            lane="authority",
+            origin="fallback",
+        ),
+        QueryFamily(
+            family="legal_concept",
+            query=legal_standard_query,
+            lane="authority",
+            origin="fallback",
+        ),
+        QueryFamily(
+            family="quoted_holding_language",
+            query=evidence_query,
+            lane="authority",
+            origin="fallback",
+        ),
+    ]
 
     issues: list[LegalIssue] = []
     found = False
@@ -221,14 +257,7 @@ def enrich_cit_cost_plan(plan: LegalResearchPlan, question: str) -> LegalResearc
                             and not query.query.upper().startswith(f"{other_domain} ")
                         )
                     ]
-                    + [
-                        QueryFamily(
-                            family="statutory_concept",
-                            query=authority_query,
-                            lane="authority",
-                            origin="fallback",
-                        )
-                    ],
+                    + authority_queries,
                 }
             )
             issues.append(_with_targets(corrected_issue, targets))
@@ -251,14 +280,7 @@ def enrich_cit_cost_plan(plan: LegalResearchPlan, question: str) -> LegalResearc
             transactions=salient_terms,
             positive_fact_constraints=salient_terms,
             requested_source_types=["statute", "interpretation", "judgment"],
-            query_families=[
-                QueryFamily(
-                    family="statutory_concept",
-                    query=authority_query,
-                    lane="authority",
-                    origin="fallback",
-                )
-            ],
+            query_families=authority_queries,
             priority="high",
         )
         issues.append(_with_targets(issue, targets))

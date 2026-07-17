@@ -133,11 +133,17 @@ claim that the supplied provision omits it. A statutory percentage quoted
 directly from primary law is a legal rule, not a newly performed calculation.
 The payload may contain ``claim_coverage_requirements`` and a
 ``completion_request``. Produce separate substantive claims for every listed
-requirement, using one of its exact provision IDs. A definition alone does not
-complete an issue that also lists a tax charge, exemption, rate, threshold or
-filing rule. Never describe primary law as absent when the current issue bundle
-contains it, and never make a global evidence-absence statement based only on
-the scope of one issue.
+requirement, copy its ``requirement_id`` to the claim's
+``coverage_requirement_ids``, use one of its exact provision IDs and respect
+its allowed claim types and authority IDs. An application requirement must
+contain legal subsumption, not another abstract paraphrase of the statute. An
+authority requirement must explain the verified holding or reasoning and the
+material factual similarity or difference; a signature alone is not a claim.
+A definition alone does not complete an issue that also lists a tax charge,
+exemption, rate, threshold, filing rule, fact application, evidentiary issue or
+authority analysis. Never describe primary law as absent when the current
+issue bundle contains it, and never make a global evidence-absence statement
+based only on the scope of one issue.
 """
 
 ANSWER_WRITER_RULES = GLOBAL_LEGAL_SYSTEM_RULES + """
@@ -148,6 +154,10 @@ perform a calculation, create a citation or infer a missing fact. Put material
 uncertainty in risks_and_gaps and list every claim ID you actually use. The
 thesis must be a short, coherent legal conclusion, not a concatenation of claim
 labels, sentence fragments or repeated definitions.
+When an issue requests interpretations or judgments, use the approved
+authority-pattern claims and distinguish non-binding administrative practice
+from court reasoning. If the evidence bundle identifies a missing authority
+type, disclose that precise research gap instead of saying that no gaps exist.
 """
 
 BEST_EFFORT_ANSWER_RULES = """\
@@ -920,7 +930,10 @@ class LegalRagV2Pipeline:
 
         tasks = []
         for lane in retrieval.authorities:
-            for candidate in lane.candidates[: self.config.authority_extraction_candidates_per_issue]:
+            for candidate in _balanced_authority_extraction_candidates(
+                lane.candidates,
+                limit=self.config.authority_extraction_candidates_per_issue,
+            ):
                 tasks.append(extract_one(lane.issue_id, candidate))
 
         for lane in retrieval.authorities:
@@ -1135,6 +1148,19 @@ class LegalRagV2Pipeline:
             calculations=calculations,
         )
         warnings.extend(completion_warnings)
+        remaining_coverage = _claim_coverage_requirements(plan, bundles, claims)
+        if remaining_coverage:
+            warnings.append(
+                "claim_coverage_remaining:"
+                + ",".join(
+                    f"{issue_id}="
+                    + "|".join(
+                        str(requirement["requirement_id"])
+                        for requirement in requirements
+                    )
+                    for issue_id, requirements in sorted(remaining_coverage.items())
+                )
+            )
         return claims, ValidationRecord(
             stage="claim_validation",
             passed=not errors,
@@ -1374,12 +1400,12 @@ def _claim_coverage_requirements(
     bundles: list[EvidenceBundle],
     claims: Optional[list[LegalClaim]] = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """List retrieved primary rules that still need a substantive claim.
+    """List evidence-backed reasoning steps that still need a claim.
 
-    This is evidence-driven: it selects only exact provisions already present
-    in a bundle.  It does not state their legal outcome.  The second synthesis
-    pass can therefore repair an omission without introducing benchmark
-    answers or relying on model memory.
+    Requirements never encode the legal outcome. They select exact provisions,
+    authority cards and types of reasoning already justified by the issue and
+    its evidence bundle. The second synthesis pass can therefore repair a
+    shallow answer without hard-coding the answer to a benchmark.
     """
 
     bundle_by_issue = {bundle.issue_id: bundle for bundle in bundles}
@@ -1403,7 +1429,13 @@ def _claim_coverage_requirements(
             )
         )
         required_vat_timing = issue.issue_id == "vat_input_deduction_timing"
-        if not family_kind and not transfer_pricing and not required_vat_timing:
+        cost_issue = _is_income_tax_cost_issue(issue)
+        if (
+            not family_kind
+            and not transfer_pricing
+            and not required_vat_timing
+            and not cost_issue
+        ):
             continue
         bundle = bundle_by_issue.get(issue.issue_id)
         if bundle is None:
@@ -1413,16 +1445,12 @@ def _claim_coverage_requirements(
             *bundle.dependency_provisions,
             *bundle.exception_provisions,
         ]
-        bound_ids = {
-            provision_id
-            for claim in claims_by_issue.get(issue.issue_id, [])
-            for provision_id in claim.controlling_provision_ids
-        }
-        bound = [
-            provision for provision in provisions if provision.provision_id in bound_ids
-        ]
         requirements: list[dict[str, Any]] = []
-        for requirement_id, citation_pattern, document_pattern in _required_issue_dependency_patterns(issue):
+        for (
+            requirement_id,
+            citation_pattern,
+            document_pattern,
+        ) in _required_issue_dependency_patterns(issue):
             matches = [
                 provision
                 for provision in provisions
@@ -1432,21 +1460,204 @@ def _claim_coverage_requirements(
             if not matches:
                 continue
             representative = min(matches, key=lambda item: (len(item.citation), item.citation))
-            if any(
-                _citations_are_compatible(representative.citation, provision.citation)
-                for provision in bound
-            ):
-                continue
             requirements.append(
                 {
                     "requirement_id": requirement_id,
                     "citation": representative.citation,
                     "allowed_provision_ids": [item.provision_id for item in matches],
+                    "allowed_claim_types": ["normative_rule", "application"],
+                    "allowed_authority_ids": [],
+                    "purpose": "Wyjaśnij materialną regułę wynikającą z tej jednostki.",
+                    "requires_explicit_acknowledgement": False,
                 }
             )
-        if requirements:
-            result[issue.issue_id] = requirements
+        if cost_issue and provisions:
+            allowed_provision_ids = list(
+                dict.fromkeys(item.provision_id for item in provisions)
+            )
+            controlling_citation = next(
+                (
+                    item.citation
+                    for item in provisions
+                    if re.search(r"art\.\s*(?:15|22)\s+ust\.\s*1", item.citation, re.I)
+                ),
+                provisions[0].citation,
+            )
+            cost_reasoning = (
+                (
+                    "cost_fact_application",
+                    ["application"],
+                    "Zastosuj regułę kosztową do wszystkich istotnych faktów z pytania, "
+                    "wskaż najbardziej prawdopodobny wynik i wyjaśnij związek wydatku "
+                    "z osiąganiem, zachowaniem albo zabezpieczeniem przychodów.",
+                ),
+                (
+                    "cost_personal_boundary",
+                    ["application"],
+                    "Oceń granicę między wydatkiem gospodarczym i osobistym, w tym "
+                    "prywatną użyteczność, mieszane wykorzystanie i znaczenie "
+                    "konkretnie wskazanych faktów zawodowych.",
+                ),
+                (
+                    "cost_evidence_and_documentation",
+                    ["application", "risk"],
+                    "Wyjaśnij ciężar dowodu, znaczenie faktury oraz konkretne dokumenty "
+                    "potwierdzające cel, racjonalność i faktyczne wykorzystanie wydatku.",
+                ),
+                (
+                    "cost_material_fact_variants",
+                    ["application", "risk"],
+                    "Porównaj warianty stanu faktycznego wyraźnie wskazane przez "
+                    "użytkownika i wyjaśnij, które różnice mogą zmienić wynik.",
+                ),
+            )
+            requirements.extend(
+                {
+                    "requirement_id": requirement_id,
+                    "citation": controlling_citation,
+                    "allowed_provision_ids": allowed_provision_ids,
+                    "allowed_claim_types": claim_types,
+                    "allowed_authority_ids": [],
+                    "purpose": purpose,
+                    "requires_explicit_acknowledgement": True,
+                }
+                for requirement_id, claim_types, purpose in cost_reasoning
+            )
+            authority_groups = {
+                "cost_interpretation_analysis": [
+                    card
+                    for card in bundle.supporting_authorities
+                    if _authority_source_kind(card) == "interpretation"
+                ],
+                "cost_judgment_analysis": [
+                    card
+                    for card in bundle.supporting_authorities
+                    if _authority_source_kind(card) == "judgment"
+                ],
+            }
+            authority_purposes = {
+                "cost_interpretation_analysis": (
+                    "Omów zweryfikowane stanowisko organu podatkowego, jego tok "
+                    "rozumowania oraz podobieństwa i różnice względem faktów użytkownika; "
+                    "zaznacz niewiążący charakter interpretacji w cudzej sprawie."
+                ),
+                "cost_judgment_analysis": (
+                    "Omów zweryfikowaną tezę lub rozumowanie sądu oraz podobieństwa i "
+                    "różnice względem faktów użytkownika; nie przedstawiaj wyroku jako "
+                    "źródła powszechnie obowiązującego prawa."
+                ),
+            }
+            for requirement_id, cards in authority_groups.items():
+                if not cards:
+                    continue
+                requirements.append(
+                    {
+                        "requirement_id": requirement_id,
+                        "citation": controlling_citation,
+                        "allowed_provision_ids": allowed_provision_ids,
+                        "allowed_claim_types": ["authority_pattern"],
+                        "allowed_authority_ids": list(
+                            dict.fromkeys(card.document_id for card in cards)
+                        ),
+                        "purpose": authority_purposes[requirement_id],
+                        "requires_explicit_acknowledgement": True,
+                    }
+                )
+
+        issue_claims = claims_by_issue.get(issue.issue_id, [])
+        missing_requirements: list[dict[str, Any]] = []
+        for requirement in requirements:
+            allowed_provisions = set(requirement["allowed_provision_ids"])
+            allowed_authorities = set(requirement.get("allowed_authority_ids", []))
+            allowed_claim_types = set(requirement.get("allowed_claim_types", []))
+            explicit = bool(requirement.get("requires_explicit_acknowledgement"))
+            fulfilled = any(
+                (not allowed_claim_types or claim.claim_type in allowed_claim_types)
+                and bool(allowed_provisions.intersection(claim.controlling_provision_ids))
+                and (
+                    not allowed_authorities
+                    or bool(allowed_authorities.intersection(claim.supporting_authority_ids))
+                )
+                and (
+                    not explicit
+                    or requirement["requirement_id"]
+                    in claim.coverage_requirement_ids
+                )
+                for claim in issue_claims
+            )
+            if not fulfilled:
+                missing_requirements.append(requirement)
+        if missing_requirements:
+            result[issue.issue_id] = missing_requirements
     return result
+
+
+def _is_income_tax_cost_issue(issue: Any) -> bool:
+    text = " ".join(
+        (
+            str(issue.issue_id),
+            str(issue.label),
+            str(issue.legal_mechanism),
+            *(str(item) for item in issue.possible_provision_concepts),
+        )
+    ).casefold()
+    return bool(
+        "cost_deductibility" in text
+        or "contractual_penalty_cost" in text
+        or "koszt uzyskania przychod" in text
+        or "koszt podatkow" in text
+    )
+
+
+def _authority_source_kind(card: AuthorityCard) -> str:
+    document_type = card.document_type.casefold()
+    if document_type in {"interpretation", "general_interpretation"}:
+        return "interpretation"
+    if document_type in {"judgment", "resolution"}:
+        return "judgment"
+    return "other"
+
+
+def _balanced_authority_extraction_candidates(
+    candidates: Iterable[RetrievalCandidate],
+    *,
+    limit: int,
+) -> list[RetrievalCandidate]:
+    """Preserve at least one administrative and judicial source when found."""
+
+    ordered = list(candidates)
+    selected: list[RetrievalCandidate] = []
+    selected_ids: set[str] = set()
+
+    def candidate_kind(candidate: RetrievalCandidate) -> str:
+        source_type = candidate.source_type.casefold()
+        if source_type in {"interpretation", "general_interpretation"}:
+            return "interpretation"
+        if source_type in {"judgment", "resolution"}:
+            return "judgment"
+        return "other"
+
+    for required_kind in ("interpretation", "judgment"):
+        match = next(
+            (
+                candidate
+                for candidate in ordered
+                if candidate_kind(candidate) == required_kind
+                and candidate.candidate_id not in selected_ids
+            ),
+            None,
+        )
+        if match is not None and len(selected) < limit:
+            selected.append(match)
+            selected_ids.add(match.candidate_id)
+    for candidate in ordered:
+        if len(selected) >= limit:
+            break
+        if candidate.candidate_id in selected_ids:
+            continue
+        selected.append(candidate)
+        selected_ids.add(candidate.candidate_id)
+    return selected
 
 
 def _build_provision_graph(
@@ -1707,6 +1918,26 @@ def _build_evidence_bundles(
             missing_sources.append("authority")
         elif not cards:
             missing_sources.append("authority_material")
+        requested_authorities = {
+            str(value).casefold()
+            for value in issue.requested_source_types
+            if str(value).casefold()
+            in {
+                "interpretation",
+                "general_interpretation",
+                "guidance",
+                "judgment",
+                "resolution",
+            }
+        }
+        if requested_authorities.intersection(
+            {"interpretation", "general_interpretation"}
+        ) and not any(_authority_source_kind(card) == "interpretation" for card in current_cards):
+            missing_sources.append("authority_interpretation")
+        if requested_authorities.intersection(
+            {"judgment", "resolution"}
+        ) and not any(_authority_source_kind(card) == "judgment" for card in current_cards):
+            missing_sources.append("authority_judgment")
         required_dependency_patterns = _required_issue_dependency_patterns(issue)
         all_issue_provisions = (*controlling, *dependencies, *exceptions)
         missing_dependencies = [
@@ -2577,7 +2808,10 @@ def _build_answer_plan(
     sections: list[AnswerSection] = []
     for issue in plan.issues:
         issue_claim_ids = [
-            claim.claim_id for claim in claims if claim.issue_id == issue.issue_id
+            claim.claim_id
+            for claim in claims
+            if claim.issue_id == issue.issue_id
+            and claim.status in {"approved", "conditional_missing_fact"}
         ]
         sections.append(
             AnswerSection(
@@ -2611,6 +2845,14 @@ def validate_writer_output(
     )
     if not used.issubset(allowed_claims):
         errors.append("writer_used_unknown_or_blocked_claim")
+    required_claims = {
+        claim_id
+        for section in answer_plan.sections
+        for claim_id in section.required_claim_ids
+        if claim_id in allowed_claims
+    }
+    if required_claims - used:
+        errors.append("writer_omitted_required_claim")
     # A provision ID can identify a source record that exposes several
     # editorial units (for example art. 21 and art. 26 from the same statute
     # source). Keep every verified citation for that ID; a scalar map silently
@@ -3039,6 +3281,27 @@ def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:
             for source in bundle.missing_sources
         )
     ]
+    authority_gaps = [
+        f"Nie znaleziono materialnej treści {source_label} dla: "
+        f"{issue_labels.get(bundle.issue_id, bundle.issue_id)}."
+        for bundle in bundles
+        for missing_source, source_label in (
+            ("authority_interpretation", "interpretacji podatkowej"),
+            ("authority_judgment", "orzeczenia sądu"),
+        )
+        if missing_source in bundle.missing_sources
+    ]
+    remaining_coverage = _claim_coverage_requirements(plan, bundles, selected)
+    reasoning_gaps = [
+        "Nie ukończono wymaganych elementów rozumowania dla "
+        f"{issue_labels.get(issue_id, issue_id)}: "
+        + ", ".join(
+            str(requirement["requirement_id"])
+            for requirement in requirements
+        )
+        + "."
+        for issue_id, requirements in remaining_coverage.items()
+    ]
     claim_gaps = [
         "Nie ukończono syntezy materialnej konkluzji dla: "
         f"{issue.label}."
@@ -3069,6 +3332,8 @@ def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:
                 [
                     *missing_questions,
                     *source_gaps,
+                    *authority_gaps,
+                    *reasoning_gaps,
                     *claim_gaps,
                     *conditional_gaps,
                     *synthesis_gap,

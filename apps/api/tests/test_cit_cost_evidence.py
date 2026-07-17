@@ -110,7 +110,7 @@ class CitCostEvidenceTests(unittest.TestCase):
             query.query
             for query in issue.query_families
             if query.lane in {"authority", "both"}
-            and query.family == "statutory_concept"
+            and query.family == "fact_signature"
         )
 
         self.assertTrue(
@@ -120,6 +120,19 @@ class CitCostEvidenceTests(unittest.TestCase):
         )
         self.assertLess(authority_query.index("kurs"), authority_query.index("PIT:"))
         self.assertNotIn("Podaj aktualną podstawę prawną", authority_query)
+        self.assertEqual(
+            {
+                "fact_signature",
+                "legal_concept",
+                "quoted_holding_language",
+            },
+            {
+                query.family
+                for query in issue.query_families
+                if query.lane in {"authority", "both"}
+                and query.origin == "fallback"
+            },
+        )
 
     def test_explicit_cit_still_wins_for_company_penalty(self) -> None:
         self.assertEqual("CIT", cost_tax_domain(QUESTION))

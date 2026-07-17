@@ -30,6 +30,8 @@ from app.legal_rag_v2.retrieval import (
     LegacySearchBackendAdapter,
     RetrievalCandidate,
     RetrievalConfig,
+    _authority_document_diverse_candidates,
+    _select_authorities_with_query_coverage,
     reciprocal_rank_fusion,
 )
 from app.legal_rag_v2.schemas import (
@@ -64,6 +66,117 @@ class CountingEmbeddingProvider:
                 ]
             )
         return vectors
+
+
+class AuthorityDocumentDiversityTests(unittest.TestCase):
+    def test_final_authority_limit_preserves_source_and_query_family_coverage(self) -> None:
+        families = (
+            QueryFamily(
+                family="fact_signature",
+                query="samochód używany firmowo i prywatnie",
+                lane="authority",
+            ),
+            QueryFamily(
+                family="fact_contrast",
+                query="analogiczny pojazd",
+                lane="authority",
+            ),
+        )
+        candidates = [
+            RetrievalCandidate(
+                candidate_id=f"judgment-{index}",
+                document_id=f"judgment-{index}",
+                text="Wyrok dotyczący pojazdu.",
+                source_type="judgment",
+                score=1.0 - index / 100,
+                query_families=(families[index % 2].family,),
+            )
+            for index in range(6)
+        ]
+        candidates.extend(
+            [
+                RetrievalCandidate(
+                    candidate_id="interpretation-direct",
+                    document_id="interpretation-direct",
+                    text="Interpretacja o użytku mieszanym.",
+                    source_type="interpretation",
+                    score=0.5,
+                    query_families=("fact_signature",),
+                ),
+                RetrievalCandidate(
+                    candidate_id="interpretation-analogy",
+                    document_id="interpretation-analogy",
+                    text="Interpretacja analogiczna.",
+                    source_type="interpretation",
+                    score=0.4,
+                    query_families=("fact_contrast",),
+                ),
+            ]
+        )
+
+        selected = _select_authorities_with_query_coverage(
+            families,
+            candidates,
+            ordinary_limit=4,
+        )
+
+        self.assertEqual(
+            {
+                "interpretation-direct",
+                "interpretation-analogy",
+                "judgment-0",
+                "judgment-1",
+            },
+            {item.document_id for item in selected},
+        )
+
+    def test_one_representative_per_authority_document_prevents_chunk_crowding(self) -> None:
+        candidates = [
+            RetrievalCandidate(
+                candidate_id=f"interpretation-a:{index}",
+                document_id="interpretation-a",
+                chunk_id=f"interpretation-a:{index}",
+                text=(
+                    "Ocena stanowiska: podatnik ma prawo do odliczenia 50% VAT."
+                    if index == 3
+                    else f"Fragment stanu faktycznego {index}."
+                ),
+                source_type="interpretation",
+                score=1.0 - index / 100,
+            )
+            for index in range(8)
+        ]
+        candidates.extend(
+            [
+                RetrievalCandidate(
+                    candidate_id="interpretation-b:0",
+                    document_id="interpretation-b",
+                    chunk_id="interpretation-b:0",
+                    text="Stanowisko jest prawidłowe: 50% VAT przy użytku mieszanym.",
+                    source_type="interpretation",
+                    score=0.7,
+                ),
+                RetrievalCandidate(
+                    candidate_id="judgment-c:0",
+                    document_id="judgment-c",
+                    chunk_id="judgment-c:0",
+                    text="Sąd zważył, że art. 86a wymaga oceny sposobu używania pojazdu.",
+                    source_type="judgment",
+                    score=0.6,
+                ),
+            ]
+        )
+
+        selected = _authority_document_diverse_candidates(candidates)
+
+        self.assertEqual(
+            ["interpretation-a", "interpretation-b", "judgment-c"],
+            [item.document_id for item in selected],
+        )
+        first = selected[0]
+        self.assertIn("prawo do odliczenia 50%", first.text)
+        self.assertEqual(1.0, first.score)
+        self.assertIn("authority_document_diversity", first.positive_reasons)
 
 
 class FakeOpenAIEmbeddings:
@@ -575,6 +688,17 @@ class FakeGateway:
 
 
 class AuthorityExtractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_long_hydrated_section_keeps_exact_span_after_four_thousand_char_cap(self) -> None:
+        text = "Ocena stanowiska:\n" + ("Reguła prawna i zastosowanie. " * 180)
+
+        result = await HeuristicAuthorityExtractor().extract(
+            AuthorityDocument("interpretation-long", text, "interpretation")
+        )
+
+        span = result.card.source_spans.authority_holding[0]
+        self.assertLessEqual(len(result.card.authority_holding or ""), 4_000)
+        self.assertEqual(span.quote, text[span.start : span.end])
+
     async def test_heuristic_extractor_keeps_conclusion_sentence_as_reasoning(self) -> None:
         text = (
             "Organ przeanalizował związek wydatku z działalnością. "

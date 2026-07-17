@@ -9,10 +9,55 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from app.legal_rag_v2.backends import CorpusFtsBackend
+from app.legal_rag_v2.retrieval import RetrievalCandidate
 from app.mysql_rag import build_mysql_chunk_rows
 
 
 class CorpusFtsBackendTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sqlite_hydrates_all_chunks_of_selected_authority_document(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rag.sqlite3"
+            connection = sqlite3.connect(path)
+            connection.executescript(
+                """
+                CREATE TABLE chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    document_id TEXT,
+                    chunk_index INTEGER,
+                    chunk_text TEXT
+                );
+                """
+            )
+            connection.executemany(
+                "INSERT INTO chunks VALUES (?,?,?,?)",
+                [
+                    ("doc-1:0", "doc-1", 0, "Opis stanu faktycznego."),
+                    ("doc-1:1", "doc-1", 1, "Ocena stanowiska."),
+                    ("doc-2:0", "doc-2", 0, "Inny dokument."),
+                ],
+            )
+            connection.commit()
+            connection.close()
+
+            backend = CorpusFtsBackend(backend="sqlite", sqlite_path=path)
+            hydrated = await backend.hydrate_document(
+                RetrievalCandidate(
+                    candidate_id="doc-1:1",
+                    document_id="doc-1",
+                    chunk_id="doc-1:1",
+                    text="Ocena stanowiska.",
+                    source_type="interpretation",
+                    score=0.8,
+                )
+            )
+
+            self.assertEqual("document:doc-1:full", hydrated.chunk_id)
+            self.assertEqual(
+                "Opis stanu faktycznego.\n\nOcena stanowiska.",
+                hydrated.text,
+            )
+            self.assertIn("authority_document_hydrated", hydrated.positive_reasons)
+
     def test_mysql_index_preserves_multi_letter_article_display_reference(self) -> None:
         record = {
             "document_id": "vat-106ga",

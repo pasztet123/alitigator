@@ -182,23 +182,31 @@ class HeuristicAuthorityExtractor:
         source = _coerce_document(document)
         facts, fact_spans = _extract_section(
             source,
-            (r"opis stanu faktycznego", r"stan faktyczny", r"opis zdarzenia przyszłego"),
+            (
+                r"opis\s+stanu\s+faktycznego",
+                r"stan\s+faktyczny",
+                r"opis\s+zdarzenia\s+przyszłego",
+            ),
         )
         issues, issue_spans = _extract_section(
             source,
-            (r"pytani[ea]", r"zagadnienie prawne"),
+            (r"pytani[ea]", r"zagadnienie\s+prawne"),
         )
         taxpayer, taxpayer_spans = _extract_section(
             source,
-            (r"stanowisko wnioskodawcy", r"państwa stanowisko", r"stanowisko podatnika"),
+            (
+                r"stanowisko\s+wnioskodawcy",
+                r"państwa\s+stanowisko",
+                r"stanowisko\s+podatnika",
+            ),
         )
         authority_holding, authority_spans = _extract_section(
             source,
-            (r"ocena stanowiska", r"stanowisko organu"),
+            (r"ocena\s+stanowiska", r"stanowisko\s+organu"),
         )
         court_holding, court_spans = _extract_section(
             source,
-            (r"rozstrzygnięcie sądu", r"sąd zważył"),
+            (r"rozstrzygnięcie\s+sądu", r"sąd\s+zważył"),
         )
         outcome, outcome_spans = _extract_outcome(source)
         reasoning, reasoning_spans = _extract_reasoning(source)
@@ -362,10 +370,11 @@ def _extract_section(
         return None, []
     following = source.text[match.end() :]
     next_heading = re.search(
-        r"(?im)^\s*(?:opis stanu faktycznego|stan faktyczny|opis zdarzenia przyszłego|"
-        r"pytani[ea]|zagadnienie prawne|stanowisko wnioskodawcy|państwa stanowisko|"
-        r"stanowisko podatnika|ocena stanowiska|stanowisko organu|rozstrzygnięcie sądu|"
-        r"sąd zważył|uzasadnienie|pouczenie)\s*:?[ \t]*$",
+        r"(?im)^\s*(?:opis\s+stanu\s+faktycznego|stan\s+faktyczny|"
+        r"opis\s+zdarzenia\s+przyszłego|pytani[ea]|zagadnienie\s+prawne|"
+        r"stanowisko\s+wnioskodawcy|państwa\s+stanowisko|"
+        r"stanowisko\s+podatnika|ocena\s+stanowiska|stanowisko\s+organu|"
+        r"rozstrzygnięcie\s+sądu|sąd\s+zważył|uzasadnienie|pouczenie)\s*:?[ \t]*$",
         following,
     )
     end = match.end() + (next_heading.start() if next_heading else len(following))
@@ -376,6 +385,12 @@ def _extract_section(
         end -= 1
     if end <= start:
         return None, []
+    # Hydrated authority documents can contain tens of thousands of
+    # characters. Preserve enough verbatim context for factual comparison
+    # without copying an entire interpretation into every synthesis payload.
+    end = min(end, start + 4_000)
+    while end > start and source.text[end - 1].isspace():
+        end -= 1
     value = source.text[start:end]
     return value, [_span(source, start, end)]
 

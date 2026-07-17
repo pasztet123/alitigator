@@ -23,6 +23,7 @@ from app.legal_rag_v2.pipeline import (
     _build_evidence_bundles,
     _build_provision_graph,
     _claim_coverage_requirements,
+    _classify_authority_for_issue,
     _git_commit,
     _should_use_best_effort_writer,
     validate_writer_output,
@@ -355,6 +356,51 @@ class FakeAuthorityExtractor:
 
 
 class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
+    def test_vehicle_authorities_are_classified_by_legal_mechanism_not_exact_vehicle(self) -> None:
+        issue = LegalIssue(
+            issue_id="mixed_use_vehicle_vat",
+            label="VAT od pojazdu używanego mieszanie",
+            tax_domains=["VAT"],
+            legal_mechanism="mixed_use_vehicle_vat_deduction",
+        )
+
+        def card(document_id: str, text: str) -> AuthorityCard:
+            span = DocumentSourceSpan(
+                start=0,
+                end=len(text),
+                document_id=document_id,
+            )
+            return AuthorityCard(
+                document_id=document_id,
+                document_type="interpretation",
+                facts=[text],
+                source_spans=AuthoritySourceSpans(facts=[span]),
+                extraction_confidence=0.8,
+            )
+
+        direct = _classify_authority_for_issue(
+            issue,
+            card(
+                "direct",
+                "Samochód jest używany prywatnie i firmowo; od paliwa przysługuje 50% VAT.",
+            ),
+        )
+        analogous = _classify_authority_for_issue(
+            issue,
+            card(
+                "analogy",
+                "Motocykl podlega art. 86a; przy użytku prywatnym odlicza się 50% VAT.",
+            ),
+        )
+        unrelated = _classify_authority_for_issue(
+            issue,
+            card("unrelated", "Import usług podlega rozliczeniu przez nabywcę."),
+        )
+
+        self.assertEqual("direct_support", direct.evidence_relation)
+        self.assertEqual("analogous_support", analogous.evidence_relation)
+        self.assertEqual("unclassified", unrelated.evidence_relation)
+
     async def test_pipeline_serves_best_effort_answer_when_claim_synthesis_fails(self) -> None:
         class ClaimFailureGateway(FakeGateway):
             async def generate_structured(self, *, response_model, **kwargs):

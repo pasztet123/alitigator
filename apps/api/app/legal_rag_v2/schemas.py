@@ -339,6 +339,12 @@ class AuthorityCard(V2Schema):
     document_id: NonEmptyStr
     signature: str = ""
     document_type: NonEmptyStr
+    evidence_relation: Literal[
+        "direct_support",
+        "analogous_support",
+        "context_for_full_deduction",
+        "unclassified",
+    ] = "unclassified"
     authority: str = ""
     court: str = ""
     date: str = ""

@@ -67,7 +67,7 @@ from .schemas import (
 )
 from .trace import TraceWriter
 from .transfer_pricing import enrich_transfer_pricing_plan, question_targets_transfer_pricing
-from .vat import enrich_input_vat_deduction_plan
+from .vat import enrich_input_vat_deduction_plan, enrich_mixed_use_vehicle_vat_plan
 from .wht import WhtPayAndRefundCalculationEngine, enrich_crossborder_wht_plan
 
 
@@ -172,6 +172,11 @@ tworzyć. Jeżeli przekazano zweryfikowane interpretacje lub orzeczenia, omów i
 rzeczywiste tezy, rozumowanie i istotne podobieństwa albo różnice faktyczne.
 Gdy dostępne są oba rodzaje źródeł, odróżnij praktykę organów od stanowiska
 sądów i wykorzystaj co najmniej po jednym relewantnym materiale każdego typu.
+Pole ``evidence_relation`` odróżnia wsparcie bezpośrednie, analogiczne i
+kontekst dotyczący pełnego odliczenia; nie odrzucaj analogii wyłącznie dlatego,
+że dotyczy motocykla albo leasingu, jeżeli mechanizm prawny jest ten sam. Nie
+opisuj wyniku wyroku, gdy ``holding_verified`` jest false; możesz wtedy podać
+wyłącznie ostrożną informację o jego zakresie tematycznym.
 Nie przedstawiaj samego numeru dokumentu jako wsparcia bez jego materialnej
 treści. W treści nie podawaj numerów artykułów ani sygnatur; zweryfikowana
 lista źródeł zostanie dodana przez aplikację. Każdy materiał w payloadzie ma
@@ -425,11 +430,14 @@ class LegalRagV2Pipeline:
             force_fallback=force_planner_fallback,
         )
         timings["planner"] = _elapsed_ms(stage)
-        plan = enrich_input_vat_deduction_plan(
-            enrich_cit_cost_plan(
-                enrich_transfer_pricing_plan(
-                    enrich_family_foundation_plan(
-                        enrich_crossborder_wht_plan(planner_outcome.plan, question),
+        plan = enrich_mixed_use_vehicle_vat_plan(
+            enrich_input_vat_deduction_plan(
+                enrich_cit_cost_plan(
+                    enrich_transfer_pricing_plan(
+                        enrich_family_foundation_plan(
+                            enrich_crossborder_wht_plan(planner_outcome.plan, question),
+                            question,
+                        ),
                         question,
                     ),
                     question,
@@ -480,11 +488,14 @@ class LegalRagV2Pipeline:
             )
             if augmented.fallback_trace.fallback_used:
                 planner_outcome = augmented
-                plan = enrich_input_vat_deduction_plan(
-                    enrich_cit_cost_plan(
-                        enrich_transfer_pricing_plan(
-                            enrich_family_foundation_plan(
-                                enrich_crossborder_wht_plan(augmented.plan, question),
+                plan = enrich_mixed_use_vehicle_vat_plan(
+                    enrich_input_vat_deduction_plan(
+                        enrich_cit_cost_plan(
+                            enrich_transfer_pricing_plan(
+                                enrich_family_foundation_plan(
+                                    enrich_crossborder_wht_plan(augmented.plan, question),
+                                    question,
+                                ),
                                 question,
                             ),
                             question,
@@ -914,20 +925,38 @@ class LegalRagV2Pipeline:
         ) -> tuple[str, Optional[AuthorityCard], dict[str, Any]]:
             try:
                 async with semaphore:
+                    source_candidate = candidate
+                    hydration = getattr(
+                        self.retriever.authority_lane.backend,
+                        "hydrate_document",
+                        None,
+                    )
+                    hydrated = False
+                    if hydration is not None:
+                        try:
+                            source_candidate = await asyncio.wait_for(
+                                hydration(candidate),
+                                timeout=8.0,
+                            )
+                            hydrated = len(source_candidate.text) > len(candidate.text)
+                        except Exception:
+                            source_candidate = candidate
                     # A missing authority card is non-fatal. The controlling
                     # primary-law bundle remains available to the renderer.
                     extracted = await asyncio.wait_for(
-                        self.authority_extractor.extract(candidate),
+                        self.authority_extractor.extract(source_candidate),
                         timeout=12.0,
                     )
                 card = getattr(extracted, "card", extracted)
                 if not isinstance(card, AuthorityCard):
                     card = AuthorityCard.model_validate(card)
-                _validate_authority_spans(card, candidate)
+                _validate_authority_spans(card, source_candidate)
                 trace_payload = getattr(extracted, "trace", {})
                 return issue_id, card, {
                     "issue_id": issue_id,
                     "document_id": candidate.document_id,
+                    "document_hydrated": hydrated,
+                    "source_characters": len(source_candidate.text),
                     **dict(trace_payload or {}),
                 }
             except Exception as exc:
@@ -1438,11 +1467,15 @@ def _claim_coverage_requirements(
             )
         )
         required_vat_timing = issue.issue_id == "vat_input_deduction_timing"
+        vehicle_vat_issue = issue.issue_id == "mixed_use_vehicle_vat" or (
+            "mixed_use_vehicle_vat" in str(issue.legal_mechanism).casefold()
+        )
         cost_issue = _is_income_tax_cost_issue(issue)
         if (
             not family_kind
             and not transfer_pricing
             and not required_vat_timing
+            and not vehicle_vat_issue
             and not cost_issue
         ):
             continue
@@ -1569,6 +1602,94 @@ def _claim_coverage_requirements(
                             dict.fromkeys(card.document_id for card in cards)
                         ),
                         "purpose": authority_purposes[requirement_id],
+                        "requires_explicit_acknowledgement": True,
+                    }
+                )
+        if vehicle_vat_issue and provisions:
+            allowed_provision_ids = list(
+                dict.fromkeys(item.provision_id for item in provisions)
+            )
+            controlling_citation = next(
+                (
+                    item.citation
+                    for item in provisions
+                    if re.search(r"art\.\s*86a\s+ust\.\s*1", item.citation, re.I)
+                ),
+                provisions[0].citation,
+            )
+            vehicle_reasoning = (
+                (
+                    "vehicle_vat_actual_use_first",
+                    ["application"],
+                    "Najpierw oceń faktyczny sposób używania pojazdu. Wyjaśnij, czy "
+                    "jawny użytek prywatny pozwala uznać pojazd za wykorzystywany "
+                    "wyłącznie gospodarczo, zanim omówisz ewidencję i VAT-26.",
+                ),
+                (
+                    "vehicle_vat_mixed_use_and_fuel",
+                    ["application"],
+                    "Zastosuj limit dla użytku mieszanego i wyjaśnij, czy obejmuje "
+                    "paliwo oraz czy własność albo ujęcie auta w środkach trwałych "
+                    "stanowi warunek odliczenia.",
+                ),
+                (
+                    "vehicle_vat_full_deduction_conditions",
+                    ["application", "risk"],
+                    "Rozdziel materialny warunek wyłącznego użytku gospodarczego od "
+                    "formalnych obowiązków ewidencji przebiegu i informacji VAT-26; "
+                    "nie przedstawiaj samych formalności jako wystarczających do 100%.",
+                ),
+                (
+                    "vehicle_vat_invoice_and_evidence",
+                    ["application", "risk"],
+                    "Wyjaśnij znaczenie faktury i dowodów związku zakupu paliwa z "
+                    "czynnościami opodatkowanymi.",
+                ),
+            )
+            requirements.extend(
+                {
+                    "requirement_id": requirement_id,
+                    "citation": controlling_citation,
+                    "allowed_provision_ids": allowed_provision_ids,
+                    "allowed_claim_types": claim_types,
+                    "allowed_authority_ids": [],
+                    "purpose": purpose,
+                    "requires_explicit_acknowledgement": True,
+                }
+                for requirement_id, claim_types, purpose in vehicle_reasoning
+            )
+            for requirement_id, source_kind, purpose in (
+                (
+                    "vehicle_vat_interpretation_analysis",
+                    "interpretation",
+                    "Omów direct, analogous lub contextual support z interpretacji "
+                    "dotyczących tego samego mechanizmu art. 86a; różny pojazd albo "
+                    "leasing nie wystarcza do odrzucenia analogii.",
+                ),
+                (
+                    "vehicle_vat_judgment_analysis",
+                    "judgment",
+                    "Omów wyłącznie zweryfikowaną tezę lub rozumowanie sądu. Nie "
+                    "przypisuj sądowi wyniku, którego nie potwierdza source span.",
+                ),
+            ):
+                cards = [
+                    card
+                    for card in bundle.supporting_authorities
+                    if _authority_source_kind(card) == source_kind
+                ]
+                if not cards:
+                    continue
+                requirements.append(
+                    {
+                        "requirement_id": requirement_id,
+                        "citation": controlling_citation,
+                        "allowed_provision_ids": allowed_provision_ids,
+                        "allowed_claim_types": ["authority_pattern"],
+                        "allowed_authority_ids": list(
+                            dict.fromkeys(card.document_id for card in cards)
+                        ),
+                        "purpose": purpose,
                         "requires_explicit_acknowledgement": True,
                     }
                 )
@@ -1921,10 +2042,18 @@ def _build_evidence_bundles(
             if item.provision_id not in controlling_ids
         ]
 
-        cards = [
-            card
+        classified_cards = [
+            _classify_authority_for_issue(issue, card)
             for card in authority_cards.get(issue.issue_id, [])
             if _authority_card_has_material(card)
+        ]
+        vehicle_vat_issue = issue.issue_id == "mixed_use_vehicle_vat" or (
+            "mixed_use_vehicle_vat" in str(issue.legal_mechanism).casefold()
+        )
+        cards = [
+            card
+            for card in classified_cards
+            if not vehicle_vat_issue or card.evidence_relation != "unclassified"
         ]
         current_cards: list[AuthorityCard] = []
         historical_cards: list[AuthorityCard] = []
@@ -2053,6 +2182,20 @@ def _required_issue_dependency_patterns(
         return (
             ("pit_art_22_1", r"art\.\s*22\s+ust\.\s*1(?:\s|$)", pit_act),
             ("pit_art_23_1", r"art\.\s*23\s+ust\.\s*1(?:\s|$)", pit_act),
+        )
+    if issue_id == "mixed_use_vehicle_vat" or "mixed_use_vehicle_vat" in issue_concepts:
+        return (
+            ("vat_art_86_1", r"art\.\s*86\s+ust\.\s*1(?:\s|$)", vat_act),
+            ("vat_art_86a_1", r"art\.\s*86a\s+ust\.\s*1(?:\s|$)", vat_act),
+            ("vat_art_86a_2_3", r"art\.\s*86a\s+ust\.\s*2\s+pkt\s*3", vat_act),
+            (
+                "vat_art_86a_3_1_a",
+                r"art\.\s*86a\s+ust\.\s*3\s+pkt\s*1\s+lit\.\s*a",
+                vat_act,
+            ),
+            ("vat_art_86a_4_1", r"art\.\s*86a\s+ust\.\s*4\s+pkt\s*1", vat_act),
+            ("vat_art_86a_6", r"art\.\s*86a\s+ust\.\s*6(?:\s|$)", vat_act),
+            ("vat_art_86a_12", r"art\.\s*86a\s+ust\.\s*12(?:\s|$)", vat_act),
         )
     if issue_id == "vat_input_deduction_timing" or "input_vat_deduction_timing" in issue_concepts:
         return (
@@ -2997,6 +3140,7 @@ def _best_effort_model_evidence(
                     "source_id": authority.document_id,
                     "issue_id": bundle.issue_id,
                     "type": authority.document_type,
+                    "evidence_relation": authority.evidence_relation,
                     "signature": authority.signature or authority.document_id,
                     "authority": authority.authority,
                     "court": authority.court,
@@ -3008,6 +3152,11 @@ def _best_effort_model_evidence(
                     "reasoning": authority.reasoning or "",
                     "outcome": authority.outcome or "",
                     "distinguishing_facts": authority.distinguishing_facts,
+                    "holding_verified": bool(
+                        authority.authority_holding
+                        or authority.court_holding
+                        or authority.reasoning
+                    ),
                     "material": material,
                 }
             )
@@ -3043,6 +3192,56 @@ def _authority_card_has_material(card: AuthorityCard) -> bool:
             card.outcome,
         )
     )
+
+
+def _classify_authority_for_issue(issue: Any, card: AuthorityCard) -> AuthorityCard:
+    if not (
+        str(issue.issue_id) == "mixed_use_vehicle_vat"
+        or "mixed_use_vehicle_vat" in str(issue.legal_mechanism).casefold()
+    ):
+        return card
+    text = " ".join(
+        str(value or "")
+        for value in (
+            *card.facts,
+            *card.issues,
+            *card.cited_provisions,
+            card.authority_holding,
+            card.court_holding,
+            card.reasoning,
+            card.outcome,
+            *card.distinguishing_facts,
+        )
+    ).casefold()
+    has_vehicle_mechanism = bool(
+        re.search(r"art\.\s*86a|pojazd\w*|samoch[oó]d\w*|motocykl\w*", text, re.I)
+    )
+    has_fifty_percent_rule = bool(
+        re.search(r"(?:50\s*%|pięćdziesi[ąa]t\w*\s+procent|połow\w*\s+podat)", text, re.I)
+    )
+    has_mixed_use = bool(
+        re.search(r"użytk\w*\s+mieszan\w*|cel\w*\s+prywatn\w*|prywatn\w*", text, re.I)
+    )
+    has_fuel_or_operation = bool(
+        re.search(r"paliw\w*|wydatk\w*\s+eksploatacyjn\w*|eksploatacj\w*", text, re.I)
+    )
+    analogous_fact = bool(re.search(r"motocykl\w*|leasing\w*", text, re.I))
+    full_deduction_context = bool(
+        re.search(
+            r"100\s*%|pełn\w*\s+odliczeni\w*|wyłącznie\s+do\s+działalno\w*|"
+            r"VAT-?26|ewidencj\w*\s+przebieg\w*",
+            text,
+            re.I,
+        )
+    )
+    relation = "unclassified"
+    if has_vehicle_mechanism and has_fifty_percent_rule and (
+        has_mixed_use or has_fuel_or_operation
+    ):
+        relation = "analogous_support" if analogous_fact else "direct_support"
+    elif has_vehicle_mechanism and full_deduction_context:
+        relation = "context_for_full_deduction"
+    return card.model_copy(update={"evidence_relation": relation})
 
 
 def _scrub_unverified_best_effort_references(

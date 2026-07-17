@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -60,6 +61,58 @@ def _sqlite_match_query(query: str) -> str:
 
 def _mysql_match_query(query: str) -> str:
     return " ".join(f"{token}*" if len(token) >= 4 else token for token in _query_tokens(query))
+
+
+def _merge_document_chunks(chunks: Sequence[str], *, max_chars: int = 60_000) -> str:
+    merged = ""
+    for raw in chunks:
+        chunk = str(raw or "").strip()
+        if not chunk:
+            continue
+        if not merged:
+            merged = chunk
+        else:
+            overlap = 0
+            for size in range(min(500, len(merged), len(chunk)), 40, -1):
+                if merged[-size:] == chunk[:size]:
+                    overlap = size
+                    break
+            merged += chunk[overlap:] if overlap else "\n\n" + chunk
+        if len(merged) >= max_chars:
+            return merged[:max_chars]
+    return merged
+
+
+def _authority_document_excerpt(text: str, *, max_chars: int = 18_000) -> str:
+    """Keep facts, explicit disposition and legal assessment in one compact source."""
+
+    if len(text) <= max_chars:
+        return text
+    intervals: list[tuple[int, int]] = [(0, min(3_500, len(text)))]
+    heading_pattern = re.compile(
+        r"(?im)^\s*(?:ocena\s+stanowiska|ocena\s*\n\s*stanowiska|"
+        r"uzasadnienie(?:\s+interpretacji\s+indywidualnej)?|"
+        r"rozstrzygnięcie\s+sądu|sąd\s+zważył)\s*:?[ \t]*$"
+    )
+    for match in heading_pattern.finditer(text):
+        intervals.append((max(0, match.start() - 1_000), min(len(text), match.start() + 9_000)))
+    intervals.append((max(0, len(text) - 3_500), len(text)))
+
+    selected: list[tuple[int, int]] = []
+    budget = max_chars
+    for start, end in intervals:
+        for previous_start, previous_end in selected:
+            if previous_start <= start < previous_end:
+                start = previous_end
+        if start >= end or budget <= 0:
+            continue
+        end = min(end, start + budget)
+        selected.append((start, end))
+        budget -= end - start
+    selected.sort()
+    return "\n\n[... pominięto fragment dokumentu ...]\n\n".join(
+        text[start:end] for start, end in selected
+    )
 
 
 def _normalize_reference(value: str) -> str:
@@ -184,6 +237,68 @@ class CorpusFtsBackend:
             limit,
             source_types,
             metadata_filters,
+        )
+
+    async def hydrate_document(
+        self,
+        candidate: RetrievalCandidate,
+    ) -> RetrievalCandidate:
+        """Expand a selected authority chunk to its source document."""
+
+        if not candidate.document_id:
+            return candidate
+        return await asyncio.to_thread(self._hydrate_document_sync, candidate)
+
+    def _hydrate_document_sync(
+        self,
+        candidate: RetrievalCandidate,
+    ) -> RetrievalCandidate:
+        if self.backend == "mysql":
+            from app.mysql_rag import get_mysql_target, mysql_connection
+
+            _documents_table, chunks_table = get_mysql_target()
+            if not _SAFE_IDENTIFIER_RE.fullmatch(chunks_table):
+                raise ValueError("Unsafe MySQL RAG table identifier")
+            with mysql_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        f"SELECT chunk_text FROM `{chunks_table}` "
+                        "WHERE document_id = %s ORDER BY chunk_index ASC, chunk_id ASC",
+                        (candidate.document_id,),
+                    )
+                    chunks = [str(row.get("chunk_text") or "") for row in cursor.fetchall()]
+        else:
+            if self.sqlite_path is None:
+                from app.rag import ensure_local_index_ready, get_rag_config
+
+                ensure_local_index_ready()
+                db_path = get_rag_config().db_path
+            else:
+                db_path = self.sqlite_path
+            if not db_path.exists():
+                return candidate
+            connection = sqlite3.connect(db_path)
+            try:
+                chunks = [
+                    str(row[0] or "")
+                    for row in connection.execute(
+                        "SELECT chunk_text FROM chunks WHERE document_id = ? "
+                        "ORDER BY chunk_index ASC, chunk_id ASC",
+                        (candidate.document_id,),
+                    ).fetchall()
+                ]
+            finally:
+                connection.close()
+        text = _authority_document_excerpt(_merge_document_chunks(chunks))
+        if not text:
+            return candidate
+        return replace(
+            candidate,
+            text=text,
+            chunk_id=f"document:{candidate.document_id}:full",
+            positive_reasons=tuple(
+                dict.fromkeys((*candidate.positive_reasons, "authority_document_hydrated"))
+            ),
         )
 
     def _search_sync(

@@ -195,7 +195,7 @@ class RetrievalConfig:
     rrf_k: int = 60
     require_vector_index: bool = False
     graph_depth: int = 2
-    lane_concurrency: int = 6
+    lane_concurrency: int = 2
 
 
 class TransparentLegalReranker:
@@ -511,14 +511,23 @@ class _BaseLane:
             explicit_target = _explicit_family_target(family)
             if explicit_target and explicit_target[0]:
                 family_filters["tax_domains"] = [explicit_target[0]]
-            for source_group in source_type_groups:
-                lexical = await _call_backend(
-                    self.backend,
-                    family.query,
-                    limit=self.config.lexical_limit_per_query,
-                    source_types=source_group,
-                    metadata_filters=family_filters,
+            # Interpretation and judgment pools are independent, so retrieve
+            # them concurrently. Combined with the lower lane concurrency,
+            # this keeps the effective database fan-out bounded while halving
+            # single-issue wall time on remote MySQL.
+            lexical_groups = await asyncio.gather(
+                *(
+                    _call_backend(
+                        self.backend,
+                        family.query,
+                        limit=self.config.lexical_limit_per_query,
+                        source_types=source_group,
+                        metadata_filters=family_filters,
+                    )
+                    for source_group in source_type_groups
                 )
+            )
+            for source_group, lexical in zip(source_type_groups, lexical_groups):
                 lexical = [
                     item
                     for item in lexical
@@ -654,16 +663,33 @@ class _BaseLane:
                     "candidate_count_after": len(reranked),
                 }
             )
+        if self.lane_name == "authority":
+            before_document_diversity = len(reranked)
+            reranked = _authority_document_diverse_candidates(reranked)
+            trace.append(
+                {
+                    "event": "authority_document_diversity",
+                    "candidate_count_before": before_document_diversity,
+                    "document_count_after": len(reranked),
+                }
+            )
         # A plan may declare more exact primary-law dependencies than the
         # ordinary top-k.  Never truncate below the number of independently
         # requested exact provisions; doing so makes completeness impossible
         # before evidence validation even begins.
-        selected = _select_with_exact_targets(
-            issue,
-            families,
-            reranked,
-            ordinary_limit=self.config.selected_limit_per_issue,
-        )
+        if self.lane_name == "authority":
+            selected = _select_authorities_with_query_coverage(
+                families,
+                reranked,
+                ordinary_limit=self.config.selected_limit_per_issue,
+            )
+        else:
+            selected = _select_with_exact_targets(
+                issue,
+                families,
+                reranked,
+                ordinary_limit=self.config.selected_limit_per_issue,
+            )
         return LaneResult(
             issue_id=issue.issue_id,
             lane=self.lane_name,
@@ -1112,6 +1138,110 @@ def _candidate_from_provision(
         channel_ranks={"references": 1},
         positive_reasons=("provision_graph_dependency",),
     )
+
+
+def _authority_document_diverse_candidates(
+    candidates: Sequence[RetrievalCandidate],
+) -> list[RetrievalCandidate]:
+    """Return one conclusion-bearing representative per authority document."""
+
+    grouped: dict[str, list[RetrievalCandidate]] = {}
+    document_order: list[str] = []
+    for candidate in candidates:
+        document_id = candidate.document_id or candidate.candidate_id
+        if document_id not in grouped:
+            grouped[document_id] = []
+            document_order.append(document_id)
+        grouped[document_id].append(candidate)
+
+    markers = (
+        r"ocena\s+stanowiska",
+        r"stanowisko.{0,80}(?:jest\s+)?(?:prawidłowe|nieprawidłowe)",
+        r"sąd\s+zważył",
+        r"rozstrzygnięcie\s+sądu",
+        r"oddala\s+skargę",
+        r"uchyla\s+zaskarżon",
+        r"w\s+konsekwencji",
+        r"(?:należy|trzeba)\s+uznać",
+        r"prawo\s+do\s+odliczeni",
+    )
+
+    def material_score(candidate: RetrievalCandidate) -> int:
+        text = candidate.text.casefold()
+        return sum(bool(re.search(marker, text, re.I)) for marker in markers)
+
+    representatives: list[RetrievalCandidate] = []
+    for document_id in document_order:
+        document_candidates = grouped[document_id]
+        document_score = max(item.score for item in document_candidates)
+        representative = max(
+            document_candidates,
+            key=lambda item: (material_score(item), item.score, -len(item.text)),
+        )
+        representatives.append(
+            replace(
+                representative,
+                score=document_score,
+                positive_reasons=tuple(
+                    dict.fromkeys(
+                        (*representative.positive_reasons, "authority_document_diversity")
+                    )
+                ),
+            )
+        )
+    return sorted(representatives, key=lambda item: (-item.score, item.candidate_id))
+
+
+def _select_authorities_with_query_coverage(
+    families: Sequence[QueryFamily],
+    candidates: Sequence[RetrievalCandidate],
+    *,
+    ordinary_limit: int,
+) -> tuple[RetrievalCandidate, ...]:
+    """Keep both authority classes visible across intentional query families."""
+
+    if ordinary_limit <= 0:
+        return ()
+    selected: list[RetrievalCandidate] = []
+    selected_ids: set[str] = set()
+
+    def source_kind(candidate: RetrievalCandidate) -> str:
+        source_type = candidate.source_type.casefold()
+        if source_type in {"interpretation", "general_interpretation", "guidance"}:
+            return "interpretive"
+        if source_type in {"judgment", "resolution"}:
+            return "judicial"
+        return "other"
+
+    family_names = list(dict.fromkeys(family.family for family in families))
+    for required_kind, rounds in (("interpretive", 2), ("judicial", 1)):
+        for _round in range(rounds):
+            for family_name in family_names:
+                match = next(
+                    (
+                        candidate
+                        for candidate in candidates
+                        if candidate.candidate_id not in selected_ids
+                        and source_kind(candidate) == required_kind
+                        and family_name in candidate.query_families
+                    ),
+                    None,
+                )
+                if match is None:
+                    continue
+                selected.append(match)
+                selected_ids.add(match.candidate_id)
+                if len(selected) >= ordinary_limit:
+                    return tuple(selected)
+
+    for candidate in candidates:
+        if candidate.candidate_id in selected_ids:
+            continue
+        selected.append(candidate)
+        selected_ids.add(candidate.candidate_id)
+        if len(selected) >= ordinary_limit:
+            break
+    return tuple(selected)
 
 
 def _unique_candidates(

@@ -217,7 +217,10 @@ def main() -> int:
         raise SystemExit("Unsafe MariaDB table configuration")
 
     with mysql_connection() as remote:
-        ensure_schema(remote)
+        # A dry run must remain read-only.  Schema preparation belongs to the
+        # explicit apply path, before the scoped replacement transaction.
+        if args.apply:
+            ensure_schema(remote)
         with remote.cursor() as cursor:
             before = remote_count(cursor, documents_table, document_ids)
         summary = {

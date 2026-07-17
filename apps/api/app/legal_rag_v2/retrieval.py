@@ -10,7 +10,13 @@ from typing import Any, Iterable, Mapping, Optional, Protocol, Sequence, runtime
 
 from .embeddings import EmbeddingHit, VersionedEmbeddingIndex
 from .provision_graph import ProvisionGraph, ProvisionUnit
-from .schemas import LegalIssue, LegalResearchPlan, QueryFamily, RerankScore
+from .schemas import (
+    LegalIssue,
+    LegalResearchPlan,
+    MissingPrimaryRequest,
+    QueryFamily,
+    RerankScore,
+)
 
 
 PRIMARY_SOURCE_TYPES = frozenset({"statute", "regulation", "tax_treaty"})
@@ -855,6 +861,212 @@ class LegalRetriever:
                 trace.append({"event": "primary_to_authority_retry", "retrieval_iteration": 2, "executed": False, "discovered_from_primary": {}})
         return LegalRetrievalResult(primary, authorities, tuple(trace))
 
+    async def recover_missing_primary_law(
+        self,
+        plan: LegalResearchPlan,
+        current: LegalRetrievalResult,
+        requests: Sequence[MissingPrimaryRequest],
+        *,
+        max_requests_per_issue: int = 2,
+        max_requests_total: int = 8,
+    ) -> tuple[LegalRetrievalResult, tuple[dict[str, Any], ...]]:
+        """Recover only model-identified, verified gaps in primary law.
+
+        The model contributes a bounded retrieval hypothesis, never evidence.
+        Each request is tried through progressively broader queries and a
+        candidate is merged only when its source metadata or text confirms the
+        exact requested editorial unit.  Existing selected candidates remain
+        intact, so an unsuccessful second pass cannot cause a retrieval
+        regression or replace an answer with a topical neighbour.
+        """
+        if not self.primary_enabled or not requests:
+            return current, ()
+
+        issues = {issue.issue_id: issue for issue in plan.issues}
+        primary_by_issue = {lane.issue_id: lane for lane in current.primary_law}
+        events: list[dict[str, Any]] = []
+        accepted_by_issue: dict[str, int] = {}
+        total_attempted = 0
+
+        for request in requests:
+            if total_attempted >= max(1, max_requests_total):
+                events.append(
+                    {
+                        "event": "model_primary_gap_request_skipped",
+                        "reason": "total_request_limit",
+                        "issue_id": request.issue_id,
+                        "reference": request.reference,
+                    }
+                )
+                continue
+            issue = issues.get(request.issue_id)
+            reference = _requested_primary_reference(request.reference)
+            if issue is None or reference is None:
+                events.append(
+                    {
+                        "event": "model_primary_gap_request_rejected",
+                        "reason": "unknown_issue_or_invalid_reference",
+                        "issue_id": request.issue_id,
+                        "reference": request.reference,
+                    }
+                )
+                continue
+            if accepted_by_issue.get(issue.issue_id, 0) >= max(1, max_requests_per_issue):
+                events.append(
+                    {
+                        "event": "model_primary_gap_request_skipped",
+                        "reason": "per_issue_request_limit",
+                        "issue_id": issue.issue_id,
+                        "reference": reference,
+                    }
+                )
+                continue
+
+            original = primary_by_issue.get(issue.issue_id)
+            existing_candidates = original.candidates if original else ()
+            domain = _primary_recovery_domain(issue, request.act)
+            if any(
+                _candidate_matches_primary_recovery(candidate, domain=domain, reference=reference)
+                for candidate in existing_candidates
+            ):
+                events.append(
+                    {
+                        "event": "model_primary_gap_request_skipped",
+                        "reason": "already_verified_in_initial_retrieval",
+                        "issue_id": issue.issue_id,
+                        "act": request.act,
+                        "reference": reference,
+                    }
+                )
+                continue
+
+            total_attempted += 1
+            matched: tuple[RetrievalCandidate, ...] = ()
+            selected_strategy = ""
+            retry_trace: list[dict[str, Any]] = []
+            for strategy, family in _primary_recovery_families(
+                act=request.act,
+                reference=reference,
+                reason=request.reason,
+                domain=domain,
+            ):
+                retry_issue = issue.model_copy(
+                    update={
+                        "tax_domains": [domain] if domain else list(issue.tax_domains),
+                        "requested_source_types": list(
+                            dict.fromkeys([*issue.requested_source_types, "statute"])
+                        ),
+                        "query_families": [family],
+                    }
+                )
+                retry = await self.primary_lane.retrieve(plan, retry_issue)
+                retry_trace.extend(retry.trace)
+                matched = tuple(
+                    candidate
+                    for candidate in retry.candidates
+                    if _candidate_matches_primary_recovery(
+                        candidate,
+                        domain=domain,
+                        reference=reference,
+                    )
+                )
+                if matched:
+                    selected_strategy = strategy
+                    break
+
+            if not matched:
+                events.append(
+                    {
+                        "event": "model_primary_gap_recovery",
+                        "executed": True,
+                        "recovered": False,
+                        "issue_id": issue.issue_id,
+                        "act": request.act,
+                        "reference": reference,
+                        "reason": request.reason,
+                    }
+                )
+                continue
+
+            merged = _unique_candidates((*existing_candidates, *matched))
+            reranked = self.primary_lane.reranker.rerank(
+                issue,
+                merged,
+                target_date=plan.target_date,
+            )
+            recovery_family = next(
+                family
+                for strategy, family in _primary_recovery_families(
+                    act=request.act,
+                    reference=reference,
+                    reason=request.reason,
+                    domain=domain,
+                )
+                if strategy == selected_strategy
+            )
+            families = tuple([
+                *(original.query_families if original else ()),
+                recovery_family,
+            ])
+            primary_by_issue[issue.issue_id] = LaneResult(
+                issue_id=issue.issue_id,
+                lane="primary_law",
+                query_families=families,
+                candidates=_select_with_exact_targets(
+                    issue,
+                    families,
+                    reranked,
+                    ordinary_limit=max(
+                        self.primary_lane.config.selected_limit_per_issue,
+                        len(existing_candidates) + len(matched),
+                    ),
+                ),
+                candidate_count_before_rerank=(
+                    (original.candidate_count_before_rerank if original else 0) + len(matched)
+                ),
+                trace=tuple([
+                    *(original.trace if original else ()),
+                    *retry_trace,
+                    {
+                        "event": "model_primary_gap_candidates_merged",
+                        "reference": reference,
+                        "strategy": selected_strategy,
+                        "preserved_initial_candidates": len(existing_candidates),
+                        "verified_recovered_candidates": len(matched),
+                    },
+                ]),
+            )
+            accepted_by_issue[issue.issue_id] = accepted_by_issue.get(issue.issue_id, 0) + 1
+            events.append(
+                {
+                    "event": "model_primary_gap_recovery",
+                    "executed": True,
+                    "recovered": True,
+                    "issue_id": issue.issue_id,
+                    "act": request.act,
+                    "reference": reference,
+                    "reason": request.reason,
+                    "strategy": selected_strategy,
+                    "recovered_document_ids": sorted({candidate.document_id for candidate in matched}),
+                }
+            )
+
+        if not any(item.get("recovered") for item in events):
+            return current, tuple(events)
+        primary = tuple(
+            primary_by_issue.get(issue.issue_id)
+            for issue in plan.issues
+            if primary_by_issue.get(issue.issue_id) is not None
+        )
+        return (
+            LegalRetrievalResult(
+                primary_law=primary,
+                authorities=current.authorities,
+                trace=tuple((*current.trace, *events)),
+            ),
+            tuple(events),
+        )
+
     async def _retry_lane(
         self,
         plan: LegalResearchPlan,
@@ -958,6 +1170,97 @@ def _references_for_missing_lane(
         for issue_id, cited in references.items()
         if cited and not (existing.get(issue_id) and existing[issue_id].candidates)
     }
+
+
+def _requested_primary_reference(value: str) -> Optional[str]:
+    """Normalize one model request and reject anything but an exact article."""
+    match = _ISSUE_EXPLICIT_REFERENCE_RE.search(str(value or ""))
+    if match is None:
+        return None
+    reference = _normalise_reference(match.group(0))
+    return reference or None
+
+
+def _primary_recovery_domain(issue: LegalIssue, act: str) -> str:
+    """Scope recovery to a domain already declared by the research plan.
+
+    The model's act label improves the query wording, but it must not expand
+    the legal domain beyond the independently grounded issue plan.
+    """
+    domains = [str(value).upper() for value in issue.tax_domains if str(value).strip()]
+    act_text = str(act or "").upper()
+    return next((domain for domain in domains if re.search(rf"\b{re.escape(domain)}\b", act_text)), domains[0] if len(domains) == 1 else "")
+
+
+def _article_level_reference(reference: str) -> str:
+    match = re.search(r"\bart\.\s*\d+[a-z]*", reference, re.IGNORECASE)
+    return _normalise_reference(match.group(0)) if match else reference
+
+
+def _primary_recovery_families(
+    *,
+    act: str,
+    reference: str,
+    reason: str,
+    domain: str,
+) -> tuple[tuple[str, QueryFamily], ...]:
+    """Build the fixed, progressively broader recovery ladder.
+
+    The strategy is data-agnostic: it works for any tax act and exact article
+    supplied by the model, without benchmark or subject-matter branches.
+    """
+    act_label = " ".join(str(act or "").split())[:128]
+    article = _article_level_reference(reference)
+    reason_text = " ".join(str(reason or "").split())[:320]
+    prefix = domain or act_label
+    candidates = (
+        ("normalized_provision_id", f"{prefix} {reference}".strip()),
+        ("exact_textual_reference", reference),
+        ("article_level", f"{prefix} {article}".strip()),
+        ("act_level_fts", f"{act_label} {reason_text}".strip()),
+    )
+    seen: set[str] = set()
+    result: list[tuple[str, QueryFamily]] = []
+    for strategy, query in candidates:
+        normalized = " ".join(query.split())
+        if not normalized or normalized.casefold() in seen:
+            continue
+        seen.add(normalized.casefold())
+        result.append(
+            (
+                strategy,
+                QueryFamily(
+                    family="explicit_provision",
+                    query=normalized,
+                    lane="primary_law",
+                    origin="model",
+                ),
+            )
+        )
+    return tuple(result)
+
+
+def _candidate_matches_primary_recovery(
+    candidate: RetrievalCandidate,
+    *,
+    domain: str,
+    reference: str,
+) -> bool:
+    if candidate.source_type not in PRIMARY_SOURCE_TYPES:
+        return False
+    if _candidate_matches_exact_target(candidate, domain=domain, reference=reference):
+        return True
+    candidate_domains = {
+        str(value).upper()
+        for value in candidate.metadata.get("tax_domains") or []
+        if str(value).strip()
+    }
+    if domain and domain not in candidate_domains:
+        return False
+    return any(
+        _reference_match_specificity(reference, _normalise_reference(match.group(0))) > 0
+        for match in _PROVISION_REFERENCE_RE.finditer(candidate.text)
+    )
 
 
 def reciprocal_rank_fusion(

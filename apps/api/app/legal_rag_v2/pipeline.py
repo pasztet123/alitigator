@@ -55,6 +55,8 @@ from .schemas import (
     FallbackTrace,
     LegalClaim,
     LegalResearchPlan,
+    MissingPrimaryRequest,
+    PrimaryLawGapAssessment,
     PipelineResult,
     ProvisionGraph,
     ProvisionGraphEdge,
@@ -71,9 +73,10 @@ from .vat import enrich_input_vat_deduction_plan, enrich_mixed_use_vehicle_vat_p
 from .wht import WhtPayAndRefundCalculationEngine, enrich_crossborder_wht_plan
 
 
-PIPELINE_VERSION = "legal_rag_v2_1"
+PIPELINE_VERSION = "legal_rag_v2_2"
 SYNTHESIS_PROMPT_VERSION = "legal_claim_synthesis_v1"
 ANSWER_PROMPT_VERSION = "legal_answer_writer_v1"
+PRIMARY_GAP_ASSESSMENT_PROMPT_VERSION = "primary_law_gap_assessment_v1"
 # Keep ordinary cases in one call, but preflight genuinely large structured
 # payloads before they reach a provider.  The byte cap also bounds the number
 # of claims expected in one structured response; large multi-axis cases are
@@ -117,6 +120,22 @@ Never add facts, provisions, document IDs or signatures that are absent from
 the supplied payload. Distinguish the taxpayer's position from the authority's
 or court's holding. Respect the target legal-state date, expose conflicting
 evidence and leave unsupported conclusions blocked. Use only validated claims.
+"""
+
+PRIMARY_GAP_ASSESSMENT_RULES = GLOBAL_LEGAL_SYSTEM_RULES + """
+
+You are checking whether the retrieved primary-law material is sufficient to
+research each issue. Do not answer the legal question and do not state a legal
+conclusion. Return a missing_primary_request only when all three conditions
+are met: (1) the user question or issue requires a specific Polish primary-law
+editorial unit, (2) the supplied candidate citations and excerpts do not
+already contain that unit, and (3) you can name its exact article/section/point
+reference. Use the issue_id exactly as supplied. The act must be a short label
+such as PIT, CIT, VAT, UFR or Ordynacja. The reference must start with "art.".
+Do not request broad background provisions, authorities, hypothetical
+alternatives or a provision merely because it is commonly related to the
+topic. If no exact verified retrieval request is justified, return an empty
+list. At most two requests per issue.
 """
 
 CLAIM_SYNTHESIS_RULES = GLOBAL_LEGAL_SYSTEM_RULES + """
@@ -258,6 +277,9 @@ class LegalRagV2Config:
     authority_extraction_candidates_per_issue: int = 4
     authority_extraction_concurrency: int = 4
     model_authority_extraction: bool = False
+    model_primary_gap_recovery: bool = True
+    primary_gap_recovery_requests_per_issue: int = 2
+    primary_gap_recovery_requests_total: int = 8
     require_real_embeddings: bool = False
 
     @classmethod
@@ -312,6 +334,15 @@ class LegalRagV2Config:
             model_authority_extraction=_env_bool(
                 "LEGAL_RAG_V2_MODEL_AUTHORITY_EXTRACTION", False
             ),
+            model_primary_gap_recovery=_env_bool(
+                "LEGAL_RAG_V2_MODEL_PRIMARY_GAP_RECOVERY", True
+            ),
+            primary_gap_recovery_requests_per_issue=max(
+                1, int(os.getenv("LEGAL_RAG_V2_PRIMARY_GAP_REQUESTS_PER_ISSUE", "2"))
+            ),
+            primary_gap_recovery_requests_total=max(
+                1, int(os.getenv("LEGAL_RAG_V2_PRIMARY_GAP_REQUESTS_TOTAL", "8"))
+            ),
             require_real_embeddings=_env_bool(
                 "LEGAL_RAG_V2_REQUIRE_REAL_EMBEDDINGS", False
             ),
@@ -345,6 +376,114 @@ class LegalRagV2Pipeline:
         self.trace_factory = trace_factory or (
             lambda run_id: TraceWriter(run_id, root=self.config.artifact_root)
         )
+
+    async def _assess_missing_primary_law(
+        self,
+        question: str,
+        plan: LegalResearchPlan,
+        retrieval: LegalRetrievalResult,
+    ) -> tuple[tuple[MissingPrimaryRequest, ...], dict[str, Any]]:
+        """Ask for bounded retrieval hypotheses after the first pass.
+
+        This stage is intentionally non-authoritative and non-fatal.  It sees
+        only the research issue plus compact primary-source identities and
+        excerpts; it cannot create evidence or write a legal conclusion.
+        """
+        if not self.config.model_primary_gap_recovery:
+            return (), {"executed": False, "reason": "disabled"}
+
+        lanes = {lane.issue_id: lane for lane in retrieval.primary_law}
+        issue_payload: list[dict[str, Any]] = []
+        for issue in plan.issues:
+            lane = lanes.get(issue.issue_id)
+            candidates = []
+            for candidate in (lane.candidates if lane else ())[:6]:
+                raw_references = candidate.metadata.get("legal_provisions") or []
+                if isinstance(raw_references, str):
+                    raw_references = [raw_references]
+                candidates.append(
+                    {
+                        "document_id": candidate.document_id,
+                        "source_type": candidate.source_type,
+                        "tax_domains": list(candidate.metadata.get("tax_domains") or []),
+                        "references": [str(value) for value in raw_references][:8],
+                        "display_reference": str(candidate.metadata.get("display_reference") or ""),
+                        "text_excerpt": " ".join(candidate.text.split())[:700],
+                    }
+                )
+            issue_payload.append(
+                {
+                    "issue_id": issue.issue_id,
+                    "label": issue.label,
+                    "tax_domains": issue.tax_domains,
+                    "legal_mechanism": issue.legal_mechanism,
+                    "possible_provision_concepts": issue.possible_provision_concepts[:12],
+                    "positive_fact_constraints": issue.positive_fact_constraints[:8],
+                    "negative_fact_constraints": issue.negative_fact_constraints[:8],
+                    "retrieved_primary_candidates": candidates,
+                }
+            )
+        payload = {
+            "question": question,
+            "target_date": plan.target_date,
+            "issues": issue_payload,
+        }
+        try:
+            generated = await self.gateway.generate_structured(
+                response_model=PrimaryLawGapAssessment,
+                input=json.dumps(payload, ensure_ascii=False),
+                system_prompt=PRIMARY_GAP_ASSESSMENT_RULES,
+                model=self.config.planner_model,
+                reasoning_effort="low",
+                max_output_tokens=1_200,
+            )
+            assessment = (
+                generated
+                if isinstance(generated, PrimaryLawGapAssessment)
+                else PrimaryLawGapAssessment.model_validate(generated)
+            )
+        except (asyncio.TimeoutError, TimeoutError, ModelGatewayError, ValueError) as exc:
+            return (), {
+                "executed": True,
+                "recovered": False,
+                "error": type(exc).__name__,
+            }
+
+        issue_ids = {issue.issue_id for issue in plan.issues}
+        accepted: list[MissingPrimaryRequest] = []
+        rejected: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        per_issue: dict[str, int] = {}
+        for request in assessment.missing_primary_requests:
+            reference = _primary_gap_reference(request.reference)
+            key = (request.issue_id, reference.casefold() if reference else "")
+            if (
+                request.issue_id not in issue_ids
+                or reference is None
+                or key in seen
+                or per_issue.get(request.issue_id, 0)
+                >= self.config.primary_gap_recovery_requests_per_issue
+                or len(accepted) >= self.config.primary_gap_recovery_requests_total
+            ):
+                rejected.append(
+                    {
+                        "issue_id": request.issue_id,
+                        "reference": request.reference,
+                        "reason": "invalid_or_out_of_budget",
+                    }
+                )
+                continue
+            seen.add(key)
+            per_issue[request.issue_id] = per_issue.get(request.issue_id, 0) + 1
+            accepted.append(
+                request.model_copy(update={"reference": reference})
+            )
+        return tuple(accepted), {
+            "executed": True,
+            "requested": len(assessment.missing_primary_requests),
+            "accepted": len(accepted),
+            "rejected": rejected,
+        }
 
     async def run(
         self,
@@ -384,7 +523,7 @@ class LegalRagV2Pipeline:
             "runtime.json",
             {
                 "pipeline_mode": mode,
-                "retrieval_mode": "issue_scoped_bidirectional",
+                "retrieval_mode": "issue_scoped_bidirectional_primary_gap_recovery",
                 "rag_backend": type(self.retriever.primary_lane.backend).__name__,
                 "planner_mode": "model_first",
                 "planner_provider": get_model_gateway_config().provider,
@@ -409,6 +548,7 @@ class LegalRagV2Pipeline:
             {
                 "planner_model": self.config.planner_model,
                 "authority_extractor_model": self.config.authority_extractor_model,
+                "primary_gap_assessment_model": self.config.planner_model,
                 "legal_synthesis_model": self.config.synthesis_model,
                 "answer_writer_model": self.config.answer_writer_model,
                 "planner_reasoning_effort": self.planner.reasoning_effort,
@@ -417,6 +557,7 @@ class LegalRagV2Pipeline:
                 "answer_reasoning_effort": "medium",
                 "prompt_versions": {
                     "planner": "legal_query_planner_v2_1",
+                    "primary_gap_assessment": PRIMARY_GAP_ASSESSMENT_PROMPT_VERSION,
                     "synthesis": SYNTHESIS_PROMPT_VERSION,
                     "answer": ANSWER_PROMPT_VERSION,
                 },
@@ -512,7 +653,7 @@ class LegalRagV2Pipeline:
                     "runtime.json",
                     {
                         "pipeline_mode": mode,
-                        "retrieval_mode": "issue_scoped_bidirectional",
+                        "retrieval_mode": "issue_scoped_bidirectional_primary_gap_recovery",
                         "rag_backend": type(self.retriever.primary_lane.backend).__name__,
                         "planner_mode": "model_first",
                         "planner_provider": get_model_gateway_config().provider,
@@ -532,6 +673,20 @@ class LegalRagV2Pipeline:
                         "fallbacks_used": [augmented.fallback_trace.fallback_reason],
                     },
                 )
+        primary_gap_started = time.monotonic()
+        missing_primary_requests, primary_gap_assessment = await self._assess_missing_primary_law(
+            question,
+            plan,
+            retrieval,
+        )
+        retrieval, primary_gap_recovery_events = await self.retriever.recover_missing_primary_law(
+            plan,
+            retrieval,
+            missing_primary_requests,
+            max_requests_per_issue=self.config.primary_gap_recovery_requests_per_issue,
+            max_requests_total=self.config.primary_gap_recovery_requests_total,
+        )
+        timings["primary_gap_recovery"] = _elapsed_ms(primary_gap_started)
         timings["retrieval"] = _elapsed_ms(stage)
         self._write_retrieval_trace(trace, retrieval)
         trace.write_json(
@@ -540,14 +695,25 @@ class LegalRagV2Pipeline:
         )
         second_pass_events = [
             item for item in retrieval.trace
-            if item.get("event") in {"authority_backreference_retry", "primary_to_authority_retry"}
+            if item.get("event") in {
+                "authority_backreference_retry",
+                "primary_to_authority_retry",
+                "model_primary_gap_recovery",
+            }
         ]
         trace.write_json("second_pass_queries.json", second_pass_events)
         trace.write_json(
             "second_pass_candidates.json",
             [item for item in second_pass_events if item.get("executed")],
         )
-        trace.write_json("missing_evidence_requests.json", [])
+        trace.write_json(
+            "missing_evidence_requests.json",
+            {
+                "model_primary_gap_assessment": primary_gap_assessment,
+                "accepted_requests": [item.model_dump(mode="json") for item in missing_primary_requests],
+                "recovery_events": primary_gap_recovery_events,
+            },
+        )
 
         stage = time.monotonic()
         authority_cards, authority_trace = await self._extract_authorities(retrieval)
@@ -1431,6 +1597,21 @@ def _compact_model_payload(value: Any) -> Any:
     if isinstance(value, tuple):
         return [_compact_model_payload(item) for item in value]
     return value
+
+
+def _primary_gap_reference(value: str) -> Optional[str]:
+    """Validate a model-suggested exact primary-law editorial reference."""
+    match = re.search(
+        r"\bart\.\s*\d+[a-z]*"
+        r"(?:\s*(?:ust\.\s*\d+[a-z]*|§\s*\d+[a-z]*))?"
+        r"(?:\s*pkt\s*\d+[a-z]*)?"
+        r"(?:\s*lit\.\s*[a-z])?",
+        str(value or ""),
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    return " ".join(match.group(0).casefold().split()).strip(" .;:,") or None
 
 
 def _claim_coverage_requirements(

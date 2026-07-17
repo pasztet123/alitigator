@@ -137,6 +137,29 @@ class QueryFamily(V2Schema):
     origin: Literal["model", "user", "fallback"] = "model"
 
 
+class MissingPrimaryRequest(V2Schema):
+    """A retrieval request, never a legal conclusion.
+
+    It is deliberately limited to an exact editorial provision.  The request
+    is only a hypothesis from the model: the retriever must still find a
+    current primary-law source matching it before it can enter evidence.
+    """
+
+    issue_id: NonEmptyStr
+    act: Annotated[str, Field(min_length=2, max_length=128)]
+    reference: Annotated[str, Field(min_length=6, max_length=160)]
+    reason: Annotated[str, Field(min_length=8, max_length=320)]
+
+
+class PrimaryLawGapAssessment(V2Schema):
+    """Bounded model assessment of editorial units absent from retrieval."""
+
+    missing_primary_requests: list[MissingPrimaryRequest] = Field(
+        default_factory=list,
+        max_length=12,
+    )
+
+
 class LegalIssue(V2Schema):
     issue_id: NonEmptyStr
     label: NonEmptyStr

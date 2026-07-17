@@ -48,6 +48,7 @@ from app.legal_rag_v2.schemas import (
     LegalClaim,
     LegalIssue,
     LegalResearchPlan,
+    PrimaryLawGapAssessment,
     ProvisionReference,
     QueryFamily,
     ResearchIntent,
@@ -237,6 +238,8 @@ class FakeGateway:
     async def generate_structured(self, *, response_model, **kwargs):
         if response_model is LegalResearchPlan:
             return research_plan()
+        if response_model is PrimaryLawGapAssessment:
+            return PrimaryLawGapAssessment()
         if response_model is ClaimSet:
             source_text = "Treść normy podatkowej dotyczącej sprzedaży udziału."
             return ClaimSet(
@@ -356,6 +359,77 @@ class FakeAuthorityExtractor:
 
 
 class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_primary_gap_assessment_emits_only_bounded_exact_requests(self) -> None:
+        class GapGateway(FakeGateway):
+            async def generate_structured(self, *, response_model, **kwargs):
+                if response_model is PrimaryLawGapAssessment:
+                    return PrimaryLawGapAssessment(
+                        missing_primary_requests=[
+                            {
+                                "issue_id": "pit_sale",
+                                "act": "PIT",
+                                "reference": "art. 22 ust. 1",
+                                "reason": "podstawowa reguła kosztowa",
+                            },
+                            {
+                                "issue_id": "nieznane_issue",
+                                "act": "PIT",
+                                "reference": "art. 23 ust. 1",
+                                "reason": "niedopuszczalne issue",
+                            },
+                            {
+                                "issue_id": "pit_sale",
+                                "act": "PIT",
+                                "reference": "ogólna zasada kosztowa",
+                                "reason": "brak dokładnej jednostki",
+                            },
+                        ]
+                    )
+                return await super().generate_structured(response_model=response_model, **kwargs)
+
+        gateway = GapGateway()
+        pipeline = LegalRagV2Pipeline(
+            gateway=gateway,
+            planner=LegalQueryPlanner(gateway),
+            retriever=LegalRetriever(FakeBackend()),
+            config=LegalRagV2Config(),
+        )
+        retrieval = await pipeline.retriever.retrieve(research_plan())
+        requests, diagnostics = await pipeline._assess_missing_primary_law(
+            QUESTION,
+            research_plan(),
+            retrieval,
+        )
+
+        self.assertEqual(["art. 22 ust. 1"], [item.reference for item in requests])
+        self.assertEqual(3, diagnostics["requested"])
+        self.assertEqual(1, diagnostics["accepted"])
+        self.assertEqual(2, len(diagnostics["rejected"]))
+
+    async def test_primary_gap_assessment_failure_is_nonfatal(self) -> None:
+        class FailingGapGateway(FakeGateway):
+            async def generate_structured(self, *, response_model, **kwargs):
+                if response_model is PrimaryLawGapAssessment:
+                    raise ModelRequestError("temporary provider failure")
+                return await super().generate_structured(response_model=response_model, **kwargs)
+
+        gateway = FailingGapGateway()
+        pipeline = LegalRagV2Pipeline(
+            gateway=gateway,
+            planner=LegalQueryPlanner(gateway),
+            retriever=LegalRetriever(FakeBackend()),
+            config=LegalRagV2Config(),
+        )
+        retrieval = await pipeline.retriever.retrieve(research_plan())
+        requests, diagnostics = await pipeline._assess_missing_primary_law(
+            QUESTION,
+            research_plan(),
+            retrieval,
+        )
+
+        self.assertEqual((), requests)
+        self.assertEqual("ModelRequestError", diagnostics["error"])
+
     def test_vehicle_authorities_are_classified_by_legal_mechanism_not_exact_vehicle(self) -> None:
         issue = LegalIssue(
             issue_id="mixed_use_vehicle_vat",

@@ -41,6 +41,7 @@ from app.legal_rag_v2.schemas import (
     DocumentSourceSpan,
     LegalIssue,
     LegalResearchPlan,
+    MissingPrimaryRequest,
     QueryFamily,
     ResearchIntent,
 )
@@ -599,6 +600,109 @@ class RetrievalTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.authorities[0].candidates)
         self.assertEqual(result.primary_law[0].candidates[0].candidate_id, "exact-unit")
         self.assertTrue(any(item.get("event") == "authority_backreference_retry" and item.get("executed") for item in result.trace))
+
+    async def test_model_primary_gap_recovery_merges_only_verified_exact_provision(self) -> None:
+        class RecoveryBackend:
+            async def search(self, query, *, limit, source_types, metadata_filters):
+                if "statute" not in source_types:
+                    return []
+                if query == "initial primary query":
+                    return [
+                        RetrievalCandidate(
+                            "initial", "Initial art. 86 ust. 1.", "statute",
+                            document_id="vat-86", chunk_id="vat-86-1",
+                            metadata={"tax_domains": ["VAT"], "legal_provisions": ["art. 86 ust. 1"]},
+                        )
+                    ]
+                if query == "VAT art. 86 ust. 10b pkt 1":
+                    return [
+                        RetrievalCandidate(
+                            "wrong-neighbour", "Art. 86 ust. 10b pkt 2.", "statute",
+                            document_id="vat-86", chunk_id="vat-86-10b-2",
+                            metadata={"tax_domains": ["VAT"], "legal_provisions": ["art. 86 ust. 10b pkt 2"]},
+                        ),
+                        RetrievalCandidate(
+                            "recovered-exact", "Art. 86 ust. 10b pkt 1.", "statute",
+                            document_id="vat-86", chunk_id="vat-86-10b-1",
+                            metadata={"tax_domains": ["VAT"], "legal_provisions": ["art. 86 ust. 10b pkt 1"]},
+                        ),
+                    ]
+                return []
+
+        issue = research_plan().issues[0].model_copy(
+            update={
+                "query_families": [
+                    QueryFamily(
+                        family="legal_concept",
+                        query="initial primary query",
+                        lane="primary_law",
+                    )
+                ]
+            }
+        )
+        plan = research_plan().model_copy(update={"issues": [issue]})
+        retriever = LegalRetriever(
+            RecoveryBackend(),
+            config=RetrievalConfig(selected_limit_per_issue=1),
+            authority_enabled=False,
+        )
+        initial = await retriever.retrieve(plan)
+        recovered, events = await retriever.recover_missing_primary_law(
+            plan,
+            initial,
+            [
+                MissingPrimaryRequest(
+                    issue_id="issue-1",
+                    act="VAT",
+                    reference="art. 86 ust. 10b pkt 1",
+                    reason="warunek otrzymania faktury",
+                )
+            ],
+        )
+
+        self.assertEqual(
+            {"initial", "recovered-exact"},
+            {item.candidate_id for item in recovered.primary_law[0].candidates},
+        )
+        self.assertNotIn(
+            "wrong-neighbour",
+            {item.candidate_id for item in recovered.primary_law[0].candidates},
+        )
+        self.assertTrue(events[0]["recovered"])
+        self.assertEqual("normalized_provision_id", events[0]["strategy"])
+
+    async def test_unverified_model_gap_request_keeps_initial_primary_candidates_unchanged(self) -> None:
+        class InitialOnlyBackend:
+            async def search(self, query, *, limit, source_types, metadata_filters):
+                if "statute" not in source_types:
+                    return []
+                return [
+                    RetrievalCandidate(
+                        "initial", "Art. 22 ust. 1.", "statute",
+                        document_id="pit-22", chunk_id="pit-22-1",
+                        metadata={"tax_domains": ["PIT"], "legal_provisions": ["art. 22 ust. 1"]},
+                    )
+                ]
+
+        issue = research_plan().issues[0].model_copy(update={"tax_domains": ["PIT"]})
+        plan = research_plan().model_copy(update={"issues": [issue]})
+        retriever = LegalRetriever(InitialOnlyBackend(), authority_enabled=False)
+        initial = await retriever.retrieve(plan)
+        recovered, events = await retriever.recover_missing_primary_law(
+            plan,
+            initial,
+            [
+                MissingPrimaryRequest(
+                    issue_id="issue-1",
+                    act="PIT",
+                    reference="art. 23 ust. 1 pkt 23",
+                    reason="ustawowe wyłączenie kosztu",
+                )
+            ],
+        )
+
+        self.assertEqual(initial.primary_law, recovered.primary_law)
+        self.assertFalse(events[0]["recovered"])
 
     async def test_dual_lanes_run_per_issue_using_only_plan_query_families(self) -> None:
         backend = FakeBackend()

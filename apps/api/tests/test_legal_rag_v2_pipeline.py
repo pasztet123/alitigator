@@ -446,6 +446,80 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("art. 999", output.thesis)
         self.assertIn("właściwy przepis", output.thesis)
 
+    def test_best_effort_sources_exclude_neighbouring_rules_and_rejected_authorities(self) -> None:
+        issue = LegalIssue(
+            issue_id="pit_cost_deductibility",
+            label="PIT: koszt uzyskania przychodów",
+            tax_domains=["PIT"],
+            legal_mechanism="pit_cost_deductibility",
+        )
+        plan = LegalResearchPlan(
+            user_query="Czy zawodowy kurs jest kosztem?",
+            intent=ResearchIntent(mode="mixed_analysis"),
+            issues=[issue],
+            clarification=Clarification(),
+            confidence=0.9,
+        )
+        art_22 = ProvisionReference(
+            provision_id="pit-22-1",
+            document_id="pl-ustawa-o-podatku-dochodowym-od-osob-fizycznych-art-22",
+            citation="art. 22 ust. 1",
+            status="active",
+        )
+        art_23 = ProvisionReference(
+            provision_id="pit-23-1",
+            document_id="pl-ustawa-o-podatku-dochodowym-od-osob-fizycznych-art-23",
+            citation="art. 23 ust. 1",
+            status="active",
+        )
+        neighbour = ProvisionReference(
+            provision_id="pit-23-55",
+            document_id="pl-ustawa-o-podatku-dochodowym-od-osob-fizycznych-art-23",
+            citation="art. 23 ust. 1 pkt 55",
+            status="active",
+        )
+
+        def judgment(document_id: str) -> AuthorityCard:
+            holding = "Sąd przedstawił materialne rozumowanie."
+            span = DocumentSourceSpan(
+                start=0,
+                end=len(holding),
+                document_id=document_id,
+            )
+            return AuthorityCard(
+                document_id=document_id,
+                signature=f"II FSK {document_id[-1]}/26",
+                document_type="judgment",
+                court_holding=holding,
+                source_spans=AuthoritySourceSpans(court_holding=[span]),
+                extraction_confidence=0.8,
+            )
+
+        used_judgment = judgment("judgment-1")
+        rejected_judgment = judgment("judgment-2")
+        bundle = EvidenceBundle(
+            issue_id=issue.issue_id,
+            controlling_provisions=[art_22],
+            dependency_provisions=[art_23, neighbour],
+            supporting_authorities=[used_judgment, rejected_judgment],
+            coverage_status="complete",
+        )
+
+        output = _best_effort_writer_output(
+            "TEZA: Kurs może być kosztem.\n"
+            "ANALIZA: Związek zawodowy jest silny.\n"
+            "DOKUMENTY: Zachowaj program kursu.\n"
+            "WYKORZYSTANE_ŹRÓDŁA: pit-22-1, pit-23-1, pit-23-55, judgment-1",
+            plan=plan,
+            bundles=[bundle],
+        )
+
+        self.assertEqual(
+            {"pit-22-1", "pit-23-1", "judgment-1"},
+            {source.source_id for source in output.sources},
+        )
+        self.assertNotIn("WYKORZYSTANE", output.analysis_sections[0].content)
+
     async def test_special_rule_is_controlling_and_general_rule_is_dependency_across_chunks(self) -> None:
         shared = {
             "legal_provisions": ["art. 21"],

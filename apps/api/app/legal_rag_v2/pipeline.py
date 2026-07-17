@@ -174,10 +174,14 @@ Gdy dostępne są oba rodzaje źródeł, odróżnij praktykę organów od stanow
 sądów i wykorzystaj co najmniej po jednym relewantnym materiale każdego typu.
 Nie przedstawiaj samego numeru dokumentu jako wsparcia bez jego materialnej
 treści. W treści nie podawaj numerów artykułów ani sygnatur; zweryfikowana
-lista źródeł zostanie dodana przez aplikację. Zwróć wyłącznie:
+lista źródeł zostanie dodana przez aplikację. Każdy materiał w payloadzie ma
+``source_id``. W ostatnim polu podaj wyłącznie identyfikatory materiałów, na
+których rzeczywiście opierasz analizę. Nie wskazuj materiału tylko zbadanego i
+odrzuconego jako nierelewantny. Zwróć wyłącznie:
 TEZA: jednoznaczna, zwięzła odpowiedź
 ANALIZA: konkretne uzasadnienie odpowiadające na wszystkie elementy pytania
 DOKUMENTY: praktyczna lista dowodów lub działań, jeżeli jest relewantna
+WYKORZYSTANE_ŹRÓDŁA: source_id rozdzielone przecinkami albo BRAK
 """
 
 
@@ -2963,6 +2967,7 @@ def _best_effort_model_evidence(
             remaining_chars -= len(text)
             provisions.append(
                 {
+                    "source_id": provision.provision_id,
                     "issue_id": bundle.issue_id,
                     "act": _writer_source_label(provision),
                     "citation": provision.citation,
@@ -2989,6 +2994,7 @@ def _best_effort_model_evidence(
             remaining_chars -= len(material)
             authorities.append(
                 {
+                    "source_id": authority.document_id,
                     "issue_id": bundle.issue_id,
                     "type": authority.document_type,
                     "signature": authority.signature or authority.document_id,
@@ -3076,7 +3082,10 @@ def _best_effort_writer_output(
 ) -> WriterOutput:
     cleaned = re.sub(r"```(?:json|markdown)?|```", "", raw, flags=re.I)
     cleaned = cleaned.replace("**", "").strip()
-    parts = re.split(r"(?im)^\s*(TEZA|ANALIZA|DOKUMENTY)\s*:\s*", cleaned)
+    parts = re.split(
+        r"(?im)^\s*(TEZA|ANALIZA|DOKUMENTY|WYKORZYSTANE_ŹRÓDŁA)\s*:\s*",
+        cleaned,
+    )
     parsed: dict[str, str] = {}
     for index in range(1, len(parts) - 1, 2):
         parsed[parts[index].casefold()] = parts[index + 1].strip()
@@ -3086,16 +3095,54 @@ def _best_effort_writer_output(
     if documents:
         analysis = f"{analysis}\n\nDokumentacja i działania:\n{documents}"
 
+    valid_source_ids = {
+        source_id
+        for bundle in bundles
+        for source_id in (
+            *(
+                item.provision_id
+                for item in (
+                    *bundle.controlling_provisions,
+                    *bundle.dependency_provisions,
+                    *bundle.exception_provisions,
+                )
+            ),
+            *(
+                item.document_id
+                for item in (
+                    *bundle.supporting_authorities,
+                    *bundle.contrary_authorities,
+                )
+            ),
+        )
+    }
+    raw_used_sources = parsed.get("wykorzystane_źródła", "")
+    used_source_tokens = {
+        token.strip().strip("-*` ").casefold()
+        for token in re.split(r"[,;\n]", raw_used_sources)
+        if token.strip()
+    }
+    used_source_ids = {
+        source_id
+        for source_id in valid_source_ids
+        if source_id.casefold() in used_source_tokens
+    }
+    required_primary_ids = _best_effort_required_primary_source_ids(plan, bundles)
+    issue_by_id = {issue.issue_id: issue for issue in plan.issues}
     sources: list[WriterSource] = []
-    citations: list[str] = []
-    signatures: list[str] = []
     for bundle in bundles:
+        issue = issue_by_id.get(bundle.issue_id)
+        cost_issue = bool(issue and _is_income_tax_cost_issue(issue))
         for provision in (
             *bundle.controlling_provisions,
             *bundle.dependency_provisions,
             *bundle.exception_provisions,
         ):
-            citations.append(provision.citation)
+            if provision.provision_id not in required_primary_ids and (
+                provision.provision_id not in used_source_ids
+                or cost_issue
+            ):
+                continue
             sources.append(
                 WriterSource(
                     source_id=provision.provision_id,
@@ -3105,8 +3152,9 @@ def _best_effort_writer_output(
                 )
             )
         for authority in (*bundle.supporting_authorities, *bundle.contrary_authorities):
+            if authority.document_id not in used_source_ids:
+                continue
             signature = authority.signature or authority.document_id
-            signatures.append(signature)
             sources.append(
                 WriterSource(
                     source_id=authority.document_id,
@@ -3167,6 +3215,45 @@ def _best_effort_writer_output(
         risks_and_gaps=risks,
         claim_ids_used=[],
     )
+
+
+def _best_effort_required_primary_source_ids(
+    plan: LegalResearchPlan,
+    bundles: list[EvidenceBundle],
+) -> set[str]:
+    """Keep the controlling statutory chain without dumping neighbouring units."""
+
+    issue_by_id = {issue.issue_id: issue for issue in plan.issues}
+    result: set[str] = set()
+    for bundle in bundles:
+        provisions = (
+            *bundle.controlling_provisions,
+            *bundle.dependency_provisions,
+            *bundle.exception_provisions,
+        )
+        issue = issue_by_id.get(bundle.issue_id)
+        if issue is None:
+            continue
+        matches = [
+            min(
+                matching,
+                key=lambda item: (len(_normalize_citation(item.citation)), item.citation),
+            )
+            for _, citation_pattern, document_pattern in _required_issue_dependency_patterns(issue)
+            if (
+                matching := [
+                    provision
+                    for provision in provisions
+                    if re.search(citation_pattern, provision.citation, re.I)
+                    and re.search(document_pattern, provision.document_id, re.I)
+                ]
+            )
+        ]
+        if matches:
+            result.update(item.provision_id for item in matches)
+        elif bundle.controlling_provisions:
+            result.add(bundle.controlling_provisions[0].provision_id)
+    return result
 
 
 def _deterministic_writer_output(payload: dict[str, Any]) -> WriterOutput:

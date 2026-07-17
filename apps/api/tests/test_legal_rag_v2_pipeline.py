@@ -24,6 +24,7 @@ from app.legal_rag_v2.pipeline import (
     _build_provision_graph,
     _claim_coverage_requirements,
     _git_commit,
+    _should_use_best_effort_writer,
     validate_writer_output,
 )
 from app.legal_rag_v2.planner import LegalQueryPlanner
@@ -387,7 +388,6 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
             )
             result = await pipeline.run(QUESTION, run_id="best-effort-integration")
 
-        self.assertIn("Odpowiedź wstępna (tryb best effort)", result.final_answer or "")
         self.assertIn("Najbardziej prawdopodobny wynik", result.final_answer or "")
         self.assertNotIn("synteza materialnych konkluzji nie została ukończona", result.final_answer or "")
         self.assertTrue(result.validation[-1].passed)
@@ -430,7 +430,8 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(validation.passed)
-        self.assertIn("best effort", output.thesis)
+        self.assertIn("Wydatek można rozliczyć", output.thesis)
+        self.assertNotIn("best effort", output.thesis.casefold())
         self.assertIn("Sam dokument zakupu", output.analysis_sections[0].content)
         self.assertEqual("art. 22 ust. 1", output.sources[0].citation)
 
@@ -1121,6 +1122,16 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
             )
         ]
         still_missing = _claim_coverage_requirements(plan, [bundle], claims)
+        self.assertTrue(
+            _should_use_best_effort_writer(
+                plan=plan,
+                bundles=[bundle],
+                claims=claims,
+                answer_plan=AnswerPlan(
+                    allowed_claim_ids=["cost_framework"]
+                ),
+            )
+        )
         self.assertEqual(
             {
                 item
@@ -1152,6 +1163,16 @@ class LegalRagV2PipelineTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual({}, _claim_coverage_requirements(plan, [bundle], claims))
+        self.assertFalse(
+            _should_use_best_effort_writer(
+                plan=plan,
+                bundles=[bundle],
+                claims=claims,
+                answer_plan=AnswerPlan(
+                    allowed_claim_ids=[claim.claim_id for claim in claims]
+                ),
+            )
+        )
 
     def test_writer_integrity_accepts_multiple_verified_citations_for_one_source_id(self) -> None:
         article_21 = ProvisionReference(

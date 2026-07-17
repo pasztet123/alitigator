@@ -658,7 +658,12 @@ class LegalRagV2Pipeline:
         trace.write_json("writer_payload.json", writer_payload)
 
         stage = time.monotonic()
-        if answer_plan.allowed_claim_ids:
+        if not _should_use_best_effort_writer(
+            plan=plan,
+            bundles=bundles,
+            claims=claims,
+            answer_plan=answer_plan,
+        ):
             writer_output, writer_validation = await self._write_answer(writer_payload)
         else:
             writer_output, writer_validation = await self._write_best_effort_answer(
@@ -1234,7 +1239,7 @@ class LegalRagV2Pipeline:
         plan: LegalResearchPlan,
         bundles: list[EvidenceBundle],
     ) -> tuple[WriterOutput, ValidationRecord]:
-        """Always return a useful degraded answer when strict claims are empty.
+        """Return a useful source-bounded answer when strict claims are incomplete.
 
         This lane is intentionally less authoritative than validated claims,
         but it remains source-bounded: the model writes only the reasoning and
@@ -1276,7 +1281,7 @@ class LegalRagV2Pipeline:
             errors=errors,
             warnings=[
                 "best_effort_mode",
-                "strict_claim_synthesis_produced_no_approved_claims",
+                "strict_claim_synthesis_incomplete",
             ],
         )
 
@@ -1590,6 +1595,20 @@ def _claim_coverage_requirements(
         if missing_requirements:
             result[issue.issue_id] = missing_requirements
     return result
+
+
+def _should_use_best_effort_writer(
+    *,
+    plan: LegalResearchPlan,
+    bundles: list[EvidenceBundle],
+    claims: list[LegalClaim],
+    answer_plan: AnswerPlan,
+) -> bool:
+    """Do not present a detected reasoning omission as a finished answer."""
+
+    if not answer_plan.allowed_claim_ids:
+        return True
+    return bool(_claim_coverage_requirements(plan, bundles, claims))
 
 
 def _is_income_tax_cost_issue(issue: Any) -> bool:
@@ -2957,10 +2976,13 @@ def _best_effort_model_evidence(
             material = " ".join(
                 value
                 for value in (
+                    *authority.facts,
+                    *authority.issues,
                     authority.authority_holding,
                     authority.court_holding,
                     authority.reasoning,
                     authority.outcome,
+                    *authority.distinguishing_facts,
                 )
                 if value
             )[:3_000]
@@ -2970,10 +2992,16 @@ def _best_effort_model_evidence(
                     "issue_id": bundle.issue_id,
                     "type": authority.document_type,
                     "signature": authority.signature or authority.document_id,
+                    "authority": authority.authority,
+                    "court": authority.court,
+                    "date": authority.date,
+                    "facts": authority.facts,
+                    "issues": authority.issues,
                     "authority_holding": authority.authority_holding or "",
                     "court_holding": authority.court_holding or "",
                     "reasoning": authority.reasoning or "",
                     "outcome": authority.outcome or "",
+                    "distinguishing_facts": authority.distinguishing_facts,
                     "material": material,
                 }
             )
@@ -3098,23 +3126,35 @@ def _best_effort_writer_output(
     analysis = _scrub_unverified_best_effort_references(
         analysis, citations=rendered_citations, signatures=rendered_signatures
     )
-    missing = list(
-        dict.fromkeys(
-            source
-            for bundle in bundles
-            for source in bundle.missing_sources
-            if source
-        )
-    )
     risks = [
-        "Odpowiedź została przygotowana w trybie best effort, ponieważ ścisła "
-        "synteza claimów nie zwróciła zatwierdzonej konkluzji; wymaga weryfikacji "
-        "przed podjęciem decyzji podatkowej."
+        "Wniosek ma charakter wstępny: część subsumpcji została przygotowana "
+        "poza ścisłym trybem weryfikacji źródłowej i wymaga sprawdzenia przed "
+        "podjęciem decyzji podatkowej."
     ]
-    if missing:
-        risks.append("Niepełne elementy bundla źródłowego: " + ", ".join(missing[:8]) + ".")
+    missing = {
+        source
+        for bundle in bundles
+        for source in bundle.missing_sources
+        if source
+    }
+    if "authority_interpretation" in missing:
+        risks.append(
+            "Nie znaleziono interpretacji podatkowej zawierającej materialne "
+            "stanowisko dostatecznie związane z analizowanym problemem."
+        )
+    if "authority_judgment" in missing:
+        risks.append(
+            "Nie znaleziono orzeczenia sądu zawierającego materialne rozumowanie "
+            "dostatecznie związane z analizowanym problemem."
+        )
+    if "primary_law" in missing or any(
+        source.startswith("required_primary:") for source in missing
+    ):
+        risks.append(
+            "Nie potwierdzono pełnego zestawu wymaganych przepisów prawa pierwotnego."
+        )
     return WriterOutput(
-        thesis="Odpowiedź wstępna (tryb best effort): " + thesis.strip(),
+        thesis=thesis.strip(),
         analysis_sections=[
             WriterAnalysisSection(
                 section_id="best_effort_analysis",

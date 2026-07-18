@@ -90,6 +90,13 @@ type HealthResponse = {
   chat_storage_available: boolean
   auth_configured: boolean
   stripe_configured: boolean
+  legal_pipeline: {
+    pipeline_mode: string
+    pipeline_version: string
+    served_by: string
+    retrieval_mode: string
+    planner_mode: string
+  }
 }
 
 type ThreadSummary = {
@@ -202,7 +209,7 @@ const HINT_DEBOUNCE_MS = 900
 const MIN_DRAFT_LENGTH_FOR_HINTS = 24
 const ACTIVE_HINT_COUNT = 3
 const MAX_HINT_QUESTION_COUNT = 5
-const APP_VERSION = '2.0.62'
+const APP_VERSION = '2.0.65'
 const ASSISTANT_SECTION_TITLES = [
   'Teza',
   'Analiza',
@@ -662,6 +669,7 @@ function App() {
   const [lastRedactions, setLastRedactions] = useState<string[]>([])
   const [chatStorageAvailable, setChatStorageAvailable] = useState(false)
   const [backendVersion, setBackendVersion] = useState<string | null>(null)
+  const [backendPipeline, setBackendPipeline] = useState<string | null>(null)
   const [promptHints, setPromptHints] = useState<PromptHint[]>([])
   const [intentHintAnswers, setIntentHintAnswers] = useState<Record<string, IntentHintAnswer>>({})
   const [isHintsLoading, setIsHintsLoading] = useState(false)
@@ -892,6 +900,11 @@ async function fetchPromptHints({
         if (!isCancelled) {
           setChatStorageAvailable(Boolean(healthPayload?.chat_storage_available))
           setBackendVersion(healthPayload?.version ?? null)
+          setBackendPipeline(
+            healthPayload?.legal_pipeline
+              ? `${healthPayload.legal_pipeline.served_by} / ${healthPayload.legal_pipeline.pipeline_version}`
+              : null,
+          )
         }
 
         if (!modelsResponse.ok) {
@@ -2081,7 +2094,7 @@ async function fetchPromptHints({
             </div>
           </form>
           <p className="helper-text small-text app-version-footer">
-            Wersja {APP_VERSION} · API {backendVersion ?? 'niedostępne'}
+            Wersja {APP_VERSION} · API {backendVersion ?? 'niedostępne'} · Pipeline {backendPipeline ?? 'niedostępny'}
           </p>
         </footer>
       </section>

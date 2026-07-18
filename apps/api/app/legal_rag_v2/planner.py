@@ -34,7 +34,7 @@ from .schemas import (
 )
 
 
-PLANNER_PROMPT_VERSION = "legal_query_planner_v2_1"
+PLANNER_PROMPT_VERSION = "legal_query_planner_v2_2"
 DEFAULT_PLANNER_MODEL = "gpt-5.6-terra"
 
 
@@ -52,9 +52,14 @@ concept suggested by you is only a retrieval hint, never evidence.
 Separate independent legal issues and distinguish taxpayer/entity roles,
 transactions, payments, dates and jurisdictions. Include positive and negative
 fact constraints that help distinguish legally adjacent cases. For each issue,
-create useful query families, without inventing document IDs or judgment
-signatures. Unless the user's request clearly narrows the task, request primary
-law, tax interpretations and judgments.
+name the concrete legal mechanism and create useful query families, without
+inventing document IDs or judgment signatures. When you can identify a
+specific statutory candidate, include a separate primary-law query family
+whose query contains the act/domain and exact article reference. Do not use a
+general cost rule as a substitute for a special adjustment, exclusion,
+exemption, timing, payment-channel or procedural mechanism described by the
+facts. Unless the user's request clearly narrows the task, request primary law,
+tax interpretations and judgments.
 
 Ask at most three clarification questions. Ask only when an absent fact can
 change the legal result, materially change retrieval, or distinguish two close
@@ -180,7 +185,77 @@ def validate_plan_grounding(plan: LegalResearchPlan, question: str) -> LegalRese
         payload["should_ask_clarification"] = bool(payload["clarification_questions"])
 
     # The input is authoritative. A provider cannot rewrite the question.
-    return LegalResearchPlan.model_validate({**payload, "user_query": question})
+    validated = LegalResearchPlan.model_validate({**payload, "user_query": question})
+    return _materialize_provision_query_families(validated)
+
+
+_PLANNER_PROVISION_RE = re.compile(
+    r"\bart\.\s*\d+[a-z]*"
+    r"(?:\s*(?:ust\.\s*\d+[a-z]*|§\s*\d+[a-z]*))?"
+    r"(?:\s*pkt\s*\d+[a-z]*)?"
+    r"(?:\s*lit\.\s*[a-z])?",
+    re.IGNORECASE,
+)
+_PLANNER_DOMAIN_RE = re.compile(
+    r"\b(CIT|PIT|VAT|UFR|PCC|SD|ORDYNACJA|OP|AKCYZA|EXCISE|PP)\b",
+    re.IGNORECASE,
+)
+
+
+def _materialize_provision_query_families(
+    plan: LegalResearchPlan,
+) -> LegalResearchPlan:
+    """Turn model provision hypotheses into executable primary-law queries.
+
+    This does not introduce legal knowledge. It only makes already declared
+    model hints operational, preventing retrieval from falling back to the
+    entire user question when the model supplied an article but omitted the
+    corresponding query-family object.
+    """
+
+    changed = False
+    issues: list[LegalIssue] = []
+    for issue in plan.issues:
+        queries = list(issue.query_families)
+        existing = {
+            " ".join(item.query.casefold().split())
+            for item in queries
+            if item.lane in {"primary_law", "both"}
+        }
+        candidates = _dedupe(
+            [
+                *issue.possible_provision_concepts,
+                *issue.possible_legal_concepts,
+                *issue.possible_provision_hints,
+            ]
+        )
+        domains = _dedupe([value.upper() for value in issue.tax_domains])
+        for candidate in candidates:
+            reference = _PLANNER_PROVISION_RE.search(candidate)
+            if reference is None:
+                continue
+            domain_match = _PLANNER_DOMAIN_RE.search(candidate)
+            domain = domain_match.group(1).upper() if domain_match else ""
+            if not domain and len(domains) == 1:
+                domain = domains[0]
+            if not domain:
+                continue
+            query = f"{domain} {' '.join(reference.group(0).split())}"
+            normalized = " ".join(query.casefold().split())
+            if normalized in existing:
+                continue
+            queries.append(
+                QueryFamily(
+                    family="explicit_provision_reference",
+                    query=query,
+                    lane="primary_law",
+                    origin="model",
+                )
+            )
+            existing.add(normalized)
+            changed = True
+        issues.append(issue.model_copy(update={"query_families": queries}))
+    return plan.model_copy(update={"issues": issues}) if changed else plan
 
 
 class LegacyFallbackPlanner:
@@ -710,11 +785,14 @@ class LegalQueryPlanner:
                     *issue.possible_provision_hints,
                 )
             ).casefold()
-            generic = "general tax" in text or "general_tax_analysis" in text
-            has_provision_candidate = bool(re.search(r"\bart\.\s*\d", text))
-            if not generic or has_provision_candidate:
-                return False
-        return True
+            generic = (
+                "general tax" in text
+                or "general_tax_analysis" in text
+                or issue.legal_mechanism.casefold() in {"general", "analysis"}
+            )
+            if generic:
+                return True
+        return False
 
     def _fallback(
         self,

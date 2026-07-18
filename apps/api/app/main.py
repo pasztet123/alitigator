@@ -81,6 +81,7 @@ from app.hybrid_authority_rag import (
     write_hybrid_trace_artifacts,
 )
 from app.legal_research.pipeline import create_default_pipeline
+from app.legal_rag_v2.pipeline import PIPELINE_VERSION as LEGAL_RAG_PIPELINE_VERSION
 from app.rag import (
     RagChunk,
     add_primary_source_fallback_chunks,
@@ -123,7 +124,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.62"
+API_VERSION = "2.0.65"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -156,12 +157,12 @@ _shadow_semaphore = asyncio.Semaphore(
 def get_legal_pipeline_mode() -> str:
     # LEGAL_RAG_MODE is the public, deployment-facing switch.  Keep the old
     # variable as a compatibility alias for existing environments and tests.
-    # A v2 failure must never turn a user request into a 502. Until its
-    # production error budget is clean, the unset deployment default is
-    # shadow: legacy serves the answer while v2 runs asynchronously and keeps
-    # diagnostic artifacts. A direct legal_rag_v2 setting remains available
-    # only as an explicit release switch.
-    raw = os.getenv("LEGAL_RAG_MODE") or os.getenv("LEGAL_PIPELINE_MODE", "shadow")
+    # V2 is the production answer path. Shadow and legacy remain explicit
+    # rollback modes; an omitted deployment flag must never silently route a
+    # user-visible answer through the retired pipeline.
+    raw = os.getenv("LEGAL_RAG_MODE") or os.getenv(
+        "LEGAL_PIPELINE_MODE", "model_rag_model"
+    )
     mode = raw.strip().lower()
     aliases = {
         "rag_v2": "legal_rag_v2",
@@ -178,6 +179,8 @@ def legal_runtime_debug(*, controlled_pipeline_used: bool = False) -> dict[str, 
     mode = get_legal_pipeline_mode()
     return {
         "pipeline_mode": mode,
+        "pipeline_version": LEGAL_RAG_PIPELINE_VERSION,
+        "served_by": "legal_rag_v2" if mode in {"model_rag_model", "legal_rag_v2"} else "legacy",
         "retrieval_mode": "issue_scoped_bidirectional" if mode in {"model_rag_model", "legal_rag_v2"} else get_legal_retrieval_mode(),
         "rag_backend": resolve_rag_runtime().read_backend,
         "planner_mode": "model_first" if mode in {"model_rag_model", "legal_rag_v2"} else "legacy_rules",
@@ -597,6 +600,7 @@ class HealthResponse(BaseModel):
     chat_storage_available: bool
     auth_configured: bool
     stripe_configured: bool
+    legal_pipeline: dict[str, object]
 
 
 class ChatThreadSummary(BaseModel):
@@ -3061,6 +3065,7 @@ def health() -> HealthResponse:
         chat_storage_available=is_chat_storage_available(),
         auth_configured=is_supabase_configured(),
         stripe_configured=is_stripe_configured(),
+        legal_pipeline=legal_runtime_debug(),
     )
 
 
@@ -3562,7 +3567,13 @@ async def chat(
             redactions=sorted(set(redactions)),
             analysis_trace={
                 "pipeline": pipeline_mode,
-                "runtime": legal_runtime_debug(),
+                "served_by": "legal_rag_v2",
+                "pipeline_version": LEGAL_RAG_PIPELINE_VERSION,
+                "runtime": {
+                    **legal_runtime_debug(),
+                    "served_by": "legal_rag_v2",
+                    "pipeline_version": LEGAL_RAG_PIPELINE_VERSION,
+                },
                 "run_id": v2_result.run_id,
                 "fallback": v2_result.fallback_trace.model_dump(mode="json"),
                 "plan": v2_result.legal_research_plan.model_dump(mode="json"),
@@ -3573,6 +3584,8 @@ async def chat(
                 "validation": [
                     item.model_dump(mode="json") for item in v2_result.validation
                 ],
+                "retrieval_iterations": list(v2_result.retrieval_trace),
+                "retrieval_lanes": dict(v2_result.retrieval_summary),
                 "timings_ms": v2_result.timings_ms,
             },
             chat_id=chat_id if chat_storage_available else None,

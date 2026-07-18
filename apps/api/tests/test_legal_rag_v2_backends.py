@@ -117,6 +117,35 @@ class CorpusFtsBackendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("UPO Polska - Niemcy%", params[0])
         self.assertEqual("art. 11%", params[1])
 
+    async def test_mysql_authority_query_uses_exact_citation_index(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [{"chunk_id": "authority:1"}]
+        connection = MagicMock()
+        connection.cursor.return_value.__enter__.return_value = cursor
+        backend = CorpusFtsBackend(backend="mysql")
+
+        with patch(
+            "app.mysql_rag.get_mysql_target",
+            return_value=("documents", "chunks"),
+        ), patch(
+            "app.mysql_rag.mysql_connection", return_value=nullcontext(connection)
+        ):
+            rows = backend._search_mysql(
+                "art. 22p PIT zwrot gotówki i ponowne uregulowanie przelewem",
+                20,
+                frozenset({"interpretation"}),
+                {"tax_domains": ["PIT"]},
+            )
+
+        self.assertEqual([{"chunk_id": "authority:1"}], rows)
+        statement = str(cursor.execute.call_args.args[0])
+        params = cursor.execute.call_args.args[1]
+        self.assertIn("`chunks_citations` citation", statement)
+        self.assertIn("citation.citation = %s", statement)
+        self.assertNotIn("c.chunk_text LIKE", statement)
+        self.assertIn("art. 22p", params)
+        self.assertIn("art. 22p %", params)
+
     async def test_sqlite_search_is_typed_filtered_and_policy_free(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "rag.sqlite3"

@@ -36,7 +36,8 @@ from .embeddings import (
 )
 from .family_foundation import enrich_family_foundation_plan, family_foundation_issue_kind
 from .cit_costs import enrich_cit_cost_plan
-from .planner import LegalQueryPlanner, PlannerOutcome
+from .cash_payments import enrich_cash_payment_cost_plan
+from .planner import PLANNER_PROMPT_VERSION, LegalQueryPlanner, PlannerOutcome
 from .provision_graph import ProvisionGraph as RuntimeProvisionGraph
 from .provision_graph import ProvisionParser, ProvisionUnit
 from .retrieval import (
@@ -87,6 +88,21 @@ SYNTHESIS_MAX_INPUT_BYTES = 70_000
 SYNTHESIS_MAX_OUTPUT_TOKENS = 12_000
 WRITER_MAX_OUTPUT_TOKENS = 8_000
 BEST_EFFORT_MAX_OUTPUT_TOKENS = 4_000
+
+
+def _enrich_research_plan(
+    plan: LegalResearchPlan,
+    question: str,
+) -> LegalResearchPlan:
+    """Apply mechanism routers in one stable, testable order."""
+
+    plan = enrich_crossborder_wht_plan(plan, question)
+    plan = enrich_family_foundation_plan(plan, question)
+    plan = enrich_transfer_pricing_plan(plan, question)
+    plan = enrich_cit_cost_plan(plan, question)
+    plan = enrich_cash_payment_cost_plan(plan, question)
+    plan = enrich_input_vat_deduction_plan(plan, question)
+    return enrich_mixed_use_vehicle_vat_plan(plan, question)
 
 
 class SynthesisPayloadTooLargeError(ModelGatewayError):
@@ -556,7 +572,7 @@ class LegalRagV2Pipeline:
                 "synthesis_reasoning_effort": "medium",
                 "answer_reasoning_effort": "medium",
                 "prompt_versions": {
-                    "planner": "legal_query_planner_v2_1",
+                    "planner": PLANNER_PROMPT_VERSION,
                     "primary_gap_assessment": PRIMARY_GAP_ASSESSMENT_PROMPT_VERSION,
                     "synthesis": SYNTHESIS_PROMPT_VERSION,
                     "answer": ANSWER_PROMPT_VERSION,
@@ -571,22 +587,7 @@ class LegalRagV2Pipeline:
             force_fallback=force_planner_fallback,
         )
         timings["planner"] = _elapsed_ms(stage)
-        plan = enrich_mixed_use_vehicle_vat_plan(
-            enrich_input_vat_deduction_plan(
-                enrich_cit_cost_plan(
-                    enrich_transfer_pricing_plan(
-                        enrich_family_foundation_plan(
-                            enrich_crossborder_wht_plan(planner_outcome.plan, question),
-                            question,
-                        ),
-                        question,
-                    ),
-                    question,
-                ),
-                question,
-            ),
-            question,
-        )
+        plan = _enrich_research_plan(planner_outcome.plan, question)
         trace.write_json("legal_research_plan.json", plan)
         trace.write_json("research_plan.json", plan)
         trace.write_json("clarification.json", plan.clarification)
@@ -629,22 +630,7 @@ class LegalRagV2Pipeline:
             )
             if augmented.fallback_trace.fallback_used:
                 planner_outcome = augmented
-                plan = enrich_mixed_use_vehicle_vat_plan(
-                    enrich_input_vat_deduction_plan(
-                        enrich_cit_cost_plan(
-                            enrich_transfer_pricing_plan(
-                                enrich_family_foundation_plan(
-                                    enrich_crossborder_wht_plan(augmented.plan, question),
-                                    question,
-                                ),
-                                question,
-                            ),
-                            question,
-                        ),
-                        question,
-                    ),
-                    question,
-                )
+                plan = _enrich_research_plan(augmented.plan, question)
                 trace.write_json("legal_research_plan.json", plan)
                 trace.write_json("fallback_trace.json", augmented.fallback_trace)
                 trace.write_json("planner_fallback.json", augmented.fallback_trace)
@@ -978,6 +964,35 @@ class LegalRagV2Pipeline:
             validation=validations,
             timings_ms=timings,
             costs={},
+            retrieval_trace=list(retrieval.trace),
+            retrieval_summary={
+                "primary_law": {
+                    "issue_count": len(retrieval.primary_law),
+                    "candidate_count": sum(
+                        len(lane.candidates) for lane in retrieval.primary_law
+                    ),
+                    "issues": {
+                        lane.issue_id: len(lane.candidates)
+                        for lane in retrieval.primary_law
+                    },
+                },
+                "authority": {
+                    "issue_count": len(retrieval.authorities),
+                    "candidate_count": sum(
+                        len(lane.candidates) for lane in retrieval.authorities
+                    ),
+                    "issues": {
+                        lane.issue_id: len(lane.candidates)
+                        for lane in retrieval.authorities
+                    },
+                },
+                "second_pass_executed": any(
+                    event.get("executed")
+                    for event in retrieval.trace
+                    if event.get("event")
+                    in {"authority_backreference_retry", "primary_to_authority_retry", "model_primary_gap_recovery"}
+                ),
+            },
         )
 
     @staticmethod

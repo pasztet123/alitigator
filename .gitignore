@@ -8,4 +8,11 @@ __pycache__/
 .env.*
 !.env.example
 apps/api/data/
+!apps/api/data/
+apps/api/data/*
+!apps/api/data/laws/
+apps/api/data/laws/*
+!apps/api/data/laws/processed/
+apps/api/data/laws/processed/*
+!apps/api/data/laws/processed/business_law_art_19.jsonl
 .tools/

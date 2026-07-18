@@ -567,3 +567,5 @@ class PipelineResult(V2Schema):
     validation: list[ValidationRecord] = Field(default_factory=list)
     timings_ms: dict[str, int] = Field(default_factory=dict)
     costs: dict[str, float] = Field(default_factory=dict)
+    retrieval_trace: list[dict[str, object]] = Field(default_factory=list)
+    retrieval_summary: dict[str, object] = Field(default_factory=dict)

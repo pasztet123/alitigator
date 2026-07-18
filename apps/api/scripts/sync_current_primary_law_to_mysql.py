@@ -27,9 +27,11 @@ DEFAULT_PATHS = (
     "apps/api/data/laws/processed/tax_ordinance_DU_2026_622.jsonl",
     "apps/api/data/laws/processed/local_taxes_act_DU_2025_707.jsonl",
     "apps/api/data/laws/processed/family_foundation_primary_bundle.jsonl",
+    "apps/api/data/laws/processed/business_law_art_19.jsonl",
 )
 
 REQUIRED_REFERENCES = {
+    "PP": {"art. 19"},
     "CIT": {"art. 11n pkt 1", "art. 15 ust. 2", "art. 24q ust. 1", "art. 24r ust. 1"},
     "PIT": {"art. 20 ust. 1g", "art. 21 ust. 1 pkt 157", "art. 30 ust. 1 pkt 17"},
     "VAT": {
@@ -86,7 +88,6 @@ def main() -> int:
 
     from app.mysql_rag import (
         build_mysql_chunk_rows,
-        delete_document_mysql,
         ensure_schema,
         get_mysql_target,
         insert_chunks_mysql,
@@ -139,7 +140,7 @@ def main() -> int:
     if missing_audit:
         raise SystemExit(f"Refusing incomplete primary-law sync: {missing_audit}")
 
-    documents_table, _ = get_mysql_target()
+    documents_table, chunks_table = get_mysql_target()
     with mysql_connection() as connection:
         ensure_schema(connection)
         with connection.cursor() as cursor:
@@ -166,8 +167,30 @@ def main() -> int:
             return 0
 
         try:
-            for document_id in remote_ids:
-                delete_document_mysql(connection, document_id)
+            delete_batch_size = 250
+            for offset in range(0, len(remote_ids), delete_batch_size):
+                document_ids = remote_ids[offset : offset + delete_batch_size]
+                placeholders = ",".join(["%s"] * len(document_ids))
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        f"DELETE FROM `{chunks_table}` "
+                        f"WHERE document_id IN ({placeholders})",
+                        tuple(document_ids),
+                    )
+                    cursor.execute(
+                        f"DELETE FROM `{documents_table}` "
+                        f"WHERE document_id IN ({placeholders})",
+                        tuple(document_ids),
+                    )
+                print(
+                    {
+                        "deleted_remote_documents": min(
+                            offset + len(document_ids), len(remote_ids)
+                        ),
+                        "total_remote_documents": len(remote_ids),
+                    },
+                    flush=True,
+                )
             for index, (document_row, chunk_rows) in enumerate(prepared, start=1):
                 upsert_document_mysql(connection, document_row)
                 insert_chunks_mysql(
@@ -183,15 +206,42 @@ def main() -> int:
                         flush=True,
                     )
             connection.commit()
-        except Exception:
+        except BaseException:
             connection.rollback()
             raise
+
+        with connection.cursor() as cursor:
+            act_placeholders = ",".join(["%s"] * len(act_titles))
+            act_parameters = tuple(sorted(act_titles))
+            cursor.execute(
+                f"SELECT COUNT(*) AS total FROM `{documents_table}` "
+                f"WHERE act_title IN ({act_placeholders})",
+                act_parameters,
+            )
+            stored_documents = int(cursor.fetchone()["total"])
+            cursor.execute(
+                f"SELECT COUNT(*) AS total FROM `{chunks_table}` c "
+                f"JOIN `{documents_table}` d ON d.document_id = c.document_id "
+                f"WHERE d.act_title IN ({act_placeholders})",
+                act_parameters,
+            )
+            stored_chunks = int(cursor.fetchone()["total"])
+
+        expected_chunks = sum(len(chunks) for _, chunks in prepared)
+        if stored_documents != len(prepared) or stored_chunks != expected_chunks:
+            raise RuntimeError(
+                "Primary-law sync verification failed: "
+                f"documents={stored_documents}/{len(prepared)}, "
+                f"chunks={stored_chunks}/{expected_chunks}"
+            )
 
     print(
         {
             "replaced_remote_documents": len(remote_ids),
             "inserted_primary_documents": len(prepared),
-            "inserted_primary_chunks": sum(len(chunks) for _, chunks in prepared),
+            "inserted_primary_chunks": expected_chunks,
+            "verified_remote_documents": stored_documents,
+            "verified_remote_chunks": stored_chunks,
         },
         flush=True,
     )

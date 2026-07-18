@@ -312,7 +312,7 @@ _ISSUE_EXPLICIT_REFERENCE_RE = re.compile(
     re.IGNORECASE,
 )
 _EXPLICIT_QUERY_DOMAIN_RE = re.compile(
-    r"^\s*(CIT|PIT|VAT|UFR|PCC|SD|ORDYNACJA|OP|AKCYZA|EXCISE)\b",
+    r"^\s*(CIT|PIT|VAT|UFR|PCC|SD|ORDYNACJA|OP|AKCYZA|EXCISE|PP)\b",
     re.IGNORECASE,
 )
 
@@ -371,6 +371,32 @@ def _candidate_references(candidate: RetrievalCandidate) -> tuple[str, ...]:
     if isinstance(raw, (list, tuple, set, frozenset)):
         values.extend(str(value) for value in raw)
     return tuple(_normalise_reference(value) for value in values if value)
+
+
+def _authority_provision_overlap(
+    issue: LegalIssue,
+    candidate: RetrievalCandidate,
+) -> bool:
+    """Match an authority's article citation despite editorial granularity."""
+
+    expected_values = [
+        _normalise_reference(match.group(0))
+        for concept in issue.possible_provision_concepts
+        for match in _ISSUE_EXPLICIT_REFERENCE_RE.finditer(concept)
+    ]
+    found_values = [*_candidate_references(candidate)]
+    found_values.extend(
+        _normalise_reference(match.group(0))
+        for match in _ISSUE_EXPLICIT_REFERENCE_RE.finditer(candidate.text)
+    )
+
+    def article(value: str) -> str:
+        match = re.search(r"\bart\.\s*\d+[a-z]*", value, re.IGNORECASE)
+        return _normalise_reference(match.group(0)) if match else ""
+
+    expected_articles = {article(value) for value in expected_values} - {""}
+    found_articles = {article(value) for value in found_values} - {""}
+    return bool(expected_articles.intersection(found_articles))
 
 
 def _reference_match_specificity(required: str, found: str) -> float:
@@ -648,20 +674,36 @@ class _BaseLane:
         )
         if self.lane_name == "authority" and (
             issue.transactions
+            or issue.payments
             or issue.positive_fact_constraints
             or issue.possible_provision_concepts
         ):
             unfiltered_count = len(reranked)
-            reranked = [
-                candidate
-                for candidate in reranked
-                if (
+
+            def materially_relevant(candidate: RetrievalCandidate) -> bool:
+                if candidate.source_type.casefold() == "guidance":
+                    # Curated official guidance commonly uses abstract rather
+                    # than case-fact wording and already forms a narrow pool.
+                    return True
+                fact_match = (
                     candidate.component_scores.get("transaction", 0.0) >= 0.15
+                    or candidate.component_scores.get("payment", 0.0) >= 0.15
                     or candidate.component_scores.get("positive_constraints", 0.0)
                     >= 0.15
-                    or candidate.component_scores.get("provision_concepts", 0.0) > 0.0
                 )
-            ]
+                provision_match = _authority_provision_overlap(issue, candidate)
+                has_fact_scope = bool(
+                    issue.transactions
+                    or issue.payments
+                    or issue.positive_fact_constraints
+                )
+                if has_fact_scope and issue.possible_provision_concepts:
+                    return fact_match and provision_match
+                if has_fact_scope:
+                    return fact_match
+                return provision_match
+
+            reranked = [candidate for candidate in reranked if materially_relevant(candidate)]
             trace.append(
                 {
                     "event": "authority_material_relevance_filter",
@@ -824,9 +866,29 @@ class LegalRetriever:
         # interpretations or judgments: authorities often reveal the missing
         # editorial unit.  At most two directed retries are made, avoiding a
         # retrieval loop while preserving the initial candidate pools.
-        if self.primary_enabled and self.authority_enabled:
-            authority_refs = _cited_provisions_by_issue(authorities)
-            missing_primary_refs = _references_for_missing_lane(primary, authority_refs)
+        if self.primary_enabled:
+            authority_refs = (
+                _cited_provisions_by_issue(authorities)
+                if self.authority_enabled
+                else {}
+            )
+            primary_dependency_refs = _cited_provisions_by_issue(primary)
+            missing_authority_backrefs = _references_missing_from_lane(
+                primary,
+                authority_refs,
+            )
+            missing_primary_dependency_refs = _references_missing_from_lane(
+                primary,
+                primary_dependency_refs,
+            )
+            primary_retry_refs = _merge_references_by_issue(
+                primary_dependency_refs,
+                authority_refs,
+            )
+            missing_primary_refs = _references_missing_from_lane(
+                primary,
+                primary_retry_refs,
+            )
             if missing_primary_refs:
                 retried_primary = await self._retry_lane(
                     plan, primary, missing_primary_refs, lane="primary_law"
@@ -837,28 +899,33 @@ class LegalRetriever:
                         "event": "authority_backreference_retry",
                         "retrieval_iteration": 1,
                         "executed": True,
-                        "discovered_from_authority": missing_primary_refs,
+                        "discovered_from_authority": missing_authority_backrefs,
+                        "discovered_from_primary_dependencies": missing_primary_dependency_refs,
                     }
                 )
             else:
                 trace.append({"event": "authority_backreference_retry", "retrieval_iteration": 1, "executed": False, "discovered_from_authority": {}})
 
-            primary_refs = _cited_provisions_by_issue(primary)
-            missing_authority_refs = _references_for_missing_lane(authorities, primary_refs)
-            if missing_authority_refs:
-                authorities = await self._retry_lane(
-                    plan, authorities, missing_authority_refs, lane="authority"
+            if self.authority_enabled:
+                primary_refs = _cited_provisions_by_issue(primary)
+                missing_authority_refs = _references_missing_from_lane(
+                    authorities,
+                    primary_refs,
                 )
-                trace.append(
-                    {
-                        "event": "primary_to_authority_retry",
-                        "retrieval_iteration": 2,
-                        "executed": True,
-                        "discovered_from_primary": missing_authority_refs,
-                    }
-                )
-            else:
-                trace.append({"event": "primary_to_authority_retry", "retrieval_iteration": 2, "executed": False, "discovered_from_primary": {}})
+                if missing_authority_refs:
+                    authorities = await self._retry_lane(
+                        plan, authorities, missing_authority_refs, lane="authority"
+                    )
+                    trace.append(
+                        {
+                            "event": "primary_to_authority_retry",
+                            "retrieval_iteration": 2,
+                            "executed": True,
+                            "discovered_from_primary": missing_authority_refs,
+                        }
+                    )
+                else:
+                    trace.append({"event": "primary_to_authority_retry", "retrieval_iteration": 2, "executed": False, "discovered_from_primary": {}})
         return LegalRetrievalResult(primary, authorities, tuple(trace))
 
     async def recover_missing_primary_law(
@@ -1153,23 +1220,78 @@ def _cited_provisions_by_issue(
     return result
 
 
-def _references_for_missing_lane(
+def _merge_references_by_issue(
+    *groups: Mapping[str, list[str]],
+) -> dict[str, list[str]]:
+    merged: dict[str, list[str]] = {}
+    for group in groups:
+        for issue_id, references in group.items():
+            values = merged.setdefault(issue_id, [])
+            known = {value.casefold() for value in values}
+            for reference in references:
+                if reference.casefold() not in known:
+                    values.append(reference)
+                    known.add(reference.casefold())
+    return merged
+
+
+def _references_missing_from_lane(
     lanes: Sequence[LaneResult],
     references: Mapping[str, list[str]],
 ) -> dict[str, list[str]]:
-    """Keep directed retries targeted to a lane that produced no evidence.
+    """Retry exact citations absent from a lane, even when it has neighbours.
 
-    Retrying an already populated lane with every citation found in the other
-    lane fans one WHT question into dozens of remote database queries.  The
-    initial lanes remain independent and complete; this is only the recovery
-    path for an empty lane.
+    A populated lane is not necessarily a complete lane.  The two-reference
+    cap bounds fan-out while allowing a retrieved statute or authority to
+    reveal a controlling dependency that broad first-pass candidates missed.
     """
     existing = {item.issue_id: item for item in lanes}
-    return {
-        issue_id: cited[:2]
-        for issue_id, cited in references.items()
-        if cited and not (existing.get(issue_id) and existing[issue_id].candidates)
-    }
+    result: dict[str, list[str]] = {}
+    for issue_id, cited in references.items():
+        lane = existing.get(issue_id)
+        found = (
+            _retrieved_provisions_by_issue([lane]).get(issue_id, [])
+            if lane is not None
+            else []
+        )
+        missing: list[str] = []
+        for raw_reference in cited:
+            required = _normalise_reference(raw_reference)
+            if not required or any(
+                _reference_match_specificity(required, _normalise_reference(value)) > 0
+                for value in found
+            ):
+                continue
+            missing.append(raw_reference)
+            if len(missing) >= 2:
+                break
+        if missing:
+            result[issue_id] = missing
+    return result
+
+
+def _retrieved_provisions_by_issue(
+    lanes: Sequence[LaneResult],
+) -> dict[str, list[str]]:
+    """Collect provisions actually represented by candidate metadata.
+
+    Textual cross-references are discovery edges, not proof that the target
+    editorial unit itself was retrieved. Keeping those concepts separate is
+    what lets the second pass follow ``art. 22p → art. 19``.
+    """
+
+    result: dict[str, list[str]] = {}
+    for lane in lanes:
+        values: list[str] = []
+        for candidate in lane.candidates:
+            values.extend(_candidate_references(candidate))
+        seen: set[str] = set()
+        result[lane.issue_id] = [
+            value
+            for value in values
+            if value and not (value.casefold() in seen or seen.add(value.casefold()))
+        ]
+    return result
 
 
 def _requested_primary_reference(value: str) -> Optional[str]:

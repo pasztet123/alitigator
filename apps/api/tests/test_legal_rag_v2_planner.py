@@ -222,6 +222,14 @@ class LegalQueryPlannerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(outcome.fallback_trace.fallback_used)
         self.assertEqual("cit_contractual_penalty_cost", outcome.plan.issues[0].issue_id)
+        self.assertEqual(
+            {"CIT art. 15 ust. 1", "CIT art. 16 ust. 1 pkt 22"},
+            {
+                family.query
+                for family in outcome.plan.issues[0].query_families
+                if family.lane == "primary_law"
+            },
+        )
         self.assertEqual(2, len(gateway.calls))
         self.assertIs(IssueLocatorOutput, gateway.calls[1]["response_model"])
 

@@ -29,7 +29,7 @@ class LegalResearchConfig:
     @classmethod
     def from_env(cls) -> "LegalResearchConfig":
         return cls(
-            mode=(os.getenv("LEGAL_RAG_MODE") or "legacy").strip().lower(),
+            mode=(os.getenv("LEGAL_RAG_MODE") or "model_rag_model").strip().lower(),
             artifact_root=Path(os.getenv("MODEL_RAG_MODEL_ARTIFACT_ROOT", "artifacts/model_rag_model")),
             planner_model=os.getenv("LEGAL_PLANNER_MODEL", "gpt-5.6-terra"),
             evidence_analyst_model=os.getenv("EVIDENCE_ANALYST_MODEL", "gpt-5.6-terra"),

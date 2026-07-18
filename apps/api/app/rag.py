@@ -34,6 +34,7 @@ DEFAULT_LAW_SOURCE_PATHS = (
     API_DIR / "data" / "laws" / "processed" / "tax_treaties_core.jsonl",
     API_DIR / "data" / "laws" / "processed" / "ksef_2_0_current_bundle.jsonl",
     API_DIR / "data" / "laws" / "processed" / "family_foundation_primary_bundle.jsonl",
+    API_DIR / "data" / "laws" / "processed" / "business_law_art_19.jsonl",
     API_DIR / "data" / "processed" / "cbosa_nsa_fsk_judgments.jsonl",
 )
 DEFAULT_RAG_DB_PATH = API_DIR / "data" / "processed" / "eureka_rag.sqlite3"
@@ -4059,6 +4060,7 @@ def derive_tax_domain(record: dict[str, Any]) -> str:
         [*map(str, record.get("law_tags") or []), *map(str, record.get("issues") or []), *map(str, record.get("legal_provisions") or [])]
     ).lower()
     for domain, markers in (
+        ("PP", ("[pp]", "prawo przedsiębiorców", "prawo przedsiebiorcow")),
         ("UFR", ("[ufr]", "ufr", "ustawa o fundacji rodzinnej", "o fundacji rodzinnej")),
         ("VAT", ("[vat]", "vat", "towarów i usług")),
         ("CIT", ("[cit]", "cit", "dochodowym od osób prawnych")),

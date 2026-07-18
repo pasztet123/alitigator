@@ -56,11 +56,25 @@ def _query_tokens(query: str, *, limit: int = 24) -> list[str]:
 def _sqlite_match_query(query: str) -> str:
     # OR keeps candidate generation recall-oriented. Legal precision belongs to
     # the transparent reranker, not to an opaque FTS routing rule.
-    return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"*' for token in _query_tokens(query))
+    tokens = _query_tokens(query)
+    if not tokens:
+        reference = _EXPLICIT_REFERENCE_RE.search(query)
+        article = re.search(r"\d+[a-z]*", reference.group(0), re.I) if reference else None
+        if article:
+            tokens = [article.group(0).casefold()]
+    return " OR ".join(
+        f'"{token.replace(chr(34), chr(34) * 2)}"*' for token in tokens
+    )
 
 
 def _mysql_match_query(query: str) -> str:
-    return " ".join(f"{token}*" if len(token) >= 4 else token for token in _query_tokens(query))
+    tokens = _query_tokens(query)
+    if not tokens:
+        reference = _EXPLICIT_REFERENCE_RE.search(query)
+        article = re.search(r"\d+[a-z]*", reference.group(0), re.I) if reference else None
+        if article:
+            tokens = [article.group(0).casefold()]
+    return " ".join(f"{token}*" if len(token) >= 4 else token for token in tokens)
 
 
 def _merge_document_chunks(chunks: Sequence[str], *, max_chars: int = 60_000) -> str:
@@ -161,6 +175,13 @@ def _normalized_source_type(row: Mapping[str, Any]) -> str:
         # interpretations received their own canonical authority type.
         return "general_interpretation"
     return source_type
+
+
+def _authority_only_source_types(source_types: Sequence[str]) -> bool:
+    values = {value.casefold() for value in source_types}
+    return bool(values) and values.issubset(
+        {"interpretation", "general_interpretation", "judgment", "resolution", "guidance"}
+    )
 
 
 def _candidate_from_row(row: Mapping[str, Any], *, backend: str, rank: int) -> RetrievalCandidate:
@@ -381,6 +402,9 @@ class CorpusFtsBackend:
 
         types = self._storage_source_types(source_types)
         domains = self._tax_domains(metadata_filters)
+        authority_exact_reference = bool(explicit_reference) and _authority_only_source_types(
+            source_types
+        )
         clauses = ["chunks_fts MATCH ?"]
         values: list[Any] = [match_query]
         if types:
@@ -394,7 +418,7 @@ class CorpusFtsBackend:
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
         try:
-            if explicit_reference:
+            if explicit_reference and not authority_exact_reference:
                 reference_prefix = f"{explicit_reference}%"
                 exact_clauses = ["(c.display_reference LIKE ? OR c.chunk_text LIKE ?)"]
                 exact_values: list[Any] = [reference_prefix, f"{explicit_reference}\n%"]
@@ -429,6 +453,42 @@ class CorpusFtsBackend:
                 ).fetchall()
                 if exact_rows:
                     return [dict(row) for row in exact_rows]
+            if authority_exact_reference:
+                citation_clauses = [
+                    "(cc.citation = ? OR cc.citation LIKE ?)",
+                ]
+                citation_values: list[Any] = [
+                    explicit_reference,
+                    f"{explicit_reference} %",
+                ]
+                if types:
+                    citation_clauses.append(
+                        "d.source_type IN (" + ",".join("?" for _ in types) + ")"
+                    )
+                    citation_values.extend(types)
+                if domain_clause:
+                    citation_clauses.append(domain_clause)
+                    citation_values.extend(domain_values)
+                citation_rows = connection.execute(
+                    """
+                    SELECT c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                           c.display_reference, c.provision_id,
+                           d.subject, d.signature, d.published_date, d.source_url,
+                           d.category, d.tax_domain, d.source, d.source_type,
+                           d.source_subtype, d.authority, d.act_title, d.publication,
+                           d.legal_state_date, d.legal_provisions_json,
+                           d.source_pages_json, 1000.0 AS lexical_score
+                    FROM chunk_citations cc
+                    JOIN chunks c ON c.chunk_id = cc.chunk_id
+                    JOIN documents d ON d.document_id = c.document_id
+                    WHERE """
+                    + " AND ".join(citation_clauses)
+                    + " ORDER BY d.published_date DESC, c.chunk_index ASC, "
+                    + "c.chunk_id ASC LIMIT ?",
+                    tuple([*citation_values, limit]),
+                ).fetchall()
+                if citation_rows:
+                    return [dict(row) for row in citation_rows]
             rows = connection.execute(
                 """
                 SELECT c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
@@ -473,6 +533,9 @@ class CorpusFtsBackend:
                 raise ValueError("Unsafe MySQL RAG table identifier")
         types = self._storage_source_types(source_types)
         domains = self._tax_domains(metadata_filters)
+        authority_exact_reference = bool(explicit_reference) and _authority_only_source_types(
+            source_types
+        )
         treaty_prefix = treaty_direct_subject_prefix(query) if "tax_treaty" in source_types else None
         if treaty_prefix:
             # Treaty article numbers recur in every UPO.  An unscoped exact
@@ -507,7 +570,7 @@ class CorpusFtsBackend:
                 with connection.cursor() as cursor:
                     cursor.execute(treaty_sql, (*treaty_values, reference_prefix if explicit_reference else "", limit))
                     return [dict(row) for row in cursor.fetchall()]
-        if explicit_reference:
+        if explicit_reference and not authority_exact_reference:
             reference_prefix = f"{explicit_reference}%"
             exact_clauses = ["(c.display_reference LIKE %s OR c.chunk_text LIKE %s)"]
             exact_values: list[Any] = [reference_prefix, f"{explicit_reference}\n%"]
@@ -543,6 +606,52 @@ class CorpusFtsBackend:
                             f"{explicit_reference}\n%",
                             limit,
                         ),
+                    )
+                    rows = [dict(row) for row in cursor.fetchall()]
+                    if rows:
+                        return rows
+        if authority_exact_reference:
+            citation_clauses = [
+                "(citation.citation = %s OR citation.citation LIKE %s)",
+            ]
+            citation_values: list[Any] = [
+                explicit_reference,
+                f"{explicit_reference} %",
+            ]
+            if types:
+                citation_clauses.append(
+                    "d.source_type IN (" + ",".join("%s" for _ in types) + ")"
+                )
+                citation_values.extend(types)
+            domain_clause, domain_values = self._domain_clause(
+                domains, source_types, "%s"
+            )
+            if domain_clause:
+                citation_clauses.append(domain_clause)
+                citation_values.extend(domain_values)
+            citation_sql = f"""
+                SELECT c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+                       c.display_reference, c.provision_id,
+                       d.subject, d.signature, d.published_date, d.source_url,
+                       d.category, d.tax_domain, d.source, d.source_type,
+                       d.source_subtype, d.authority, d.act_title, d.publication,
+                       d.legal_state_date, d.legal_provisions_json,
+                       d.source_pages_json,
+                       MATCH(c.search_text, c.question_text, c.facts_text, c.tax_domain)
+                           AGAINST (%s IN BOOLEAN MODE) AS lexical_score
+                FROM `{citations_table}` citation
+                JOIN `{chunks_table}` c ON c.chunk_id = citation.chunk_id
+                JOIN `{documents_table}` d ON d.document_id = c.document_id
+                WHERE {' AND '.join(citation_clauses)}
+                ORDER BY lexical_score DESC, d.published_date DESC,
+                         c.chunk_index ASC, c.chunk_id ASC
+                LIMIT %s
+            """
+            with mysql_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        citation_sql,
+                        (match_query, *citation_values, limit),
                     )
                     rows = [dict(row) for row in cursor.fetchall()]
                     if rows:

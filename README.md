@@ -254,10 +254,11 @@ Nowa architektura jest wdrażana przez tryb shadow i jest odwracalna jedną flag
 LEGAL_RAG_MODE=legal_rag_v2      # jawny release evidence-per-issue
 LEGAL_RAG_MODE=legacy            # wyłącznie jawny rollback
 LEGAL_RAG_MODE=model_rag_model   # planner → RAG → evidence model → claims → writer
-LEGAL_RAG_MODE=shadow            # domyślnie: odpowiedź legacy, nowy pipeline zapisuje trace
+LEGAL_RAG_MODE=shadow            # jawny rollback diagnostyczny: odpowiedź legacy, v2 zapisuje trace
 ```
 
-Jeżeli żadna zmienna routingu nie jest ustawiona, aplikacja używa `shadow`.
+Jeżeli żadna zmienna routingu nie jest ustawiona, aplikacja używa
+`model_rag_model`. Tryby `shadow` i `legacy` wymagają jawnej flagi rollbacku.
 V2 używa osobnych modeli konfigurowanych per etap:
 
 ```text

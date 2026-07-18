@@ -7,7 +7,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 from app.auth import AuthenticatedUser
-from app.main import ChatMessage, ChatRequest, chat, get_legal_pipeline_mode
+from app.main import ChatMessage, ChatRequest, chat, get_legal_pipeline_mode, health
 from app.legal_rag_v2.schemas import (
     Clarification,
     LegalIssue,
@@ -74,9 +74,26 @@ class FakePipeline:
 
 
 class LegalRagV2RoutingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_shadow_is_the_safe_default_when_no_routing_variable_is_set(self) -> None:
+    async def test_v2_is_the_default_when_no_routing_variable_is_set(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(get_legal_pipeline_mode(), "shadow")
+            self.assertEqual(get_legal_pipeline_mode(), "model_rag_model")
+
+    async def test_health_exposes_the_pipeline_that_will_serve_chat(self) -> None:
+        with (
+            patch.dict(os.environ, {"LEGAL_RAG_MODE": "model_rag_model"}),
+            patch("app.main.index_exists", return_value=True),
+            patch("app.main.is_model_gateway_configured", return_value=True),
+            patch("app.main.is_supabase_configured", return_value=False),
+            patch("app.main.is_chat_storage_available", return_value=False),
+            patch("app.main.is_stripe_configured", return_value=False),
+        ):
+            response = health()
+
+        self.assertEqual(response.legal_pipeline["served_by"], "legal_rag_v2")
+        self.assertEqual(
+            response.legal_pipeline["pipeline_mode"], "model_rag_model"
+        )
+        self.assertIn("pipeline_version", response.legal_pipeline)
 
     async def test_fallback_plan_accepts_a_question_with_trailing_whitespace(self) -> None:
         from app.legal_rag_v2.planner import LegacyFallbackPlanner
@@ -149,6 +166,9 @@ class LegalRagV2RoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(pipeline.calls, 1)
         self.assertEqual(response.analysis_trace["pipeline"], "legal_rag_v2")
+        self.assertEqual(response.analysis_trace["served_by"], "legal_rag_v2")
+        self.assertIn("pipeline_version", response.analysis_trace)
+        self.assertIn("retrieval_iterations", response.analysis_trace)
         self.assertEqual(response.reply.splitlines()[0], "Teza")
 
     async def test_recovered_claim_validation_is_served_without_a_trace_id(self) -> None:

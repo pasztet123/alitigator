@@ -601,6 +601,59 @@ class RetrievalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.primary_law[0].candidates[0].candidate_id, "exact-unit")
         self.assertTrue(any(item.get("event") == "authority_backreference_retry" and item.get("executed") for item in result.trace))
 
+    async def test_second_pass_repairs_populated_but_incomplete_primary_lane(self) -> None:
+        class IncompleteBackend:
+            async def search(self, query, *, limit, source_types, metadata_filters):
+                if "interpretation" in source_types:
+                    return [
+                        RetrievalCandidate(
+                            "authority",
+                            "Organ zastosował art. 22p ust. 1 i art. 19.",
+                            "interpretation",
+                            document_id="authority",
+                            chunk_id="authority",
+                            metadata={"legal_provisions": ["art. 22p ust. 1", "art. 19"]},
+                        )
+                    ]
+                if query.casefold().startswith("art. 19"):
+                    return [
+                        RetrievalCandidate(
+                            "business-art-19",
+                            "Art. 19. Jednorazowa wartość transakcji bez względu na liczbę płatności.",
+                            "statute",
+                            document_id="business-act",
+                            chunk_id="business-art-19",
+                            metadata={"legal_provisions": ["art. 19"]},
+                        )
+                    ]
+                return [
+                    RetrievalCandidate(
+                        "pit-art-22p",
+                        "Art. 22p ust. 1. Płatność dotycząca transakcji określonej w art. 19.",
+                        "statute",
+                        document_id="pit-act",
+                        chunk_id="pit-art-22p",
+                        metadata={"legal_provisions": ["art. 22p ust. 1"]},
+                    )
+                ]
+
+        result = await LegalRetriever(
+            IncompleteBackend(),
+            config=RetrievalConfig(selected_limit_per_issue=5),
+        ).retrieve(research_plan())
+
+        candidate_ids = {
+            candidate.candidate_id for candidate in result.primary_law[0].candidates
+        }
+        self.assertEqual({"pit-art-22p", "business-art-19"}, candidate_ids)
+        retry = next(
+            event
+            for event in result.trace
+            if event.get("event") == "authority_backreference_retry"
+        )
+        self.assertTrue(retry["executed"])
+        self.assertIn("art. 19", retry["discovered_from_authority"]["issue-1"])
+
     async def test_model_primary_gap_recovery_merges_only_verified_exact_provision(self) -> None:
         class RecoveryBackend:
             async def search(self, query, *, limit, source_types, metadata_filters):

@@ -85,6 +85,7 @@ from app.legal_rag_v2.pipeline import PIPELINE_VERSION as LEGAL_RAG_PIPELINE_VER
 from app.legacy_interpretations import (
     JULY7_RETRIEVAL_COMMIT,
     JULY7_RETRIEVAL_DATE,
+    get_july7_interpretation_backend,
     search_tax_interpretations,
 )
 from app.rag import (
@@ -952,8 +953,9 @@ def build_july7_interpretations_reply(chunks: list) -> str:
     if not chunks:
         return (
             "Wyniki interpretacji podatkowych\n\n"
-            "Nie znaleziono interpretacji indywidualnej dopasowanej do pytania. "
-            "Spróbuj doprecyzować podatek, czynność, datę oraz kluczowe okoliczności."
+            "Nie znaleziono interpretacji indywidualnej, która jednocześnie pokrywa kluczowe "
+            "elementy pytania. Nie pokazujemy luźno powiązanych wyników. "
+            "Spróbuj podać podatek, rodzaj działalności oraz sposób poniesienia wydatku."
         )
 
     rows: list[str] = []
@@ -3547,6 +3549,7 @@ async def chat(
                 "retrieval_only": True,
                 "snapshot_commit": JULY7_RETRIEVAL_COMMIT,
                 "snapshot_date": JULY7_RETRIEVAL_DATE,
+                "retrieval_backend": get_july7_interpretation_backend(),
                 "source_type": "interpretation",
                 "result_count": len(retrieved_interpretations),
                 "selected_chunk_ids": [chunk.chunk_id for chunk in retrieved_interpretations],

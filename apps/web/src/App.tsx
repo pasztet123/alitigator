@@ -8,6 +8,7 @@ import { isSupabaseConfigured, supabaseBrowserClient } from './lib/supabase'
 type Role = 'user' | 'assistant'
 type ChatMode = 'demo' | 'live'
 type RetrievalScope = 'statutes_only' | 'statutes_and_interpretations' | 'full_argumentation'
+type RetrievalProfile = 'current_legal_rag' | 'interpretations_july7'
 
 type Message = {
   id: string
@@ -209,7 +210,7 @@ const HINT_DEBOUNCE_MS = 900
 const MIN_DRAFT_LENGTH_FOR_HINTS = 24
 const ACTIVE_HINT_COUNT = 3
 const MAX_HINT_QUESTION_COUNT = 5
-const APP_VERSION = '2.0.65'
+const APP_VERSION = '2.0.66'
 const ASSISTANT_SECTION_TITLES = [
   'Teza',
   'Analiza',
@@ -675,6 +676,7 @@ function App() {
   const [isHintsLoading, setIsHintsLoading] = useState(false)
   const [hintMode, setHintMode] = useState<'live' | 'fallback'>('fallback')
   const retrievalScope: RetrievalScope = 'full_argumentation'
+  const [retrievalProfile, setRetrievalProfile] = useState<RetrievalProfile>('current_legal_rag')
 
   const [account, setAccount] = useState<AccountResponse | null>(null)
   const [adminGrantDraft, setAdminGrantDraft] = useState({ user_email: '', credit_amount: '1', reason: '' })
@@ -1530,6 +1532,7 @@ async function fetchPromptHints({
           chat_id: isLocalThreadId(pendingChatId) ? null : pendingChatId,
           intent_hints: intentHintsPayload,
           retrieval_preferences: buildRetrievalPreferences(retrievalScope),
+          retrieval_profile: retrievalProfile,
         }),
       })
 
@@ -2019,6 +2022,23 @@ async function fetchPromptHints({
                         {modelLabels[model] ?? model}
                       </option>
                     ))}
+                  </select>
+                </div>
+              </div>
+              <div className="model-select-shell">
+                <label className="model-select-label" htmlFor="retrieval-profile-select">
+                  Tryb
+                </label>
+                <div className="model-select-wrap">
+                  <select
+                    id="retrieval-profile-select"
+                    name="retrieval-profile-select"
+                    value={retrievalProfile}
+                    onChange={(event) => setRetrievalProfile(event.target.value as RetrievalProfile)}
+                    disabled={isSending}
+                  >
+                    <option value="current_legal_rag">Pełna analiza prawna</option>
+                    <option value="interpretations_july7">Interpretacje podatkowe (7 VII)</option>
                   </select>
                 </div>
               </div>

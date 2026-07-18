@@ -1080,7 +1080,7 @@ select {
 }
 
 .composer-toolbar-compact {
-  grid-template-columns: minmax(0, 220px);
+  grid-template-columns: repeat(2, minmax(0, 220px));
   justify-content: start;
 }
 

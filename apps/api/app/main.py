@@ -82,6 +82,11 @@ from app.hybrid_authority_rag import (
 )
 from app.legal_research.pipeline import create_default_pipeline
 from app.legal_rag_v2.pipeline import PIPELINE_VERSION as LEGAL_RAG_PIPELINE_VERSION
+from app.legacy_interpretations import (
+    JULY7_RETRIEVAL_COMMIT,
+    JULY7_RETRIEVAL_DATE,
+    search_tax_interpretations,
+)
 from app.rag import (
     RagChunk,
     add_primary_source_fallback_chunks,
@@ -507,6 +512,7 @@ class ChatRequest(BaseModel):
     chat_id: Optional[str] = Field(default=None, max_length=128)
     intent_hints: list["IntentHintAnswer"] = Field(default_factory=list, max_length=12)
     retrieval_preferences: Optional["RetrievalPreferences"] = None
+    retrieval_profile: Literal["current_legal_rag", "interpretations_july7"] = "current_legal_rag"
 
 
 class ChatResponse(BaseModel):
@@ -939,6 +945,45 @@ def build_retrieval_preferences_context(preferences: Optional[RetrievalPreferenc
             " ale bez wyroków sądów."
         )
     return "Użytkownik chce odpowiedzi opartej wyłącznie na przepisach ustawowych, bez interpretacji i bez wyroków."
+
+
+def build_july7_interpretations_reply(chunks: list) -> str:
+    """Render a retrieval result, never a tax opinion, for the frozen MVP mode."""
+    if not chunks:
+        return (
+            "Wyniki interpretacji podatkowych\n\n"
+            "Nie znaleziono interpretacji indywidualnej dopasowanej do pytania. "
+            "Spróbuj doprecyzować podatek, czynność, datę oraz kluczowe okoliczności."
+        )
+
+    rows: list[str] = []
+    for position, chunk in enumerate(chunks, start=1):
+        reference = str(chunk.signature or chunk.subject or f"Dokument {chunk.document_id}").strip()
+        metadata = " · ".join(
+            value
+            for value in [
+                str(chunk.published_date or "").strip(),
+                str(chunk.category or "").strip(),
+            ]
+            if value
+        )
+        excerpt = re.sub(r"\s+", " ", str(chunk.chunk_text or "")).strip()
+        if len(excerpt) > 700:
+            excerpt = f"{excerpt[:697].rstrip()}…"
+        source_url = str(chunk.source_url or "").strip()
+        source_line = f"\n  Źródło: {source_url}" if source_url else ""
+        rows.append(
+            f"{position}. {reference}"
+            + (f" ({metadata})" if metadata else "")
+            + f"\n  {excerpt}{source_line}"
+        )
+
+    return (
+        "Wyniki interpretacji podatkowych\n\n"
+        "Poniżej są wyłącznie interpretacje indywidualne znalezione przez snapshot retrievalu z 7 lipca 2026 r. "
+        "To wyniki wyszukiwania, nie automatyczna opinia prawna.\n\n"
+        + "\n\n".join(rows)
+    )
 
 
 HINT_DOMAIN_KEYWORDS: dict[str, tuple[tuple[str, float], ...]] = {
@@ -3469,6 +3514,47 @@ async def chat(
     intent_hint_context = build_hint_context(request.intent_hints)
     retrieval_preferences_context = build_retrieval_preferences_context(request.retrieval_preferences)
     effective_user_prompt = build_effective_user_prompt(latest_user_message, request.intent_hints)
+
+    if request.retrieval_profile == "interpretations_july7":
+        try:
+            retrieved_interpretations = await asyncio.to_thread(
+                search_tax_interpretations,
+                effective_user_prompt,
+            )
+        except Exception as exc:
+            logger.exception("July 7 interpretation retrieval failed")
+            raise HTTPException(
+                status_code=502,
+                detail="Wyszukiwanie interpretacji podatkowych nie ukończyło się. Spróbuj ponownie.",
+            ) from exc
+
+        interpretation_reply = build_july7_interpretations_reply(retrieved_interpretations)
+        persisted_assistant_message = None
+        if chat_storage_available:
+            persisted_assistant_message = persist_chat_exchange(
+                chat_id,
+                user_id=current_user.id,
+                messages=sanitized_messages,
+                reply=interpretation_reply,
+            )
+        return ChatResponse(
+            reply=interpretation_reply,
+            mode="demo",
+            model="retrieval-only",
+            redactions=sorted(set(redactions)),
+            analysis_trace={
+                "pipeline": "interpretations_july7",
+                "retrieval_only": True,
+                "snapshot_commit": JULY7_RETRIEVAL_COMMIT,
+                "snapshot_date": JULY7_RETRIEVAL_DATE,
+                "source_type": "interpretation",
+                "result_count": len(retrieved_interpretations),
+                "selected_chunk_ids": [chunk.chunk_id for chunk in retrieved_interpretations],
+            },
+            chat_id=chat_id if chat_storage_available else None,
+            assistant_message_id=(persisted_assistant_message or {}).get("id"),
+            structured_reply=None,
+        )
 
     pipeline_mode = get_legal_pipeline_mode()
     if pipeline_mode == "shadow":

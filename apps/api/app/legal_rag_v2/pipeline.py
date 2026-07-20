@@ -55,6 +55,7 @@ from .schemas import (
     EvidenceBundle,
     FallbackTrace,
     LegalClaim,
+    LegalIssue,
     LegalResearchPlan,
     MissingPrimaryRequest,
     PrimaryLawGapAssessment,
@@ -62,6 +63,7 @@ from .schemas import (
     ProvisionGraph,
     ProvisionGraphEdge,
     ProvisionReference,
+    QueryFamily,
     ValidationRecord,
     V2Schema,
     WriterAnalysisSection,
@@ -72,6 +74,7 @@ from .trace import TraceWriter
 from .transfer_pricing import enrich_transfer_pricing_plan, question_targets_transfer_pricing
 from .vat import enrich_input_vat_deduction_plan, enrich_mixed_use_vehicle_vat_plan
 from .wht import WhtPayAndRefundCalculationEngine, enrich_crossborder_wht_plan
+from app.tax_research import understand_tax_research_question
 
 
 PIPELINE_VERSION = "legal_rag_v2_2"
@@ -102,7 +105,64 @@ def _enrich_research_plan(
     plan = enrich_cit_cost_plan(plan, question)
     plan = enrich_cash_payment_cost_plan(plan, question)
     plan = enrich_input_vat_deduction_plan(plan, question)
-    return enrich_mixed_use_vehicle_vat_plan(plan, question)
+    plan = enrich_mixed_use_vehicle_vat_plan(plan, question)
+    return _enrich_authority_research_inputs(plan, question)
+
+
+def _enrich_authority_research_inputs(plan: LegalResearchPlan, question: str) -> LegalResearchPlan:
+    """Send the same material facts and provision hypothesis to authority FTS.
+
+    Primary-law discovery used to be the only consumer of a detected article.
+    This adds bounded authority query families from the immutable research plan;
+    it does not manufacture a conclusion or bind a question to a document.
+    """
+
+    understanding = understand_tax_research_question(question)
+    enriched: list[LegalIssue] = []
+    for issue in plan.issues:
+        generic_issue = issue.legal_mechanism in {"", "general_tax_analysis", "business_expense", "pit_cost_deductibility", "cit_cost_deductibility"}
+        domains = (
+            [understanding.tax_domain]
+            if generic_issue and understanding.tax_domain
+            else list(dict.fromkeys([*issue.tax_domains, understanding.tax_domain] if understanding.tax_domain else issue.tax_domains))
+        )
+        provisions = list(dict.fromkeys([*issue.possible_provision_concepts, *understanding.candidate_provisions]))
+        negatives = list(dict.fromkeys([*issue.negative_fact_constraints, *understanding.negative_concepts]))
+        transactions = list(dict.fromkeys([*issue.transactions, *understanding.material_concepts]))
+        families = list(issue.query_families)
+        known = {(family.lane, " ".join(family.query.casefold().split())) for family in families}
+        material_query = " ".join(understanding.material_concepts[:8])
+        if material_query and ("authority", material_query.casefold()) not in known:
+            families.append(QueryFamily(
+                family="fact_signature",
+                query=material_query,
+                lane="authority",
+                origin="model",
+            ))
+            known.add(("authority", material_query.casefold()))
+        for provision in understanding.candidate_provisions:
+            key = ("authority", " ".join(provision.casefold().split()))
+            if key not in known:
+                families.append(QueryFamily(
+                    family="explicit_provision_reference",
+                    query=provision,
+                    lane="authority",
+                    origin="model",
+                ))
+                known.add(key)
+        enriched.append(issue.model_copy(update={
+            "tax_domains": domains,
+            "legal_mechanism": (
+                understanding.legal_mechanism
+                if generic_issue
+                else issue.legal_mechanism
+            ),
+            "possible_provision_concepts": provisions,
+            "negative_fact_constraints": negatives,
+            "transactions": transactions,
+            "query_families": families,
+        }))
+    return plan.model_copy(update={"issues": enriched})
 
 
 class SynthesisPayloadTooLargeError(ModelGatewayError):
@@ -557,6 +617,7 @@ class LegalRagV2Pipeline:
                 "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.0"),
                 "controlled_pipeline_used": False,
                 "fallbacks_used": [],
+                **vector_index_runtime_status(),
             },
         )
         trace.write_json(
@@ -615,6 +676,7 @@ class LegalRagV2Pipeline:
                 "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.0"),
                 "controlled_pipeline_used": False,
                 "fallbacks_used": ([planner_outcome.fallback_trace.fallback_reason] if planner_outcome.fallback_trace.fallback_used else []),
+                **vector_index_runtime_status(),
             },
         )
 
@@ -657,6 +719,7 @@ class LegalRagV2Pipeline:
                         "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.0"),
                         "controlled_pipeline_used": False,
                         "fallbacks_used": [augmented.fallback_trace.fallback_reason],
+                        **vector_index_runtime_status(),
                     },
                 )
         primary_gap_started = time.monotonic()
@@ -1578,6 +1641,25 @@ def _open_embedding_index_if_available() -> Optional[VersionedEmbeddingIndex]:
         schema_version=os.getenv("EMBEDDING_SCHEMA_VERSION", "v1"),
         chunker_version=os.getenv("EMBEDDING_CHUNKER_VERSION", "provision_units_v1"),
     )
+
+
+def vector_index_runtime_status() -> dict[str, object]:
+    """Expose the real vector-channel preconditions without opening the index."""
+
+    path = Path(os.getenv("EMBEDDING_INDEX_PATH", "artifacts/model_rag_model/embedding_index.sqlite3"))
+    provider = os.getenv("EMBEDDING_PROVIDER", "openai").strip().lower()
+    provider_configured = (
+        bool(os.getenv("OPENAI_API_KEY"))
+        if provider == "openai"
+        else provider in {"offline", "hash"} and _env_bool("LEGAL_RAG_V2_ALLOW_OFFLINE_HASH_EMBEDDINGS", False)
+    )
+    available = bool(path.is_file() and path.stat().st_size > 0 and provider_configured)
+    return {
+        "vector_index_available": available,
+        "vector_index_path": str(path),
+        "vector_provider": provider if provider_configured else "",
+        "vector_candidate_count": 0,
+    }
 
 
 def _candidate_presence_recall(

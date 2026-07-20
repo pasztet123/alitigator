@@ -81,13 +81,17 @@ from app.hybrid_authority_rag import (
     write_hybrid_trace_artifacts,
 )
 from app.legal_research.pipeline import create_default_pipeline
-from app.legal_rag_v2.pipeline import PIPELINE_VERSION as LEGAL_RAG_PIPELINE_VERSION
+from app.legal_rag_v2.pipeline import (
+    PIPELINE_VERSION as LEGAL_RAG_PIPELINE_VERSION,
+    vector_index_runtime_status,
+)
 from app.legacy_interpretations import (
     JULY7_RETRIEVAL_COMMIT,
     JULY7_RETRIEVAL_DATE,
+    TaxResearchSearchResult,
     get_july7_interpretation_corpus_health,
     get_july7_interpretation_backend,
-    search_tax_interpretations,
+    search_tax_interpretations_with_trace,
 )
 from app.rag import (
     RagChunk,
@@ -131,7 +135,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.73"
+API_VERSION = "2.0.75"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -610,6 +614,13 @@ class HealthResponse(BaseModel):
     stripe_configured: bool
     legal_pipeline: dict[str, object]
     july7_interpretation_corpus: dict[str, object]
+    vector_index: dict[str, object]
+
+
+class TaxResearchTraceRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=12000)
+    retrieval_profile: Literal["interpretations_july7"] = "interpretations_july7"
+    limit: int = Field(default=6, ge=1, le=20)
 
 
 class ChatThreadSummary(BaseModel):
@@ -950,8 +961,68 @@ def build_retrieval_preferences_context(preferences: Optional[RetrievalPreferenc
     return "Użytkownik chce odpowiedzi opartej wyłącznie na przepisach ustawowych, bez interpretacji i bez wyroków."
 
 
-def build_july7_interpretations_reply(chunks: list) -> str:
-    """Render complete source documents, never a tax opinion, for the MVP mode."""
+def _research_excerpt(value: str, *, limit: int = 1_200) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0] + "…"
+
+
+def _render_research_document(document: object) -> str:
+    chunk = document.chunk
+    assessment = document.assessment
+    metadata = " · ".join(
+        value for value in (str(chunk.published_date or "").strip(), str(chunk.category or "").strip()) if value
+    )
+    differences = ", ".join(assessment.material_differences) or "brak istotnych różnic wskazanych przez walidator"
+    source = f"\n\nŹródło: {chunk.source_url}" if chunk.source_url else ""
+    return (
+        f"### {chunk.signature or chunk.subject or chunk.document_id}"
+        + (f" ({metadata})" if metadata else "")
+        + f"\n\n**Tytuł:** {chunk.subject}"
+        + f"\n\n**Relacja do pytania:** {assessment.relation}"
+        + f"\n\n**Mechanizm w dokumencie:** {assessment.document_mechanism}"
+        + f"\n\n**Dlaczego:** {assessment.reason}"
+        + f"\n\n**Istotne różnice:** {differences}"
+        + f"\n\n**Najważniejszy fragment:** {_research_excerpt(chunk.chunk_text)}{source}"
+    )
+
+
+def build_july7_interpretations_reply(result: TaxResearchSearchResult | list) -> str:
+    """Render classified research results; legacy list input remains test-compatible."""
+
+    if isinstance(result, TaxResearchSearchResult):
+        direct = [
+            item for item in result.documents
+            if item.assessment.relation == "direct" and not item.assessment.reject
+        ]
+        analogous = [
+            item for item in result.documents
+            if item.assessment.relation == "strong_analogy" and not item.assessment.reject
+        ]
+        context = [
+            item for item in result.documents
+            if item.assessment.relation == "context_only" and not item.assessment.reject
+        ]
+        different = [item for item in result.documents if item.assessment.relation == "different_mechanism"]
+        sections: list[str] = [
+            "Wyniki interpretacji podatkowych\n\n"
+            "Wyniki są klasyfikowane według zgodności mechanizmu, rodzaju wydatku i podstawy prawnej. "
+            "To materiał researchowy, nie automatyczna opinia prawna."
+        ]
+        if direct:
+            sections.append("## Bezpośrednio relewantne\n\n" + "\n\n".join(_render_research_document(item) for item in direct))
+        else:
+            sections.append("## Bezpośrednio relewantne\n\nNie znaleziono dostatecznie relewantnej interpretacji.")
+        if analogous:
+            sections.append("## Silnie analogiczne\n\n" + "\n\n".join(_render_research_document(item) for item in analogous))
+        if context:
+            sections.append("## Dodatkowy kontekst\n\n" + "\n\n".join(_render_research_document(item) for item in context))
+        if different:
+            sections.append("## Inny mechanizm podatkowy\n\n" + "\n\n".join(_render_research_document(item) for item in different))
+        return "\n\n".join(sections)
+
+    chunks = result
     if not chunks:
         return (
             "Wyniki interpretacji podatkowych\n\n"
@@ -3116,6 +3187,7 @@ def health() -> HealthResponse:
         stripe_configured=is_stripe_configured(),
         legal_pipeline=legal_runtime_debug(),
         july7_interpretation_corpus=get_july7_interpretation_corpus_health(),
+        vector_index=vector_index_runtime_status(),
     )
 
 
@@ -3131,6 +3203,27 @@ def admin_rag_corpus_health(
         if report["status"] != "healthy":
             raise HTTPException(status_code=503, detail="Aktywny korpus RAG jest niekompletny.")
     return report
+
+
+@app.post("/api/admin/tax-research/trace")
+async def admin_tax_research_trace(
+    request: TaxResearchTraceRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> dict[str, object]:
+    """Run one read-only research trace against the isolated interpretation corpus."""
+
+    if not is_admin_user(current_user):
+        raise HTTPException(status_code=403, detail="Tylko admin moze odczytac trace retrievalu.")
+    result = await asyncio.to_thread(
+        search_tax_interpretations_with_trace,
+        request.question,
+        limit=request.limit,
+    )
+    return {
+        "request_id": uuid4().hex,
+        "retrieval_profile": request.retrieval_profile,
+        **result.to_trace(),
+    }
 
 
 @app.get("/api/models", response_model=ModelsResponse)
@@ -3522,8 +3615,8 @@ async def chat(
 
     if request.retrieval_profile == "interpretations_july7":
         try:
-            retrieved_interpretations = await asyncio.to_thread(
-                search_tax_interpretations,
+            interpretation_search = await asyncio.to_thread(
+                search_tax_interpretations_with_trace,
                 effective_user_prompt,
             )
         except Exception as exc:
@@ -3533,7 +3626,7 @@ async def chat(
                 detail="Wyszukiwanie interpretacji podatkowych nie ukończyło się. Spróbuj ponownie.",
             ) from exc
 
-        interpretation_reply = build_july7_interpretations_reply(retrieved_interpretations)
+        interpretation_reply = build_july7_interpretations_reply(interpretation_search)
         persisted_assistant_message = None
         if chat_storage_available:
             persisted_assistant_message = persist_chat_exchange(
@@ -3554,8 +3647,9 @@ async def chat(
                 "snapshot_date": JULY7_RETRIEVAL_DATE,
                 "retrieval_backend": get_july7_interpretation_backend(),
                 "source_type": "interpretation",
-                "result_count": len(retrieved_interpretations),
-                "selected_chunk_ids": [chunk.chunk_id for chunk in retrieved_interpretations],
+                "result_count": len(interpretation_search.documents),
+                "selected_chunk_ids": [item.chunk.chunk_id for item in interpretation_search.documents],
+                "research_trace": interpretation_search.to_trace(),
             },
             chat_id=chat_id if chat_storage_available else None,
             assistant_message_id=(persisted_assistant_message or {}).get("id"),

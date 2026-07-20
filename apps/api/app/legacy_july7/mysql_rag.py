@@ -282,19 +282,34 @@ def index_exists_mysql() -> bool:
 
 
 def local_record_to_mysql_document(record: dict[str, Any]) -> dict[str, Any]:
+    from app.eureka_metadata import enrich_interpretation_metadata
+
     subject = (str(record.get("subject") or "Bez tytułu")).strip() or "Bez tytułu"
     signature = (str(record.get("signature") or "")).strip() or None
     keywords = [str(value).strip() for value in record.get("keywords") or [] if str(value).strip()]
     legal_provisions = [str(value).strip() for value in record.get("legal_provisions") or [] if str(value).strip()]
     issues = [str(value).strip() for value in record.get("issues") or [] if str(value).strip()]
     law_tags = [str(value).strip() for value in record.get("law_tags") or [] if str(value).strip()]
+    source_type = normalize_source_type(record)
+    if source_type == "interpretation" and str(record.get("source") or "eureka").strip().lower() == "eureka":
+        metadata = enrich_interpretation_metadata(
+            tax_domain=str(record.get("tax_domain") or ""),
+            law_tags=law_tags,
+            legal_provisions=legal_provisions,
+            issues=issues,
+            subject=subject,
+            question_text=str(record.get("question_text") or ""),
+            facts_text=str(record.get("facts_text") or record.get("content_text") or ""),
+        )
+        legal_provisions = list(metadata.legal_provisions)
+        record = {**record, "legal_provisions": legal_provisions, "tax_domain": metadata.tax_domain}
     profile = build_structured_profile(record)
     source_pages = [int(page) for page in record.get("source_pages") or [] if str(page).isdigit()]
     return {
         "document_id": str(record.get("document_id") or "").strip(),
         "content_sha256": record.get("content_sha256"),
         "source": (str(record.get("source") or "eureka")).strip() or "eureka",
-        "source_type": normalize_source_type(record),
+        "source_type": source_type,
         "source_subtype": derive_source_subtype(record),
         "authority": str(record.get("authority") or "").strip(),
         "jurisdiction": (str(record.get("jurisdiction") or "PL")).strip() or "PL",
@@ -882,12 +897,12 @@ def fetch_candidate_rows_mysql(
                     WHERE MATCH(c.search_text, c.question_text, c.facts_text, c.tax_domain)
                         AGAINST (%s IN BOOLEAN MODE)
                         {filter_sql}
-                    -- In BOOLEAN MODE MySQL must score and sort every match
-                    -- before applying this ORDER BY.  On the live authority
-                    -- corpus that turns a focused lookup into a 20+ second
-                    -- table-wide sort.  The snapshot's hybrid ranker orders
-                    -- this bounded candidate set below, so keep the database
-                    -- operation index-backed and bounded here.
+                    -- A candidate pool is evidence for later ranking.  Its
+                    -- order must therefore be deterministic: engine-natural
+                    -- Boolean-MATCH iteration can otherwise hide a relevant
+                    -- document before the document-level validator sees it.
+                    ORDER BY lexical_score DESC, d.published_date DESC,
+                             c.chunk_index ASC, c.chunk_id ASC
                     LIMIT %s
                     """,
                     (match_query, match_query, *filter_values, candidate_limit),
@@ -916,6 +931,118 @@ def fetch_candidate_rows_mysql(
             if len(rows) >= candidate_limit:
                 return " || ".join(match_queries), rows
     return " || ".join(match_queries), rows
+
+
+def fetch_subject_candidate_rows_mysql(
+    term_pairs: Iterable[tuple[str, str]],
+    *,
+    source_type: str = "interpretation",
+    limit_per_pair: int = 24,
+) -> list[dict[str, Any]]:
+    """Return a bounded title/keyword candidate channel for safe term pairs.
+
+    The chunk FULLTEXT index is excellent for reasoning passages, but an
+    interpretation's editorial subject and curated keywords are separate
+    metadata.  This channel deliberately requires *two* independently derived
+    safe terms, reads only chunk zero per document, and is merged with FTS
+    before the normal document reranker.  It contains no topic or signature
+    rules.
+    """
+
+    clean_pairs = list(dict.fromkeys(
+        (str(left).strip(), str(right).strip())
+        for left, right in term_pairs
+        if len(str(left).strip()) >= 4 and len(str(right).strip()) >= 4
+    ))
+    if not clean_pairs or not is_mysql_rag_configured():
+        return []
+
+    documents_table, chunks_table = get_mysql_target()
+    rows: list[dict[str, Any]] = []
+    seen_documents: set[str] = set()
+    sql = f"""
+        SELECT
+            c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+            d.subject, d.signature, d.published_date, d.source_url, d.category,
+            d.keywords_json, d.legal_provisions_json, d.issues_json, d.law_tags_json,
+            d.facts_text, d.question_text, d.tax_domain, d.source, d.source_type,
+            d.source_subtype, d.authority, d.publication, d.legal_state_date,
+            d.source_pages_json, 0.0 AS lexical_score
+        FROM `{chunks_table}` c
+        JOIN `{documents_table}` d ON d.document_id = c.document_id
+        WHERE d.source_type = %s
+          AND c.chunk_index = 0
+          AND (d.subject LIKE %s OR d.keywords_json LIKE %s)
+          AND (d.subject LIKE %s OR d.keywords_json LIKE %s)
+        ORDER BY d.published_date DESC, d.subject ASC, c.chunk_id ASC
+        LIMIT %s
+    """
+    with mysql_connection() as connection:
+        with connection.cursor() as cursor:
+            for left, right in clean_pairs:
+                left_like = f"%{left}%"
+                right_like = f"%{right}%"
+                cursor.execute(
+                    sql,
+                    (source_type, left_like, left_like, right_like, right_like, limit_per_pair),
+                )
+                for row in cursor.fetchall():
+                    document_id = str(row["document_id"])
+                    if document_id in seen_documents:
+                        continue
+                    seen_documents.add(document_id)
+                    rows.append(row)
+    return rows
+
+
+def fetch_provision_candidate_rows_mysql(
+    *,
+    tax_domain: str,
+    articles: Iterable[str],
+    source_type: str = "interpretation",
+    limit: int = 120,
+) -> list[dict[str, Any]]:
+    """Read authorities indexed with a detected statutory article.
+
+    This is a recall channel, not an answer shortcut: articles are supplied by
+    the generic question-understanding layer and rows still pass through the
+    same document reranker and mechanism validator as every other candidate.
+    """
+
+    clean_articles = list(dict.fromkeys(
+        str(article).strip().lower()
+        for article in articles
+        if re.fullmatch(r"\d+[a-z]{0,3}", str(article).strip().lower())
+    ))
+    domain = str(tax_domain).strip().upper()
+    if not domain or not clean_articles or not is_mysql_rag_configured():
+        return []
+    documents_table, chunks_table = get_mysql_target()
+    clauses = " OR ".join("d.legal_provisions_json LIKE %s" for _ in clean_articles)
+    sql = f"""
+        SELECT
+            c.chunk_id, c.document_id, c.chunk_index, c.chunk_text,
+            d.subject, d.signature, d.published_date, d.source_url, d.category,
+            d.keywords_json, d.legal_provisions_json, d.issues_json, d.law_tags_json,
+            d.facts_text, d.question_text, d.tax_domain, d.source, d.source_type,
+            d.source_subtype, d.authority, d.publication, d.legal_state_date,
+            d.source_pages_json, 0.0 AS lexical_score
+        FROM `{chunks_table}` c
+        JOIN `{documents_table}` d ON d.document_id = c.document_id
+        WHERE d.source_type = %s
+          AND UPPER(d.tax_domain) = %s
+          AND c.chunk_index = 0
+          AND ({clauses})
+        ORDER BY d.published_date DESC, d.subject ASC, c.chunk_id ASC
+        LIMIT %s
+    """
+    with mysql_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql,
+                (source_type, domain, *(f"%art. {article}%" for article in clean_articles), limit),
+            )
+            return list(cursor.fetchall())
 
 
 def _resolve_axis_scope_mysql(

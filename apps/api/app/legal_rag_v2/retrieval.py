@@ -17,6 +17,11 @@ from .schemas import (
     QueryFamily,
     RerankScore,
 )
+from app.tax_research import (
+    TAX_RESEARCH_MECHANISMS,
+    assess_candidate,
+    research_understanding_from_fields,
+)
 
 
 PRIMARY_SOURCE_TYPES = frozenset({"statute", "regulation", "tax_treaty"})
@@ -217,6 +222,25 @@ class TransparentLegalReranker:
         text = f"{candidate.text} {_metadata_text(candidate.metadata)}".casefold()
         explicit_references = _issue_explicit_references(issue)
         candidate_references = _candidate_references(candidate)
+        assessment = None
+        if issue.legal_mechanism in TAX_RESEARCH_MECHANISMS:
+            research_understanding = research_understanding_from_fields(
+                tax_domain=(issue.tax_domains[0] if issue.tax_domains else ""),
+                legal_mechanism=issue.legal_mechanism,
+                candidate_provisions=issue.possible_provision_concepts,
+                material_concepts=[*issue.transactions, *issue.payments, *issue.positive_fact_constraints],
+                negative_concepts=issue.negative_fact_constraints,
+            )
+            raw_provisions = candidate.metadata.get("legal_provisions") or []
+            if isinstance(raw_provisions, str):
+                raw_provisions = [raw_provisions]
+            assessment = assess_candidate(
+                research_understanding,
+                subject=str(candidate.metadata.get("subject") or ""),
+                text=candidate.text,
+                provisions=[str(value) for value in raw_provisions],
+                tax_domain=(str((candidate.metadata.get("tax_domains") or [""])[0]) if candidate.metadata.get("tax_domains") else ""),
+            )
         components: dict[str, float] = {
             "fusion": max(0.0, candidate.score),
             "source_type": 1.0
@@ -242,6 +266,9 @@ class TransparentLegalReranker:
                 ),
                 default=0.0,
             ),
+            "research_mechanism": (assessment.components["mechanism_match"] / 25.0) if assessment else 0.0,
+            "research_transaction": (assessment.components["expense_or_transaction_match"] / 18.0) if assessment else 0.0,
+            "research_wrong_neighbor": -1.0 if assessment and assessment.reject else 0.0,
         }
         negative_hits = [
             value for value in issue.negative_fact_constraints if _phrase_present(value, text)
@@ -261,6 +288,9 @@ class TransparentLegalReranker:
             "temporal": 1.2,
             "explicit_provision": 8.0,
             "negative_constraint_penalty": 1.4,
+            "research_mechanism": 3.4,
+            "research_transaction": 2.4,
+            "research_wrong_neighbor": 8.0,
         }
         final_score = sum(components[name] * weights[name] for name in components)
         positive = [
@@ -272,6 +302,10 @@ class TransparentLegalReranker:
         if components["temporal"] == 0.0:
             negative.append("outside_target_legal_period")
         negative.extend(f"negative_constraint:{value}" for value in negative_hits)
+        if assessment and assessment.reject:
+            negative.append(f"wrong_legal_mechanism:{assessment.document_mechanism}")
+        if assessment and assessment.relation in {"direct", "strong_analogy"}:
+            positive.append(f"research_relation:{assessment.relation}")
         return RerankScore(
             final_score=final_score,
             component_scores=components,
@@ -685,6 +719,8 @@ class _BaseLane:
                     # Curated official guidance commonly uses abstract rather
                     # than case-fact wording and already forms a narrow pool.
                     return True
+                if candidate.component_scores.get("research_wrong_neighbor", 0.0) < 0:
+                    return False
                 fact_match = (
                     candidate.component_scores.get("transaction", 0.0) >= 0.15
                     or candidate.component_scores.get("payment", 0.0) >= 0.15

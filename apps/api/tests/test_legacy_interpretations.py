@@ -37,8 +37,9 @@ def test_july7_interpretation_search_forces_snapshot_sqlite_without_tax_domain(m
 
     result = legacy_interpretations.search_tax_interpretations("implanty zębowe", limit=3)
 
-    assert result == [interpretation]
-    assert calls == [{"query": "implanty zębowe", "limit": 18}]
+    assert [item.document_id for item in result] == [interpretation.document_id]
+    assert 0 <= result[0].score <= 100
+    assert calls == [{"query": "implanty zębowe", "limit": 120}]
 
 
 def test_july7_interpretation_search_uses_vendored_mysql_without_tax_domain(monkeypatch) -> None:
@@ -56,10 +57,11 @@ def test_july7_interpretation_search_uses_vendored_mysql_without_tax_domain(monk
     monkeypatch.setattr(legacy_interpretations, "_search_historical_mysql", fake_mysql_search)
     monkeypatch.setattr(legacy_interpretations, "hydrate_tax_interpretation_documents", lambda chunks: chunks)
 
-    assert legacy_interpretations.search_tax_interpretations("implanty zębowe", limit=3) == [interpretation]
+    result = legacy_interpretations.search_tax_interpretations("implanty zębowe", limit=3)
+    assert [item.document_id for item in result] == [interpretation.document_id]
     assert calls == [{
         "query": "implanty zębowe",
-        "limit": 18,
+        "limit": 120,
     }]
 
 
@@ -157,10 +159,7 @@ def test_generic_query_planner_keeps_listed_object_with_the_leading_action() -> 
 
     assert ("zakup", "psa") in pairs
     assert ("lecze", "psa") in pairs
-    assert any(
-        candidate.startswith("+zakup* +(") and "psa*" in candidate
-        for candidate in queries
-    )
+    assert "+zakup* +psa*" in queries
 
 
 def test_metadata_boost_rewards_matching_keywords_and_explicit_provision() -> None:
@@ -213,7 +212,7 @@ def test_subject_cooccurrence_outweighs_unrelated_full_text_overlap() -> None:
         limit=6,
     )
 
-    assert ranked == [exact_subject, broad_full_text]
+    assert [item.document_id for item in ranked] == ["exact-subject"]
 
 
 def test_search_filters_against_full_document_not_the_winning_chunk(monkeypatch) -> None:
@@ -234,7 +233,8 @@ def test_search_filters_against_full_document_not_the_winning_chunk(monkeypatch)
         limit=5,
     )
 
-    assert result == [hydrated]
+    assert [item.document_id for item in result] == [hydrated.document_id]
+    assert result[0].score > 0
 
 
 def test_coverage_ranking_prefers_document_covering_more_query_concepts() -> None:
@@ -258,7 +258,7 @@ def test_coverage_ranking_prefers_document_covering_more_query_concepts() -> Non
         limit=6,
     )
 
-    assert ranked == [ksef_invoice, generic_invoice]
+    assert [item.document_id for item in ranked] == ["ksef"]
 
 
 def test_final_document_order_keeps_stronger_candidate_rank_after_hydration() -> None:
@@ -282,4 +282,4 @@ def test_final_document_order_keeps_stronger_candidate_rank_after_hydration() ->
         limit=6,
     )
 
-    assert ranked == [strong_candidate, broad_neighbour]
+    assert [item.document_id for item in ranked] == ["strong"]

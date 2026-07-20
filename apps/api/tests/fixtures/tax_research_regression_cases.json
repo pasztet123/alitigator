@@ -1,0 +1,50 @@
+[
+  {
+    "id": "implants",
+    "question": "Czy implanty zębowe mogą być kosztem uzyskania przychodu?",
+    "targets": ["0112-KDIL2-2.4011.8.2026.3.MM"],
+    "forbidden": [],
+    "max_target_rank": 3,
+    "minimum_relevant_top_5": 1
+  },
+  {
+    "id": "business_accommodation",
+    "question": "Czy przedsiębiorca może zaliczyć do kosztów uzyskania przychodu wydatki na wynajem mieszkania w innym mieście, jeżeli przebywa tam wyłącznie w związku z realizacją kontraktu dla klienta?",
+    "targets": ["0112-KDIL2-2.4011.109.2026.1.MG"],
+    "forbidden": ["0115-KDIT2.4011.151.2026.3.ENB"],
+    "max_target_rank": 5,
+    "minimum_relevant_top_5": 1
+  },
+  {
+    "id": "language_course",
+    "question": "Czy kurs języka angielskiego wykorzystywany do obsługi zagranicznych klientów może być kosztem działalności?",
+    "targets": ["0112-KDIL2-2.4011.943.2024.1.MM"],
+    "forbidden": [],
+    "max_target_rank": 10,
+    "minimum_relevant_top_5": 1
+  },
+  {
+    "id": "cash_payment",
+    "question": "Czy podzielenie zapłaty gotówką za jedną transakcję 18 000 zł na dwie raty po 9 000 zł pozwala zachować koszt podatkowy?",
+    "targets": ["0112-KDIL2-2.4011.345.2025.1.MC"],
+    "forbidden": [],
+    "max_target_rank": 20,
+    "minimum_relevant_top_5": 1
+  },
+  {
+    "id": "mixed_vehicle_vat",
+    "question": "Czy można odliczyć 50% VAT od paliwa do prywatnego samochodu używanego również w działalności, bez VAT-26 i ewidencji przebiegu?",
+    "targets": ["0111-KDIB3-1.4012.650.2025.5.ICZ"],
+    "forbidden": [],
+    "max_target_rank": 20,
+    "minimum_relevant_top_5": 1
+  },
+  {
+    "id": "postgraduate_studies",
+    "question": "Czy studia podyplomowe związane z działalnością mogą być kosztem uzyskania przychodu?",
+    "targets": [],
+    "forbidden": [],
+    "max_target_rank": null,
+    "minimum_relevant_top_5": 4
+  }
+]

@@ -3785,6 +3785,25 @@ def build_small_taxpayer_foreign_vat_match_score(row: sqlite3.Row, *, query: str
 
 
 def derive_tax_domain(record: dict[str, Any]) -> str:
+    explicit_domain = str(record.get("tax_domain") or "").strip().upper()
+    if explicit_domain:
+        return explicit_domain
+    # Keep the historical snapshot's storage format, but use the same
+    # source-owned Eureka tag mapping as newly ingested records.  In
+    # particular, [ZPDOF] is PIT and [PSD] is the inheritance-and-donations
+    # tax domain; previously both were needlessly left blank.
+    from app.eureka_metadata import derive_tax_domain as derive_eureka_tax_domain
+
+    derived = derive_eureka_tax_domain(
+        law_tags=record.get("law_tags") or [],
+        legal_provisions=record.get("legal_provisions") or [],
+        issues=record.get("issues") or [],
+        subject=str(record.get("subject") or ""),
+        question_text=str(record.get("question_text") or ""),
+        facts_text=str(record.get("facts_text") or record.get("content_text") or ""),
+    )
+    if derived:
+        return derived
     haystack = " ".join(
         [*map(str, record.get("law_tags") or []), *map(str, record.get("issues") or []), *map(str, record.get("legal_provisions") or [])]
     ).lower()
@@ -4298,8 +4317,22 @@ def index_record(connection: sqlite3.Connection, record: dict[str, Any], config:
     ]
     issues = [str(value).strip() for value in record.get("issues") or [] if str(value).strip()]
     law_tags = [str(value).strip() for value in record.get("law_tags") or [] if str(value).strip()]
-    profile = build_structured_profile(record)
     source_type = normalize_source_type(record)
+    if source_type == "interpretation" and str(record.get("source") or "eureka").strip().lower() == "eureka":
+        from app.eureka_metadata import enrich_interpretation_metadata
+
+        metadata = enrich_interpretation_metadata(
+            tax_domain=str(record.get("tax_domain") or ""),
+            law_tags=law_tags,
+            legal_provisions=legal_provisions,
+            issues=issues,
+            subject=subject,
+            question_text=str(record.get("question_text") or ""),
+            facts_text=str(record.get("facts_text") or record.get("content_text") or ""),
+        )
+        legal_provisions = list(metadata.legal_provisions)
+        record = {**record, "legal_provisions": legal_provisions, "tax_domain": metadata.tax_domain}
+    profile = build_structured_profile(record)
     source_subtype = derive_source_subtype(record)
     source_pages = [int(page) for page in record.get("source_pages") or [] if str(page).isdigit()]
 

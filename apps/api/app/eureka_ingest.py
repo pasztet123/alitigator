@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from app.eureka_metadata import enrich_interpretation_metadata
 from app.supabase_rag import is_supabase_sync_enabled, sync_records_to_supabase
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -127,6 +128,7 @@ class FetchConfig:
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT
     pause_seconds: float = 0.0
     category: str | None = "Interpretacja indywidualna"
+    category_ids: list[int] | None = None
     law_tags: list[str] | None = None
     published_dates: list[str] | None = None
     sort: str = DEFAULT_SORT
@@ -267,6 +269,18 @@ def build_processed_row(summary: dict[str, Any], detail: dict[str, Any], *, quer
     content_html = find_content_html(field_map)
     content_text = html_to_text(content_html)
     document_id = str(summary.get("ID_INFORMACJI") or field_map.get("ID_INFORMACJI") or detail.get("id"))
+    subject = summary.get("TEZA") or field_map.get("TEZA") or detail.get("nazwa")
+    source_keywords = [str(value) for value in as_list(summary.get("SLOWA_KLUCZOWE")) if str(value).strip()]
+    source_provisions = [str(value) for value in as_list(summary.get("PRZEPISY")) if str(value).strip()]
+    source_issues = [str(value) for value in as_list(summary.get("ZAGADNIENIA")) if str(value).strip()]
+    source_law_tags = derive_law_tags(summary)
+    metadata = enrich_interpretation_metadata(
+        law_tags=source_law_tags,
+        legal_provisions=source_provisions,
+        issues=source_issues,
+        subject=str(subject or ""),
+        facts_text=content_text,
+    )
 
     attachments = ((detail.get("dokument") or {}).get("zalacznikiContent") or [])
 
@@ -281,15 +295,16 @@ def build_processed_row(summary: dict[str, Any], detail: dict[str, Any], *, quer
         "template_version_id": detail.get("wersjaSzablonuId"),
         "category": first_string(summary.get("KATEGORIA_INFORMACJI")) or detail.get("nazwa"),
         "status": first_string(summary.get("STATUS_INFORMACJI")) or first_string(field_map.get("STATUS_INFORMACJI")),
-        "subject": summary.get("TEZA") or field_map.get("TEZA") or detail.get("nazwa"),
+        "subject": subject,
         "signature": summary.get("SYG") or field_map.get("SYG"),
         "author": first_string(summary.get("AUTOR")) or first_string(field_map.get("AUTOR")),
         "published_date": field_map.get("DT_WYD") or summary.get("DT_WYD"),
         "published_at": field_map.get("DATA_PUBLIKACJI") or summary.get("DATA_REJESTRACJI"),
-        "keywords": [str(value) for value in as_list(summary.get("SLOWA_KLUCZOWE")) if str(value).strip()],
-        "legal_provisions": [str(value) for value in as_list(summary.get("PRZEPISY")) if str(value).strip()],
-        "issues": [str(value) for value in as_list(summary.get("ZAGADNIENIA")) if str(value).strip()],
-        "law_tags": derive_law_tags(summary),
+        "keywords": source_keywords,
+        "legal_provisions": list(metadata.legal_provisions),
+        "issues": source_issues,
+        "law_tags": source_law_tags,
+        "tax_domain": metadata.tax_domain,
         "query": query,
         "source_url": PUBLIC_DETAIL_URL.format(document_id=document_id),
         "content_html": content_html,
@@ -353,6 +368,8 @@ async def search_page(client: httpx.AsyncClient, *, page_number: int, options: F
     filters: dict[str, Any] = {}
     if options.published_dates:
         filters["DT_WYD"] = options.published_dates
+    if options.category_ids:
+        filters["KATEGORIA_INFORMACJI"] = options.category_ids
 
     payload = {
         "filter": filters,
@@ -423,6 +440,8 @@ async def fetch_latest_interpretations(config: FetchConfig, *, progress_callback
     total_written = 0
     total_seen = len(seen_ids)
     total_hits: int | None = None
+    total_search_results = 0
+    reached_empty_page = False
     failed_ids: list[str] = []
     last_document_id: str | None = None
 
@@ -444,8 +463,10 @@ async def fetch_latest_interpretations(config: FetchConfig, *, progress_callback
                 results = response.get("results") or []
                 if total_hits is None:
                     total_hits = int(response.get("totalHits") or 0)
+                total_search_results += len(results)
 
                 if not results:
+                    reached_empty_page = True
                     break
 
                 filtered_summaries: list[dict[str, Any]] = []
@@ -534,6 +555,8 @@ async def fetch_latest_interpretations(config: FetchConfig, *, progress_callback
         "last_document_id": last_document_id,
         "failed_ids": failed_ids,
         "total_unique_ids": total_seen,
+        "total_search_results": total_search_results,
+        "reached_empty_page": reached_empty_page,
     }
 
 
@@ -559,6 +582,7 @@ def parse_args() -> FetchConfig:
     parser.add_argument("--request-timeout", type=float, default=DEFAULT_REQUEST_TIMEOUT)
     parser.add_argument("--pause-seconds", type=float, default=0.0)
     parser.add_argument("--category", default="Interpretacja indywidualna")
+    parser.add_argument("--category-id", action="append", dest="category_ids", type=int, default=[])
     parser.add_argument("--law-tag", action="append", dest="law_tags", default=[])
     parser.add_argument("--published-date", action="append", dest="published_dates", default=[])
     parser.add_argument("--sort", default=DEFAULT_SORT)
@@ -580,6 +604,7 @@ def parse_args() -> FetchConfig:
         request_timeout=max(1.0, args.request_timeout),
         pause_seconds=max(0.0, args.pause_seconds),
         category=category,
+        category_ids=args.category_ids or None,
         law_tags=[tag for tag in args.law_tags if tag],
         published_dates=[date for date in args.published_dates if date],
         sort=args.sort,

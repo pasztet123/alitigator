@@ -9,10 +9,20 @@ import sqlite3
 import time
 import unicodedata
 from contextvars import ContextVar
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from typing import Any, Mapping
 
 from app.legacy_july7 import rag as july7_rag
 from app.legacy_july7 import mysql_rag as july7_mysql_rag
+from app.tax_research import (
+    AnchorSet,
+    CandidateAssessment,
+    ResearchUnderstanding,
+    assess_candidate,
+    build_anchors as _build_research_anchors,
+    candidate_boolean_queries,
+    understand_tax_research_question,
+)
 
 
 JULY7_RETRIEVAL_COMMIT = "6a23c08"
@@ -134,6 +144,66 @@ july7_rag.get_rag_config = _get_bounded_july7_rag_config
 july7_mysql_rag.get_rag_config = _get_bounded_july7_rag_config
 
 _active_user_query: ContextVar[str | None] = ContextVar("active_july7_user_query", default=None)
+_candidate_diagnostics: ContextVar[dict[str, int]] = ContextVar(
+    "july7_candidate_diagnostics",
+    default={},
+)
+
+
+@dataclass(frozen=True)
+class TaxResearchDocument:
+    chunk: july7_rag.RagChunk
+    assessment: CandidateAssessment
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "document_id": self.chunk.document_id,
+            "signature": self.chunk.signature or "",
+            "subject": self.chunk.subject,
+            "published_date": self.chunk.published_date,
+            "source_url": self.chunk.source_url,
+            **self.assessment.to_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class TaxResearchSearchResult:
+    question: str
+    understanding: ResearchUnderstanding
+    database_queries: tuple[str, ...]
+    candidate_counts: Mapping[str, int]
+    candidates_before_rerank: tuple[dict[str, object], ...]
+    candidate_document_ids: tuple[str, ...]
+    reranker_scores: tuple[dict[str, object], ...]
+    validation_results: tuple[dict[str, object], ...]
+    documents: tuple[TaxResearchDocument, ...]
+
+    @property
+    def chunks(self) -> list[july7_rag.RagChunk]:
+        return [item.chunk for item in self.documents]
+
+    def to_trace(self) -> dict[str, object]:
+        return {
+            "pipeline": "interpretations_july7",
+            "original_question": self.question,
+            "planner_output": self.understanding.to_dict(),
+            "anchors": self.understanding.anchors.to_dict(),
+            "database_queries": list(self.database_queries),
+            "candidate_counts": dict(self.candidate_counts),
+            "candidates_before_rerank": list(self.candidates_before_rerank),
+            "candidate_document_ids": list(self.candidate_document_ids),
+            "reranker_scores": list(self.reranker_scores),
+            "validation_results": list(self.validation_results),
+            "candidates_after_rerank": [item.to_dict() for item in self.documents],
+            "final_results": [item.to_dict() for item in self.documents],
+            "vector_index_available": False,
+        }
+
+
+def build_anchors(query: str) -> AnchorSet:
+    """Public, testable safe-anchor classifier for interpretation search."""
+
+    return _build_research_anchors(query)
 
 
 def _normalize_for_match(value: str) -> str:
@@ -353,24 +423,15 @@ july7_rag.build_candidate_match_queries = _build_bounded_historical_match_querie
 
 
 def _build_bounded_historical_mysql_queries(query: str) -> list[str]:
-    """Build generic Boolean probes that retain lexical co-occurrence.
+    """Build selective probes from safe concepts and statutory hypotheses.
 
-    In MySQL Boolean mode whitespace means OR.  A single long query therefore
-    recalled any chunk containing ``miejsce`` for a question mentioning
-    ``mieście`` and hit the database limit before relevant documents were even
-    candidates.  Pair probes are derived solely from neighbouring and bridge
-    words present in the user's question; they are not a taxonomy or a set of
-    hard-coded legal cases.
+    Unlike the previous prefix grouping, an ambiguous grammatical stem cannot
+    become the sole required term.  The legal hypothesis is generated from the
+    question, never from a target document or a signature.
     """
-    grouped_queries = [
-        f"+{primary}* +({' '.join(f'{anchor}*' for anchor in alternatives)})"
-        for primary, alternatives in _build_historical_cooccurrence_groups(query)
-    ]
-    # Two selective groups are enough to keep both the leading fact and a
-    # short precise object in recall.  A broad OR fallback admitted arbitrary
-    # one-word neighbours before the ranker could compare the actual facts.
-    queries = grouped_queries
-    return list(dict.fromkeys(candidate for candidate in queries if candidate)) or july7_mysql_rag._build_mysql_candidate_queries(query)
+    understanding = understand_tax_research_question(_active_user_query.get() or query)
+    queries = candidate_boolean_queries(understanding)
+    return queries or july7_mysql_rag._build_mysql_candidate_queries(query)
 
 
 def _build_bounded_historical_sqlite_queries(query: str, *, config=None) -> list[str]:
@@ -530,30 +591,30 @@ def _dedupe_and_filter_relevant_chunks(
             continue
         seen_documents.add(chunk.document_id)
         selected.append(chunk)
-    # Hydration is a presentation step, not another retrieval pass.  A full
-    # interpretation contains statutory boilerplate that can mention many
-    # unrelated words and otherwise push a strong candidate below a loose
-    # neighbour.  Preserve the candidate rank (which used the matching chunk,
-    # subject, keywords and explicit provisions), while keeping the full-text
-    # overlap only as a late tie-breaker.  We deliberately retain up to six
-    # candidates whenever the corpus supplied them.
-    return sorted(
-        selected,
-        key=lambda chunk: (
-            _query_precision_anchor_matches(chunk, query, subject_only=True),
-            _query_subject_pair_matches(chunk, query),
-            _query_precision_anchor_matches(chunk, query, subject_only=False),
-            chunk.score,
-            _query_pair_matches(chunk, query),
-            _query_coverage(chunk, query)[1],
-            _query_coverage(chunk, query)[0],
-            _query_coverage(chunk, query)[3],
-            _query_coverage(chunk, query)[2],
-            _query_coverage(chunk, query)[4],
-            _query_coverage(chunk, query)[5],
-        ),
-        reverse=True,
-    )[:limit]
+    understanding = understand_tax_research_question(query)
+    classified = [
+        (
+            chunk,
+            assess_candidate(
+                understanding,
+                subject=chunk.subject,
+                text=chunk.chunk_text,
+                provisions=chunk.legal_provisions,
+            ),
+        )
+        for chunk in selected
+    ]
+    # The compatibility API only returns useful main-lane results.  It never
+    # pads the list with an orthogonal tax mechanism merely to reach ``limit``.
+    usable = [item for item in classified if not item[1].reject and item[1].relation != "context_only"]
+    return [
+        replace(chunk, score=assessment.score)
+        for chunk, assessment in sorted(
+            usable,
+            key=lambda item: (item[1].score, item[0].score, item[0].document_id),
+            reverse=True,
+        )[:limit]
+    ]
 
 
 def _select_interpretation_documents(
@@ -702,6 +763,24 @@ def _fetch_historical_sqlite_candidate_rows(
     return rows
 
 
+def score_candidate_row(
+    row: object,
+    *,
+    question: str,
+    understanding: ResearchUnderstanding | None = None,
+) -> CandidateAssessment:
+    """Score one chunk with bounded, named, legal-research components."""
+
+    chunk = july7_rag.row_to_rag_chunk(row, score=0.0)
+    return assess_candidate(
+        understanding or understand_tax_research_question(question),
+        subject=chunk.subject,
+        text=chunk.chunk_text,
+        provisions=_row_json_strings(row, "legal_provisions_json"),
+        tax_domain=str(_row_value(row, "tax_domain") or ""),
+    )
+
+
 def _generic_candidate_score(
     chunk: july7_rag.RagChunk,
     *,
@@ -745,44 +824,24 @@ def _rank_historical_candidates(
     query: str,
     limit: int,
 ) -> list[july7_rag.RagChunk]:
-    """Rank the July 7 candidate pool without topic or source-specific boosts."""
+    """Rank a document-diverse candidate pool on a bounded 0--100 scale."""
     if not rows:
         return []
-    ranked: list[tuple[tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int], july7_rag.RagChunk]] = []
+    understanding = understand_tax_research_question(query)
+    ranked: list[tuple[tuple[float, int, int], july7_rag.RagChunk]] = []
     for source_rank, row in enumerate(rows, start=1):
         chunk = july7_rag.row_to_rag_chunk(row, score=0.0)
         if chunk.source_type != "interpretation":
             continue
-        generic_score = _generic_candidate_score(
-            chunk,
-            query=query,
-            source_rank=source_rank,
+        assessment = score_candidate_row(row, question=query, understanding=understanding)
+        # Database rank only breaks ties.  A title prefix never receives a
+        # separate, unbounded privilege over the legal/factual match.
+        ranked.append(
+            (
+                (assessment.score, -int(assessment.reject), -source_rank),
+                replace(chunk, score=assessment.score),
+            )
         )
-        keyword_pairs, keyword_coverage, provision_matches = _metadata_match_score(row, query=query)
-        # Metadata only breaks ties between lexical neighbours: a document
-        # must still have reached this pool through text search, and the score
-        # below continues to include all body/subject overlap signals.
-        score = (
-            generic_score[0],
-            generic_score[1],
-            generic_score[2],
-            provision_matches,
-            keyword_pairs,
-            keyword_coverage,
-            *generic_score[3:],
-        )
-        numeric_score = (
-            generic_score[0] * 1_000_000
-            + generic_score[1] * 100_000
-            + generic_score[2] * 10_000
-            + generic_score[3] * 1_000
-            + provision_matches * 100
-            + keyword_pairs * 10
-            + keyword_coverage
-            + generic_score[4] * 0.1
-            + generic_score[5] * 0.01
-        )
-        ranked.append((score, replace(chunk, score=numeric_score)))
 
     ranked.sort(key=lambda item: item[0], reverse=True)
     selected: list[july7_rag.RagChunk] = []
@@ -797,10 +856,32 @@ def _rank_historical_candidates(
     return selected
 
 
+def _metadata_candidate_pairs(understanding: ResearchUnderstanding) -> list[tuple[str, str]]:
+    """Reuse the bounded Boolean probes for the document-title channel."""
+
+    return [
+        match.groups()
+        for probe in candidate_boolean_queries(understanding, max_queries=6)
+        for match in re.finditer(r"\+([a-z0-9]+)\*\s+\+([a-z0-9]+)\*", probe)
+    ]
+
+
+def _candidate_provision_articles(understanding: ResearchUnderstanding) -> list[str]:
+    """Extract article identifiers from the generic planner output."""
+
+    return list(dict.fromkeys(
+        match.group(1).lower()
+        for provision in understanding.candidate_provisions
+        for match in re.finditer(r"\bart\.?\s*(\d+[a-z]{0,3})\b", provision, re.IGNORECASE)
+    ))
+
+
 def _search_historical_sqlite(query: str, *, limit: int) -> list[july7_rag.RagChunk]:
     """Run generic candidate retrieval and ranking against the SQLite snapshot."""
+    rows = _fetch_historical_sqlite_candidate_rows(query, limit=limit)
+    _candidate_diagnostics.set({"raw": len(rows), "deduplicated": len({str(row["document_id"]) for row in rows})})
     return _rank_historical_candidates(
-        _fetch_historical_sqlite_candidate_rows(query, limit=limit),
+        rows,
         query=query,
         limit=limit,
     )
@@ -810,13 +891,46 @@ def _search_historical_mysql(query: str, *, limit: int) -> list[july7_rag.RagChu
     """Run generic candidate retrieval and ranking against the MariaDB corpus."""
     _, rows = july7_mysql_rag.fetch_candidate_rows_mysql(
         query,
-        effective_limit=limit,
+        # The MySQL adapter itself retains a bounded 120-row recall window.
+        # Keep its fetch limit independent of the requested final top-k so
+        # candidate generation can always provide a 100-document pool.
+        effective_limit=min(limit, 6),
         source_types={"interpretation"},
         enforce_query_domain=False,
         tax_domains=None,
         detection_query=query,
     )
-    return _rank_historical_candidates(rows, query=query, limit=limit)
+    understanding = understand_tax_research_question(query)
+    # Metadata is a distinct candidate-generation channel, not a score
+    # override.  It makes concise editorial subjects and curated keywords
+    # available to the same generic reranker as the FTS snippets.
+    metadata_pairs = _metadata_candidate_pairs(understanding)
+    title_rows = july7_mysql_rag.fetch_subject_candidate_rows_mysql(
+        metadata_pairs,
+        source_type="interpretation",
+        limit_per_pair=80,
+    )
+    provision_rows = july7_mysql_rag.fetch_provision_candidate_rows_mysql(
+        tax_domain=understanding.tax_domain,
+        articles=_candidate_provision_articles(understanding),
+        source_type="interpretation",
+    )
+    seen_chunks: set[str] = set()
+    merged_rows: list[object] = []
+    for row in [*rows, *title_rows, *provision_rows]:
+        chunk_id = str(_row_value(row, "chunk_id") or "")
+        if not chunk_id or chunk_id in seen_chunks:
+            continue
+        seen_chunks.add(chunk_id)
+        merged_rows.append(row)
+    _candidate_diagnostics.set({
+        "raw": len(rows) + len(title_rows) + len(provision_rows),
+        "deduplicated": len({str(_row_value(row, "document_id") or "") for row in merged_rows}),
+        "fts": len(rows),
+        "title_metadata": len(title_rows),
+        "provision_metadata": len(provision_rows),
+    })
+    return _rank_historical_candidates(merged_rows, query=query, limit=limit)
 
 
 def search_tax_interpretations(query: str, *, limit: int | None = None) -> list[july7_rag.RagChunk]:
@@ -830,18 +944,22 @@ def search_tax_interpretations(query: str, *, limit: int | None = None) -> list[
     a winning chunk can be the legal reasoning section, while the matching
     dental facts and the question appear elsewhere in the same interpretation.
     """
+    return search_tax_interpretations_with_trace(query, limit=limit).chunks
+
+
+def search_tax_interpretations_with_trace(
+    query: str,
+    *,
+    limit: int | None = None,
+) -> TaxResearchSearchResult:
+    """Retrieve and classify interpretations with an auditable document trace."""
+
     configured_limit = int(os.getenv("JULY7_INTERPRETATIONS_RETRIEVAL_LIMIT", "6"))
     effective_limit = max(1, min(limit or configured_limit, 20))
-    # The ranker sees a broader generic lexical pool; only the final output is
-    # constrained to six documents.  This prevents one broad tax phrase from
-    # deciding the whole result set before the full-document overlap check.
-    # Select a materially wider document window than the six displayed
-    # results.  A candidate is only a matching chunk; several documents can
-    # share the same broad tax wording, while the decisive factual phrase may
-    # live elsewhere in their full text and become visible only after
-    # hydration.  This remains bounded to keep the retrieval-only request
-    # predictable.
-    candidate_limit = min(30, max(effective_limit * 3, 18))
+    candidate_limit = max(100, int(os.getenv("TAX_RESEARCH_CANDIDATE_POOL_LIMIT", "120")))
+    candidate_limit = min(candidate_limit, 160)
+    understanding = understand_tax_research_question(query)
+    diagnostics_token = _candidate_diagnostics.set({})
     active_query_token = _active_user_query.set(query)
     try:
         if july7_mysql_rag.is_mysql_rag_configured():
@@ -850,13 +968,77 @@ def search_tax_interpretations(query: str, *, limit: int | None = None) -> list[
             chunks = _search_historical_sqlite(query, limit=candidate_limit)
     finally:
         _active_user_query.reset(active_query_token)
-    document_candidates = _select_interpretation_documents(
-        chunks,
-        limit=candidate_limit,
+    candidate_diagnostics = _candidate_diagnostics.get()
+    _candidate_diagnostics.reset(diagnostics_token)
+    document_candidates = _select_interpretation_documents(chunks, limit=candidate_limit)
+    # The expensive full-document validator sees the top 50 unique documents:
+    # this is the audit-sized window required for legal-mechanism validation,
+    # while the preceding candidate pool still holds at least 100 documents.
+    validation_candidates = document_candidates[:50]
+    hydrated_documents = hydrate_tax_interpretation_documents(validation_candidates)
+    classified: list[TaxResearchDocument] = []
+    for chunk in hydrated_documents:
+        assessment = assess_candidate(
+            understanding,
+            subject=chunk.subject,
+            text=chunk.chunk_text,
+            provisions=chunk.legal_provisions,
+        )
+        classified.append(TaxResearchDocument(replace(chunk, score=assessment.score), assessment))
+    classified.sort(key=lambda item: (item.assessment.score, item.chunk.document_id), reverse=True)
+    main = [item for item in classified if not item.assessment.reject and item.assessment.relation in {"direct", "strong_analogy"}]
+    context = [item for item in classified if not item.assessment.reject and item.assessment.relation == "context_only"]
+    secondary = [item for item in classified if item.assessment.relation == "different_mechanism"]
+    documents = tuple([*main[:effective_limit], *context[: max(0, effective_limit - len(main))], *secondary[: max(0, effective_limit - len(main) - len(context))]])
+    return TaxResearchSearchResult(
+        question=query,
+        understanding=understanding,
+        database_queries=tuple([
+            *_build_bounded_historical_mysql_queries(query),
+            *(f"title_metadata:{left}+{right}" for left, right in _metadata_candidate_pairs(understanding)),
+            *(f"provision_metadata:{understanding.tax_domain}:art.{article}" for article in _candidate_provision_articles(understanding)),
+        ]),
+        candidate_counts={
+            "raw": int(candidate_diagnostics.get("raw", len(chunks))),
+            "deduplicated": int(candidate_diagnostics.get("deduplicated", len(document_candidates))),
+            "fts": int(candidate_diagnostics.get("fts", 0)),
+            "title_metadata": int(candidate_diagnostics.get("title_metadata", 0)),
+            "provision_metadata": int(candidate_diagnostics.get("provision_metadata", 0)),
+            "validated": len(hydrated_documents),
+            "after_rerank": len(classified),
+        },
+        candidates_before_rerank=tuple(
+            {
+                "document_id": chunk.document_id,
+                "signature": chunk.signature or "",
+                "subject": chunk.subject,
+                "score": chunk.score,
+            }
+            for chunk in document_candidates[:30]
+        ),
+        candidate_document_ids=tuple(chunk.signature or chunk.document_id for chunk in document_candidates),
+        reranker_scores=tuple(
+            {
+                "document_id": item.chunk.document_id,
+                "signature": item.chunk.signature or "",
+                "score": item.assessment.score,
+                "components": dict(item.assessment.components),
+            }
+            for item in classified[:50]
+        ),
+        validation_results=tuple(item.to_dict() for item in classified[:50]),
+        documents=documents,
     )
-    hydrated_documents = hydrate_tax_interpretation_documents(document_candidates)
-    return _dedupe_and_filter_relevant_chunks(
-        hydrated_documents,
-        query=query,
-        limit=effective_limit,
-    )
+
+
+def get_research_relation(chunk: july7_rag.RagChunk, query: str = "") -> str:
+    """Compatibility helper for diagnostics; detailed search keeps full data."""
+
+    if not query:
+        return "unclassified"
+    return assess_candidate(
+        understand_tax_research_question(query),
+        subject=chunk.subject,
+        text=chunk.chunk_text,
+        provisions=chunk.legal_provisions,
+    ).relation

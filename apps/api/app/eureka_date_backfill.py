@@ -265,7 +265,7 @@ async def run_backfill(args: argparse.Namespace) -> dict[str, Any]:
                     "last_batch": last_result,
                 }
 
-            if added == 0 and args.stop_on_empty_page:
+            if args.stop_on_empty_page and result.get("reached_empty_page"):
                 break
 
             page_start = batch_end

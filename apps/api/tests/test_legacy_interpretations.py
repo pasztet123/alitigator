@@ -1,18 +1,30 @@
-from types import SimpleNamespace
-
 from app import legacy_interpretations
 from app.legacy_july7.rag import RagChunk
 
 
+def make_chunk(*, document_id: str = "interpretation-1", score: float = 99.0, subject: str, text: str) -> RagChunk:
+    return RagChunk(
+        chunk_id=f"{document_id}:0",
+        document_id=document_id,
+        chunk_index=0,
+        score=score,
+        chunk_text=text,
+        subject=subject,
+        signature=document_id,
+        published_date=None,
+        source_url=None,
+        category="Interpretacja indywidualna",
+    )
+
+
 def test_july7_interpretation_search_forces_snapshot_sqlite_without_tax_domain(monkeypatch) -> None:
     calls: list[dict] = []
-    interpretation = SimpleNamespace(
-        source_type="interpretation",
-        document_id="interpretation-1",
+    interpretation = make_chunk(
         subject="Implanty zębowe",
-        chunk_text="Wydatek na implanty zębowe może być kosztem uzyskania przychodów.",
+        text="Wydatek na implanty zębowe może być kosztem uzyskania przychodów.",
     )
-    other_source = SimpleNamespace(source_type="judgment")
+    other_source = make_chunk(document_id="judgment-1", subject="Wyrok", text="Nie dotyczy.")
+    other_source = RagChunk(**{**other_source.__dict__, "source_type": "judgment"})
 
     monkeypatch.setattr(legacy_interpretations.july7_mysql_rag, "is_mysql_rag_configured", lambda: False)
 
@@ -26,40 +38,14 @@ def test_july7_interpretation_search_forces_snapshot_sqlite_without_tax_domain(m
     result = legacy_interpretations.search_tax_interpretations("implanty zębowe", limit=3)
 
     assert result == [interpretation]
-    assert calls == [{"query": "implanty zębowe", "limit": 20}]
-
-
-def test_relevance_gate_rejects_topic_only_result_without_tax_cost() -> None:
-    chunk = SimpleNamespace(
-        subject="Usługi dentystyczne",
-        chunk_text="Implanty są usługą medyczną objętą zwolnieniem z VAT.",
-    )
-
-    assert not legacy_interpretations._chunk_matches_query_facts(
-        chunk,
-        "Czy implanty zębowe mogą być kosztem uzyskania przychodu?",
-    )
-
-
-def test_relevance_gate_accepts_related_dental_rehabilitation_relief() -> None:
-    chunk = SimpleNamespace(
-        subject="Ulga rehabilitacyjna na protezy zębowe",
-        chunk_text="Odliczenie wydatku na protezę w ramach ulgi rehabilitacyjnej.",
-    )
-
-    assert legacy_interpretations._chunk_matches_query_facts(
-        chunk,
-        "Czy implanty zębowe mogą być kosztem uzyskania przychodu?",
-    )
+    assert calls == [{"query": "implanty zębowe", "limit": 12}]
 
 
 def test_july7_interpretation_search_uses_vendored_mysql_without_tax_domain(monkeypatch) -> None:
     calls: list[dict] = []
-    interpretation = SimpleNamespace(
-        source_type="interpretation",
-        document_id="interpretation-1",
+    interpretation = make_chunk(
         subject="Implanty zębowe",
-        chunk_text="Implanty zębowe są kosztem uzyskania przychodów.",
+        text="Implanty zębowe są kosztem uzyskania przychodów.",
     )
     monkeypatch.setattr(legacy_interpretations.july7_mysql_rag, "is_mysql_rag_configured", lambda: True)
 
@@ -67,16 +53,13 @@ def test_july7_interpretation_search_uses_vendored_mysql_without_tax_domain(monk
         calls.append({"query": query, **kwargs})
         return [interpretation]
 
-    monkeypatch.setattr(legacy_interpretations.july7_mysql_rag, "search_chunks_mysql", fake_mysql_search)
+    monkeypatch.setattr(legacy_interpretations, "_search_historical_mysql", fake_mysql_search)
     monkeypatch.setattr(legacy_interpretations, "hydrate_tax_interpretation_documents", lambda chunks: chunks)
 
     assert legacy_interpretations.search_tax_interpretations("implanty zębowe", limit=3) == [interpretation]
     assert calls == [{
         "query": "implanty zębowe",
-        "limit": 20,
-        "source_types": {"interpretation"},
-        "enforce_query_domain": False,
-        "tax_domains": None,
+        "limit": 12,
     }]
 
 
@@ -147,49 +130,33 @@ def test_hydrate_tax_interpretation_documents_returns_full_ordered_document(monk
     assert hydrated[0].chunk_text == "Początek interpretacji.\n\nKoniec interpretacji."
 
 
-def test_dental_cost_query_expands_to_implants_and_prostheses(monkeypatch) -> None:
+def test_generic_query_planner_keeps_late_distinctive_concept(monkeypatch) -> None:
     monkeypatch.setattr(legacy_interpretations, "_active_user_query", legacy_interpretations.ContextVar(
         "test_july7_user_query",
         default=None,
     ))
 
     queries = legacy_interpretations._build_bounded_historical_mysql_queries(
-        "Czy implanty zębowe mogą być kosztem uzyskania przychodu?"
+        "Czy wydatek udokumentowany fakturą wystawioną poza KSeF może być kosztem uzyskania przychodu?"
     )
 
-    assert queries == [
-        "+implant* +zęb* +koszt* +uzyskan* +przychod*",
-        "+protez* +zęb* +koszt* +uzyskan* +przychod*",
-    ]
+    assert len(queries) == 1
+    assert "ksef*" in queries[0]
+    assert "faktur*" in queries[0]
+    assert all("implant" not in query for query in queries)
 
 
 def test_search_filters_against_full_document_not_the_winning_chunk(monkeypatch) -> None:
-    seed = RagChunk(
-        chunk_id="interpretation-1:9",
-        document_id="interpretation-1",
-        chunk_index=9,
-        score=99.0,
-        chunk_text="Uzasadnienie prawne bez opisu wydatku.",
+    seed = make_chunk(
         subject="Zaliczenie wydatku do kosztów",
-        signature="TEST-1",
-        published_date=None,
-        source_url=None,
-        category="Interpretacja indywidualna",
+        text="Uzasadnienie prawne bez opisu wydatku.",
     )
-    hydrated = RagChunk(
-        chunk_id=seed.chunk_id,
-        document_id=seed.document_id,
-        chunk_index=0,
-        score=seed.score,
-        chunk_text="Implanty zębowe nie mogą stanowić kosztów uzyskania przychodów.",
+    hydrated = make_chunk(
         subject=seed.subject,
-        signature=seed.signature,
-        published_date=None,
-        source_url=None,
-        category=seed.category,
+        text="Implanty zębowe nie mogą stanowić kosztów uzyskania przychodów.",
     )
     monkeypatch.setattr(legacy_interpretations.july7_mysql_rag, "is_mysql_rag_configured", lambda: True)
-    monkeypatch.setattr(legacy_interpretations.july7_mysql_rag, "search_chunks_mysql", lambda *args, **kwargs: [seed])
+    monkeypatch.setattr(legacy_interpretations, "_search_historical_mysql", lambda *args, **kwargs: [seed])
     monkeypatch.setattr(legacy_interpretations, "hydrate_tax_interpretation_documents", lambda chunks: [hydrated])
 
     result = legacy_interpretations.search_tax_interpretations(
@@ -198,3 +165,27 @@ def test_search_filters_against_full_document_not_the_winning_chunk(monkeypatch)
     )
 
     assert result == [hydrated]
+
+
+def test_coverage_ranking_prefers_document_covering_more_query_concepts() -> None:
+    query = "Czy faktura wystawiona poza KSeF może być kosztem?"
+    generic_invoice = make_chunk(
+        document_id="generic",
+        score=100.0,
+        subject="Faktura dokumentująca zakup okularów",
+        text="Faktura została wystawiona na przedsiębiorcę.",
+    )
+    ksef_invoice = make_chunk(
+        document_id="ksef",
+        score=1.0,
+        subject="Koszty z faktur wystawionych poza KSeF",
+        text="Faktura powinna zostać wystawiona w KSeF, ale została wystawiona poza KSeF.",
+    )
+
+    ranked = legacy_interpretations._dedupe_and_filter_relevant_chunks(
+        [generic_invoice, ksef_invoice],
+        query=query,
+        limit=6,
+    )
+
+    assert ranked == [ksef_invoice, generic_invoice]

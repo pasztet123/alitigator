@@ -130,7 +130,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.70"
+API_VERSION = "2.0.71"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -981,8 +981,8 @@ def build_july7_interpretations_reply(chunks: list) -> str:
     return (
         "Wyniki interpretacji podatkowych\n\n"
         "Poniżej są pełne interpretacje indywidualne wybrane przez snapshot retrievalu z 7 lipca 2026 r. "
-        "Nie skracamy ani nie ucinamy treści dokumentu. Wynik bezpośrednio o kosztach uzyskania przychodów jest pokazany najpierw; "
-        "kolejne mogą dotyczyć tego samego wydatku w innym mechanizmie podatkowym, np. ulgi rehabilitacyjnej. "
+        "Nie skracamy ani nie ucinamy treści dokumentu. Wyniki są uporządkowane według zbieżności pojęć "
+        "i współwystępowania słów z pytania. "
         "To wyniki wyszukiwania, nie automatyczna opinia prawna.\n\n"
         + "\n\n".join(rows)
     )

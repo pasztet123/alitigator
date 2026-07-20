@@ -1,0 +1,162 @@
+[
+  {
+    "id": "1",
+    "question": "Czy przedsiębiorca może zaliczyć do kosztów uzyskania przychodu wydatki na psychoterapię, jeżeli stres i problemy psychiczne utrudniają mu prowadzenie działalności?",
+    "expected_mechanism": "koszt uzyskania przychodu albo, pomocniczo, ulga rehabilitacyjna dotycząca psychoterapii",
+    "expected_provisions": ["art. 22 ust. 1 ustawy o PIT"],
+    "target_interpretations": ["0115-KDIT2.4011.519.2025.2.MM", "0113-KDIPT2-1.4011.813.2025.6.KD"],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "2",
+    "question": "Czy operacja wzroku lub laserowa korekcja wzroku może być kosztem działalności gospodarczej, jeżeli podatnik pracuje wiele godzin przy komputerze?",
+    "expected_mechanism": "koszt uzyskania przychodu związany z korekcją wzroku przy pracy przy komputerze",
+    "expected_provisions": ["art. 22 ust. 1 ustawy o PIT"],
+    "target_interpretations": ["0113-KDIPT2-1.4011.8.2026.1.RK", "0113-KDIPT2-1.4011.261.2026.1.RK"],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "3",
+    "question": "Czy aparat słuchowy używany przez przedsiębiorcę podczas rozmów z klientami może być kosztem uzyskania przychodu?",
+    "expected_mechanism": "koszt uzyskania przychodu albo, pomocniczo, odliczenie wydatku na aparat słuchowy",
+    "expected_provisions": ["art. 22 ust. 1 ustawy o PIT"],
+    "target_interpretations": ["0113-KDIPT2-2.4011.1111.2025.1.KK"],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "4",
+    "question": "Czy wydatki na fizjoterapię kręgosłupa mogą być kosztem działalności, jeżeli dolegliwości wynikają z wielogodzinnej pracy przy biurku?",
+    "expected_mechanism": "koszt uzyskania przychodu albo, pomocniczo, odliczenie wydatków na rehabilitację",
+    "expected_provisions": ["art. 22 ust. 1 ustawy o PIT"],
+    "target_interpretations": ["0113-KDIPT2-2.4011.213.2026.2.AKU", "0115-KDIT2.4011.717.2025.2.MM"],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "5",
+    "question": "Czy przedsiębiorca może zaliczyć do kosztów zakup zegarka używanego do kontaktu z klientami, odbierania połączeń i obsługi aplikacji firmowych?",
+    "expected_mechanism": "koszt uzyskania przychodu zakupu zegarka używanego w działalności",
+    "expected_provisions": ["art. 22 ust. 1 ustawy o PIT"],
+    "target_interpretations": ["0113-KDIPT2-1.4011.171.2026.5.AS", "0111-KDIB1-1.4010.249.2026.1.BS", "0112-KDIL2-2.4011.861.2025.2.AG", "0114-KDIP3-1.4011.934.2025.3.PT"],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "6",
+    "question": "Czy zakup telefonu używanego jednocześnie prywatnie i służbowo może zostać w całości zaliczony do kosztów uzyskania przychodu?",
+    "expected_mechanism": "koszt uzyskania przychodu telefonu używanego mieszanie prywatnie i służbowo",
+    "expected_provisions": ["art. 22 ust. 1 ustawy o PIT"],
+    "target_interpretations": [],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "7",
+    "question": "Czy wydatek na siłownię lub treningi personalne może być kosztem działalności trenera, influencera albo osoby tworzącej treści sportowe?",
+    "expected_mechanism": "koszt uzyskania przychodu wydatku na siłownię lub treningi w działalności sportowej",
+    "expected_provisions": ["art. 22 ust. 1 ustawy o PIT"],
+    "target_interpretations": ["0115-KDIT3.4011.249.2026.1.RS"],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "8",
+    "question": "Czy przedsiębiorca może zaliczyć do kosztów wydatki na dietę pudełkową, jeżeli z powodu charakteru pracy nie ma czasu przygotowywać posiłków?",
+    "expected_mechanism": "koszt uzyskania przychodu wydatku na dietę lub posiłki",
+    "expected_provisions": ["art. 22 ust. 1 ustawy o PIT"],
+    "target_interpretations": [],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "9",
+    "question": "Czy zakup psa wykorzystywanego do ochrony siedziby firmy może być kosztem uzyskania przychodu?",
+    "expected_mechanism": "koszt uzyskania przychodu zakupu psa ochronnego",
+    "expected_provisions": ["art. 22 ust. 1 ustawy o PIT"],
+    "target_interpretations": ["0112-KDWL.4011.15.2026.1.JK"],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "10",
+    "question": "Czy wydatki na karmę, leczenie i szkolenie psa pilnującego firmy mogą być kosztami podatkowymi?",
+    "expected_mechanism": "koszt uzyskania przychodu utrzymania psa ochronnego",
+    "expected_provisions": ["art. 22 ust. 1 ustawy o PIT"],
+    "target_interpretations": ["0112-KDWL.4011.15.2026.1.JK", "0113-KDIPT1-3.4012.177.2026.2.JM"],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "11",
+    "question": "Czy zakup mebli i wyposażenia do mieszkania może być kosztem, jeżeli jeden pokój jest wykorzystywany jako biuro działalności gospodarczej?",
+    "expected_mechanism": "koszt uzyskania przychodu i proporcjonalne rozliczenie mieszkania wykorzystywanego w działalności",
+    "expected_provisions": ["art. 22 ust. 1 ustawy o PIT"],
+    "target_interpretations": ["0115-KDIT3.4011.959.2025.3.AD", "0115-KDWT.4011.195.2025.2.MJ", "0112-KDIL2-2.4011.206.2026.2.WS"],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "12",
+    "question": "Czy przedsiębiorca może zaliczyć do kosztów część czynszu i mediów za mieszkanie, jeżeli nie wydzielił formalnie osobnego pomieszczenia na działalność?",
+    "expected_mechanism": "proporcjonalne ujęcie czynszu i mediów mieszkania w kosztach działalności",
+    "expected_provisions": ["art. 22 ust. 1 ustawy o PIT"],
+    "target_interpretations": ["0112-KDIL2-2.4011.248.2026.2.IM", "0115-KDWT.4011.195.2025.2.MJ"],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "13",
+    "question": "Czy faktura wystawiona na imię i nazwisko przedsiębiorcy, ale bez numeru NIP, może stanowić podstawę ujęcia wydatku w kosztach PIT?",
+    "expected_mechanism": "dokumentowanie wydatku fakturą bez numeru NIP na potrzeby kosztu PIT",
+    "expected_provisions": ["art. 22 ust. 1 ustawy o PIT"],
+    "target_interpretations": ["0112-KDIL2-2.4011.94.2026.4.KP", "0114-KDIP3-1.4011.103.2026.3.EC"],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "14",
+    "question": "Czy wydatek opłacony prywatną kartą przedsiębiorcy może być kosztem działalności, jeżeli faktura została wystawiona na firmę?",
+    "expected_mechanism": "koszt uzyskania przychodu przy zapłacie prywatną kartą i fakturze firmowej",
+    "expected_provisions": ["art. 22 ust. 1 ustawy o PIT"],
+    "target_interpretations": ["0114-KDIP2-1.4010.509.2025.1.JF"],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "15",
+    "question": "Czy wydatek udokumentowany fakturą, która powinna zostać wystawiona w KSeF, ale została wystawiona poza KSeF, może być kosztem uzyskania przychodu?",
+    "expected_mechanism": "koszt uzyskania przychodu z faktury wystawionej poza KSeF",
+    "expected_provisions": ["art. 15 ust. 1 ustawy o CIT", "art. 22 ust. 1 ustawy o PIT"],
+    "target_interpretations": ["0111-KDIB1-1.4010.124.2026.4.LG", "0114-KDIP2-2.4010.163.2026.2.JM", "0114-KDIP2-2.4010.164.2026.2.JM", "0114-KDIP2-2.4010.162.2026.2.JM", "0111-KDIB2-1.4010.11.2026.1.AG", "0111-KDIB2-1.4010.10.2026.1.AG"],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "16",
+    "question": "Czy nabywca może odliczyć VAT z faktury wystawionej poza KSeF, mimo że sprzedawca miał obowiązek wystawić ją w KSeF?",
+    "expected_mechanism": "odliczenie VAT z faktury wystawionej poza KSeF",
+    "expected_provisions": ["art. 86 ustawy o VAT"],
+    "target_interpretations": ["0112-KDIL1-1.4012.903.2025.1.EB", "0112-KDIL1-3.4012.180.2026.1.KK", "0112-KDIL1-1.4012.285.2026.1.JKU", "0114-KDIP1-3.4012.966.2025.1.AMA", "0112-KDIL1-3.4012.938.2025.2.KK"],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "17",
+    "question": "Czy podatnik może odliczyć VAT z faktury otrzymanej e-mailem kilka dni po jej wystawieniu, jeżeli towar został dostarczony wcześniej?",
+    "expected_mechanism": "moment odliczenia VAT z faktury elektronicznej otrzymanej po dostawie",
+    "expected_provisions": ["art. 86 ustawy o VAT"],
+    "target_interpretations": ["0111-KDIB3-1.4012.157.2026.3.MG", "0114-KDIP1-1.4012.1057.2025.3.KOM"],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "18",
+    "question": "Czy zakup paliwa do prywatnego samochodu używanego w działalności pozwala odliczyć 50% VAT, jeżeli samochód nie został zgłoszony na VAT-26?",
+    "expected_mechanism": "częściowe odliczenie VAT od wydatków na samochód używany mieszanie bez VAT-26",
+    "expected_provisions": ["art. 86a ustawy o VAT"],
+    "target_interpretations": ["0114-KDIP4-2.4012.803.2021.15.MB"],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "19",
+    "question": "Czy wynagrodzenie wypłacane zagranicznemu programiście prowadzącemu własną działalność podlega w Polsce podatkowi u źródła?",
+    "expected_mechanism": "podatek u źródła od wynagrodzenia zagranicznego usługodawcy lub programisty",
+    "expected_provisions": ["art. 21 ust. 1 ustawy o CIT", "art. 26 ust. 1 ustawy o CIT"],
+    "target_interpretations": ["0111-KDIB2-1.4010.129.2026.3.BJ", "0114-KDIP2-1.4010.92.2026.2.PP", "0111-KDIB1-3.4010.582.2025.4.JKU"],
+    "forbidden_wrong_neighbors": []
+  },
+  {
+    "id": "20",
+    "question": "Czy polska spółka musi pobrać podatek u źródła od opłaty za korzystanie z zagranicznego oprogramowania dostępnego w modelu SaaS?",
+    "expected_mechanism": "podatek u źródła od opłaty za zagraniczne oprogramowanie lub usługę SaaS",
+    "expected_provisions": ["art. 21 ust. 1 ustawy o CIT", "art. 26 ust. 1 ustawy o CIT"],
+    "target_interpretations": ["0114-KDIP2-1.4010.504.2025.1.PP", "0114-KDIP2-1.4010.690.2025.1.PK", "0111-KDIB2-1.4010.386.2025.2.BJ", "0111-KDIB1-2.4010.612.2025.1.ANK", "0111-KDIB2-1.4010.129.2026.3.BJ", "0114-KDIP2-1.4010.78.2026.1.KW"],
+    "forbidden_wrong_neighbors": ["0112-KDSL1-1.4011.735.2025.2.MJ"]
+  }
+]

@@ -47,13 +47,6 @@ def _get_bounded_july7_rag_config():
 july7_rag.get_rag_config = _get_bounded_july7_rag_config
 july7_mysql_rag.get_rag_config = _get_bounded_july7_rag_config
 
-_HISTORICAL_QUERY_STOPWORDS = {
-    "albo", "bardzo", "będzie", "czy", "dla", "jest", "jako", "jeżeli",
-    "kiedy", "która", "który", "mają", "może", "oraz", "podlega", "przez",
-    "sprzedaż", "tego", "tych", "ustawy", "wtedy", "wyniku", "został",
-    "interpretacji", "interpretacje", "interpretację", "dotyczących", "dotyczące",
-    "poszukaj", "pokaż", "znajdź", "proszę", "kosztem", "uzyskania", "przychodu",
-}
 _active_user_query: ContextVar[str | None] = ContextVar("active_july7_user_query", default=None)
 
 
@@ -65,12 +58,27 @@ def _normalize_for_match(value: str) -> str:
     )
 
 
+_HISTORICAL_QUERY_STOPWORDS = frozenset(
+    _normalize_for_match(value)
+    for value in {
+        "albo", "bardzo", "będzie", "czy", "dla", "jest", "jako", "jeżeli", "przy",
+        "kiedy", "która", "który", "mają", "może", "oraz", "podlega", "przez",
+        "sprzedaż", "tego", "tych", "ustawy", "wtedy", "wyniku", "został",
+        "interpretacji", "interpretacje", "interpretację", "dotyczących", "dotyczące",
+        "poszukaj", "pokaż", "znajdź", "proszę", "kosztem", "uzyskania", "przychodu",
+    }
+)
+
+
 def _query_anchor_stems(query: str) -> list[str]:
     """Extract material facts, never the request to search interpretations."""
     stems: list[str] = []
     for token in july7_rag.QUERY_TOKEN_RE.findall(query):
         normalized = _normalize_for_match(token)
-        if len(normalized) < 4 or normalized in _HISTORICAL_QUERY_STOPWORDS:
+        if (
+            (len(normalized) < 4 and normalized not in {"vat", "pit", "cit", "pcc"})
+            or normalized in _HISTORICAL_QUERY_STOPWORDS
+        ):
             continue
         if normalized.startswith("implant"):
             stem = "implant"
@@ -113,7 +121,7 @@ def _build_bounded_historical_mysql_queries(query: str) -> list[str]:
     implant_or_prosthesis = [item for item in anchors if item in {"implant", "protez"}]
     if dental and implant_or_prosthesis:
         return [f"+{item}* +zęb*" for item in implant_or_prosthesis]
-    return [" ".join(f"+{item}*" for item in anchors[:2])]
+    return [" ".join(f"+{item}*" for item in anchors[:3])]
 
 
 july7_mysql_rag._build_mysql_candidate_queries = july7_mysql_rag.build_mysql_candidate_queries

@@ -882,7 +882,12 @@ def fetch_candidate_rows_mysql(
                     WHERE MATCH(c.search_text, c.question_text, c.facts_text, c.tax_domain)
                         AGAINST (%s IN BOOLEAN MODE)
                         {filter_sql}
-                    ORDER BY lexical_score DESC, d.published_date DESC, c.chunk_index ASC, c.chunk_id ASC
+                    -- In BOOLEAN MODE MySQL must score and sort every match
+                    -- before applying this ORDER BY.  On the live authority
+                    -- corpus that turns a focused lookup into a 20+ second
+                    -- table-wide sort.  The snapshot's hybrid ranker orders
+                    -- this bounded candidate set below, so keep the database
+                    -- operation index-backed and bounded here.
                     LIMIT %s
                     """,
                     (match_query, match_query, *filter_values, candidate_limit),

@@ -120,7 +120,22 @@ def _build_bounded_historical_mysql_queries(query: str) -> list[str]:
     dental = "zęb" in anchors
     implant_or_prosthesis = [item for item in anchors if item in {"implant", "protez"}]
     if dental and implant_or_prosthesis:
-        return [f"+{item}* +zęb*" for item in implant_or_prosthesis]
+        normalized_query = _normalize_for_match(_active_user_query.get() or query)
+        asks_for_tax_cost = all(term in normalized_query for term in ("koszt", "uzyskan", "przychod"))
+        cost_terms = "+koszt* +uzyskan* +przychod*" if asks_for_tax_cost else ""
+
+        # A literal "implant + tooth" probe found the exact document, but
+        # missed equally useful dental-cost interpretations whose facts use
+        # "proteza" rather than "implant".  This expands recall only within
+        # the same dental concept and only after requiring the tax-cost issue.
+        # The July 7 ranker still orders the combined candidate pool.
+        dental_concepts = [*implant_or_prosthesis]
+        if "implant" in dental_concepts and "protez" not in dental_concepts:
+            dental_concepts.append("protez")
+        return list(dict.fromkeys(
+            f"+{item}* +zęb* {cost_terms}".strip()
+            for item in dental_concepts
+        ))
     return [" ".join(f"+{item}*" for item in anchors[:3])]
 
 
@@ -147,10 +162,21 @@ def _chunk_matches_query_facts(chunk: july7_rag.RagChunk, query: str) -> bool:
     normalized_query = _normalize_for_match(query)
     asks_for_tax_cost = all(term in normalized_query for term in ("koszt", "uzyskan", "przychod"))
     has_tax_cost = bool(re.search(r"koszt\w*.{0,48}uzyskan\w*.{0,48}przychod\w*", source_text))
+    has_related_dental_relief = bool(re.search(r"ulg\w*\s+rehabilit", source_text))
     return (
         all(any(stem in source_text for stem in group) for group in _relevance_groups(query))
-        and (not asks_for_tax_cost or has_tax_cost)
+        # Dental interpretations often concern the same individual expense
+        # under the rehabilitation relief rather than business KUP.  Keep
+        # those as clearly related authorities, but never admit a merely
+        # topical dental/VAT result.
+        and (not asks_for_tax_cost or has_tax_cost or has_related_dental_relief)
     )
+
+
+def _direct_cost_match_rank(chunk: july7_rag.RagChunk) -> int:
+    """Put the exact KUP issue ahead of analogous relief interpretations."""
+    subject = _normalize_for_match(chunk.subject or "")
+    return 0 if re.search(r"koszt\w*.{0,48}uzyskan\w*.{0,48}przychod\w*", subject) else 1
 
 
 def _dedupe_and_filter_relevant_chunks(
@@ -165,6 +191,24 @@ def _dedupe_and_filter_relevant_chunks(
         if chunk.source_type != "interpretation" or not _chunk_matches_query_facts(chunk, query):
             continue
         if chunk.document_id in seen_documents:
+            continue
+        seen_documents.add(chunk.document_id)
+        selected.append(chunk)
+        if len(selected) >= limit:
+            break
+    return sorted(selected, key=_direct_cost_match_rank)
+
+
+def _select_interpretation_documents(
+    chunks: list[july7_rag.RagChunk],
+    *,
+    limit: int,
+) -> list[july7_rag.RagChunk]:
+    """Keep one ranked seed per document before loading complete texts."""
+    selected: list[july7_rag.RagChunk] = []
+    seen_documents: set[str] = set()
+    for chunk in chunks:
+        if chunk.source_type != "interpretation" or chunk.document_id in seen_documents:
             continue
         seen_documents.add(chunk.document_id)
         selected.append(chunk)
@@ -265,9 +309,12 @@ def search_tax_interpretations(query: str, *, limit: int | None = None) -> list[
     The snapshot deliberately searches its local SQLite index directly.  This
     Production has no local SQLite corpus, so it uses the separately vendored
     July 7 MySQL retrieval implementation against the read-only corpus.  Local
-    development falls back to the separately vendored July 7 SQLite path.
+    development falls back to the separately vendored July 7 SQLite path.  The
+    selected chunks are then hydrated to full documents *before* fact filtering:
+    a winning chunk can be the legal reasoning section, while the matching
+    dental facts and the question appear elsewhere in the same interpretation.
     """
-    configured_limit = int(os.getenv("JULY7_INTERPRETATIONS_RETRIEVAL_LIMIT", "8"))
+    configured_limit = int(os.getenv("JULY7_INTERPRETATIONS_RETRIEVAL_LIMIT", "5"))
     effective_limit = max(1, min(limit or configured_limit, 20))
     active_query_token = _active_user_query.set(query)
     try:
@@ -284,4 +331,13 @@ def search_tax_interpretations(query: str, *, limit: int | None = None) -> list[
             chunks = _search_historical_sqlite(query, limit=candidate_limit)
     finally:
         _active_user_query.reset(active_query_token)
-    return _dedupe_and_filter_relevant_chunks(chunks, query=query, limit=effective_limit)
+    document_candidates = _select_interpretation_documents(
+        chunks,
+        limit=max(effective_limit * 3, 15),
+    )
+    hydrated_documents = hydrate_tax_interpretation_documents(document_candidates)
+    return _dedupe_and_filter_relevant_chunks(
+        hydrated_documents,
+        query=query,
+        limit=effective_limit,
+    )

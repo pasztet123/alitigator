@@ -173,6 +173,71 @@ def _dedupe_and_filter_relevant_chunks(
     return selected
 
 
+def hydrate_tax_interpretation_documents(
+    chunks: list[july7_rag.RagChunk],
+) -> list[july7_rag.RagChunk]:
+    """Replace selected snippets with their complete, ordered interpretations.
+
+    The July 7 retrieval code is deliberately chunk-based.  That is suitable
+    for ranking, but a user selecting the interpretations-only MVP expects a
+    document, not an arbitrary 1--2 kB slice that may begin mid-sentence.
+    Hydration happens *after* the historical ranker has selected documents, so
+    it cannot affect retrieval quality or silently route through the current
+    backend.
+    """
+    document_ids = list(dict.fromkeys(
+        str(chunk.document_id).strip() for chunk in chunks if str(chunk.document_id).strip()
+    ))
+    if not document_ids:
+        return []
+
+    if july7_mysql_rag.is_mysql_rag_configured():
+        rows = july7_mysql_rag.fetch_rows_by_document_ids_mysql(
+            document_ids,
+            source_type="interpretation",
+        )
+    else:
+        rows = july7_rag.fetch_rows_by_document_ids(
+            document_ids,
+            config=july7_rag.get_rag_config(),
+            source_type="interpretation",
+        )
+
+    documents = july7_rag.build_document_context_from_rows(
+        rows,
+        ordered_document_ids=document_ids,
+        seed_chunks=chunks,
+    )
+    document_by_id = {document.document_id: document for document in documents if document.text.strip()}
+
+    hydrated: list[july7_rag.RagChunk] = []
+    for chunk in chunks:
+        document = document_by_id.get(chunk.document_id)
+        if document is None:
+            continue
+        hydrated.append(
+            replace(
+                chunk,
+                chunk_index=0,
+                chunk_text=document.text,
+                subject=document.subject,
+                signature=document.signature,
+                published_date=document.published_date,
+                source_url=document.source_url,
+                category=document.category,
+                source=document.source,
+                source_type=document.source_type,
+                source_subtype=document.source_subtype,
+                authority=document.authority,
+                publication=document.publication,
+                legal_state_date=document.legal_state_date,
+                source_pages=document.source_pages,
+                legal_provisions=document.legal_provisions,
+            )
+        )
+    return hydrated
+
+
 def _search_historical_sqlite(query: str, *, limit: int) -> list[july7_rag.RagChunk]:
     """Run the snapshot locally without its public backend router."""
     axis_chunks, axes = july7_rag._search_chunks_by_legal_axes(

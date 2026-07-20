@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from app import legacy_interpretations
+from app.legacy_july7.rag import RagChunk
 
 
 def test_july7_interpretation_search_forces_snapshot_sqlite_without_tax_domain(monkeypatch) -> None:
@@ -63,3 +64,70 @@ def test_july7_interpretation_search_uses_vendored_mysql_without_tax_domain(monk
         "enforce_query_domain": False,
         "tax_domains": None,
     }]
+
+
+def test_hydrate_tax_interpretation_documents_returns_full_ordered_document(monkeypatch) -> None:
+    selected_chunk = RagChunk(
+        chunk_id="interpretation-1:1",
+        document_id="interpretation-1",
+        chunk_index=1,
+        score=99.0,
+        chunk_text="urwany środek dokumentu",
+        subject="Implanty zębowe",
+        signature="0112-KDIL2-2.4011.8.2026.3.MM",
+        published_date="2026-03-04",
+        source_url="https://example.test/interpretation-1",
+        category="Interpretacja indywidualna",
+    )
+    rows = [
+        {
+            "chunk_id": "interpretation-1:0",
+            "document_id": "interpretation-1",
+            "chunk_index": 0,
+            "chunk_text": "Początek interpretacji.",
+            "subject": "Implanty zębowe",
+            "signature": "0112-KDIL2-2.4011.8.2026.3.MM",
+            "published_date": "2026-03-04",
+            "source_url": "https://example.test/interpretation-1",
+            "category": "Interpretacja indywidualna",
+            "source": "eureka",
+            "source_type": "interpretation",
+            "source_subtype": "individual",
+            "authority": "KIS",
+            "publication": "eureka",
+            "legal_state_date": None,
+            "source_pages_json": "[]",
+            "legal_provisions_json": "[]",
+        },
+        {
+            "chunk_id": "interpretation-1:1",
+            "document_id": "interpretation-1",
+            "chunk_index": 1,
+            "chunk_text": "Koniec interpretacji.",
+            "subject": "Implanty zębowe",
+            "signature": "0112-KDIL2-2.4011.8.2026.3.MM",
+            "published_date": "2026-03-04",
+            "source_url": "https://example.test/interpretation-1",
+            "category": "Interpretacja indywidualna",
+            "source": "eureka",
+            "source_type": "interpretation",
+            "source_subtype": "individual",
+            "authority": "KIS",
+            "publication": "eureka",
+            "legal_state_date": None,
+            "source_pages_json": "[]",
+            "legal_provisions_json": "[]",
+        },
+    ]
+    monkeypatch.setattr(legacy_interpretations.july7_mysql_rag, "is_mysql_rag_configured", lambda: True)
+    monkeypatch.setattr(
+        legacy_interpretations.july7_mysql_rag,
+        "fetch_rows_by_document_ids_mysql",
+        lambda document_ids, **kwargs: rows,
+    )
+
+    hydrated = legacy_interpretations.hydrate_tax_interpretation_documents([selected_chunk])
+
+    assert len(hydrated) == 1
+    assert hydrated[0].chunk_index == 0
+    assert hydrated[0].chunk_text == "Początek interpretacji.\n\nKoniec interpretacji."

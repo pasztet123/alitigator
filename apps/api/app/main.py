@@ -86,6 +86,7 @@ from app.legacy_interpretations import (
     JULY7_RETRIEVAL_COMMIT,
     JULY7_RETRIEVAL_DATE,
     get_july7_interpretation_backend,
+    hydrate_tax_interpretation_documents,
     search_tax_interpretations,
 )
 from app.rag import (
@@ -130,7 +131,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.66"
+API_VERSION = "2.0.69"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -949,7 +950,7 @@ def build_retrieval_preferences_context(preferences: Optional[RetrievalPreferenc
 
 
 def build_july7_interpretations_reply(chunks: list) -> str:
-    """Render a retrieval result, never a tax opinion, for the frozen MVP mode."""
+    """Render complete source documents, never a tax opinion, for the MVP mode."""
     if not chunks:
         return (
             "Wyniki interpretacji podatkowych\n\n"
@@ -969,21 +970,19 @@ def build_july7_interpretations_reply(chunks: list) -> str:
             ]
             if value
         )
-        excerpt = re.sub(r"\s+", " ", str(chunk.chunk_text or "")).strip()
-        if len(excerpt) > 700:
-            excerpt = f"{excerpt[:697].rstrip()}…"
+        document_text = str(chunk.chunk_text or "").strip()
         source_url = str(chunk.source_url or "").strip()
-        source_line = f"\n  Źródło: {source_url}" if source_url else ""
+        source_line = f"\n\n**Źródło:** {source_url}" if source_url else ""
         rows.append(
-            f"{position}. {reference}"
+            f"### {position}. {reference}"
             + (f" ({metadata})" if metadata else "")
-            + f"\n  {excerpt}{source_line}"
+            + f"\n\n**Pełna treść interpretacji**\n\n{document_text}{source_line}"
         )
 
     return (
         "Wyniki interpretacji podatkowych\n\n"
-        "Poniżej są wyłącznie interpretacje indywidualne znalezione przez snapshot retrievalu z 7 lipca 2026 r. "
-        "To wyniki wyszukiwania, nie automatyczna opinia prawna.\n\n"
+        "Poniżej są pełne interpretacje indywidualne wybrane przez snapshot retrievalu z 7 lipca 2026 r. "
+        "Nie skracamy ani nie ucinamy treści dokumentu. To wyniki wyszukiwania, nie automatyczna opinia prawna.\n\n"
         + "\n\n".join(rows)
     )
 
@@ -3522,6 +3521,10 @@ async def chat(
             retrieved_interpretations = await asyncio.to_thread(
                 search_tax_interpretations,
                 effective_user_prompt,
+            )
+            retrieved_interpretations = await asyncio.to_thread(
+                hydrate_tax_interpretation_documents,
+                retrieved_interpretations,
             )
         except Exception as exc:
             logger.exception("July 7 interpretation retrieval failed")

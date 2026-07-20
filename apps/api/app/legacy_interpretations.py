@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import sqlite3
+import time
 import unicodedata
 from contextvars import ContextVar
 from dataclasses import replace
@@ -14,6 +17,83 @@ from app.legacy_july7 import mysql_rag as july7_mysql_rag
 
 JULY7_RETRIEVAL_COMMIT = "6a23c08"
 JULY7_RETRIEVAL_DATE = "2026-07-07"
+
+_CORPUS_HEALTH_CACHE_SECONDS = 60.0
+_corpus_health_cache: tuple[float, dict[str, object]] | None = None
+
+
+def get_july7_interpretation_corpus_health() -> dict[str, object]:
+    """Report whether the isolated interpretation corpus can be read.
+
+    This deliberately checks only aggregate counts.  It lets the public health
+    endpoint distinguish a configured backend from a corpus that is actually
+    available to the retrieval-only MVP, without exposing database details or
+    any document content.
+    """
+    global _corpus_health_cache
+    now = time.monotonic()
+    if _corpus_health_cache and now - _corpus_health_cache[0] < _CORPUS_HEALTH_CACHE_SECONDS:
+        return dict(_corpus_health_cache[1])
+
+    backend = get_july7_interpretation_backend()
+    try:
+        if july7_mysql_rag.is_mysql_rag_configured():
+            documents_table, chunks_table = july7_mysql_rag.get_mysql_target()
+            with july7_mysql_rag.mysql_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        f"SELECT COUNT(*) AS count FROM `{documents_table}` WHERE source_type = %s",
+                        ("interpretation",),
+                    )
+                    document_count = int((cursor.fetchone() or {}).get("count") or 0)
+                    cursor.execute(
+                        f"""
+                        SELECT COUNT(*) AS count
+                        FROM `{chunks_table}` c
+                        JOIN `{documents_table}` d ON d.document_id = c.document_id
+                        WHERE d.source_type = %s
+                        """,
+                        ("interpretation",),
+                    )
+                    chunk_count = int((cursor.fetchone() or {}).get("count") or 0)
+        else:
+            config = july7_rag.get_rag_config()
+            if not config.db_path.exists():
+                raise FileNotFoundError(config.db_path)
+            connection = july7_rag.get_connection(config.db_path)
+            try:
+                document_count = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM documents WHERE source_type = 'interpretation'"
+                    ).fetchone()[0]
+                )
+                chunk_count = int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM chunks c
+                        JOIN documents d ON d.document_id = c.document_id
+                        WHERE d.source_type = 'interpretation'
+                        """
+                    ).fetchone()[0]
+                )
+            finally:
+                connection.close()
+        report: dict[str, object] = {
+            "backend": backend,
+            "available": document_count > 0 and chunk_count > 0,
+            "interpretation_documents": document_count,
+            "interpretation_chunks": chunk_count,
+        }
+    except Exception:
+        report = {
+            "backend": backend,
+            "available": False,
+            "reason": "corpus_unavailable",
+        }
+
+    _corpus_health_cache = (now, report)
+    return dict(report)
 
 
 def get_july7_interpretation_backend() -> str:
@@ -100,6 +180,13 @@ def _prefix_stem(value: str) -> str:
         "nia", "nie", "nym", "nej", "owa", "owe", "owy", "owi", "ami", "ach",
         "em", "ow", "om", "a", "e", "i", "o", "u", "y",
     ):
+        # Cutting ``-cie`` off words such as ``mieście`` leaves ``mies``.  In
+        # a prefix FTS index that also matches the far more frequent
+        # ``miejsce`` / ``miejscu``, which is a particularly destructive false
+        # neighbour for questions about rented housing.  Keep this ending
+        # unless the remaining stem is still specific enough.
+        if suffix == "cie" and len(value) - len(suffix) < 5:
+            continue
         if value.endswith(suffix) and len(value) - len(suffix) >= 4:
             return value[:-len(suffix)]
     return value
@@ -197,10 +284,7 @@ def _build_bounded_historical_match_queries(query: str, *, config=None) -> list[
     tax-outcome words when the question contains more concrete facts.
     """
     candidate_query = _active_user_query.get() or query
-    anchors = _query_recall_anchors(candidate_query)
-    if anchors:
-        return [" OR ".join(f'"{anchor}"*' for anchor in anchors)]
-    return july7_rag._build_candidate_match_queries(query, config=config)
+    return _build_bounded_historical_sqlite_queries(candidate_query, config=config)
 
 
 july7_rag._build_candidate_match_queries = july7_rag.build_candidate_match_queries
@@ -208,19 +292,38 @@ july7_rag.build_candidate_match_queries = _build_bounded_historical_match_querie
 
 
 def _build_bounded_historical_mysql_queries(query: str) -> list[str]:
-    """Build generic, bounded Boolean probes that preserve query concepts.
+    """Build generic Boolean probes that retain lexical co-occurrence.
 
-    The ranker is most useful when its candidate pool includes documents that
-    cover the user's distinctive words.  A previous positional ``anchors[:3]``
-    shortcut dropped concepts such as KSeF whenever they occurred later in a
-    natural-language question.  We now preserve every descriptive query word
-    in one bounded Boolean FTS probe.  There are no tax-topic,
-    source-type or phrase-specific branches here.
+    In MySQL Boolean mode whitespace means OR.  A single long query therefore
+    recalled any chunk containing ``miejsce`` for a question mentioning
+    ``mieście`` and hit the database limit before relevant documents were even
+    candidates.  Pair probes are derived solely from neighbouring and bridge
+    words present in the user's question; they are not a taxonomy or a set of
+    hard-coded legal cases.  The final broad probe remains as a recall safety
+    net, but cannot crowd out the pair-based pools.
     """
     anchors = _query_recall_anchors(query)
-    if not anchors:
-        return july7_mysql_rag._build_mysql_candidate_queries(query)
-    return [" ".join(f"{anchor}*" for anchor in anchors)]
+    pair_queries = [
+        f"+{left}* +{right}*"
+        for left, right in _build_generic_probe_pairs(query)
+        if len(left) >= 4 and len(right) >= 4
+    ]
+    broad_query = " ".join(f"{anchor}*" for anchor in anchors) if anchors else None
+    queries = [*pair_queries, broad_query]
+    return list(dict.fromkeys(candidate for candidate in queries if candidate)) or july7_mysql_rag._build_mysql_candidate_queries(query)
+
+
+def _build_bounded_historical_sqlite_queries(query: str, *, config=None) -> list[str]:
+    """SQLite equivalent of the generic MySQL co-occurrence probes."""
+    anchors = _query_recall_anchors(query)
+    pair_queries = [
+        f'"{left}"* AND "{right}"*'
+        for left, right in _build_generic_probe_pairs(query)
+        if len(left) >= 4 and len(right) >= 4
+    ]
+    broad_query = " OR ".join(f'"{anchor}"*' for anchor in anchors) if anchors else None
+    queries = [*pair_queries, broad_query]
+    return list(dict.fromkeys(candidate for candidate in queries if candidate)) or july7_rag._build_candidate_match_queries(query, config=config)
 
 
 july7_mysql_rag._build_mysql_candidate_queries = july7_mysql_rag.build_mysql_candidate_queries
@@ -258,6 +361,92 @@ def _query_pair_matches(chunk: july7_rag.RagChunk, query: str) -> int:
     )
 
 
+def _query_subject_pair_matches(chunk: july7_rag.RagChunk, query: str) -> int:
+    """Prefer a query co-occurrence in the concise document subject.
+
+    A full interpretation contains boilerplate and historical facts, so two
+    ordinary query words can occur far apart for an unrelated reason.  The
+    subject is a short editor-supplied description and makes the same lexical
+    overlap much stronger evidence without introducing any topic-specific
+    rules.
+    """
+    subject = _normalize_for_match(chunk.subject or "")
+    return sum(
+        left in subject and right in subject
+        for left, right in _build_generic_probe_pairs(query)
+    )
+
+
+_ARTICLE_REFERENCE_RE = re.compile(
+    r"\bart\.?\s*(?P<article>\d+[a-z]{0,3})(?:\s*(?:ust\.?|§|par\.?|pkt)\s*(?P<unit>\d+[a-z]{0,3}))?",
+    re.IGNORECASE,
+)
+
+
+def _row_value(row: object, key: str) -> object:
+    if isinstance(row, dict):
+        return row.get(key)
+    try:
+        return row[key]  # type: ignore[index]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def _row_json_strings(row: object, key: str) -> list[str]:
+    raw_value = _row_value(row, key)
+    if isinstance(raw_value, list):
+        return [str(value) for value in raw_value if str(value).strip()]
+    try:
+        decoded = json.loads(str(raw_value or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return [str(value) for value in decoded] if isinstance(decoded, list) else []
+
+
+def _query_article_references(query: str) -> set[tuple[str, str | None]]:
+    return {
+        (match.group("article").lower(), (match.group("unit") or "").lower() or None)
+        for match in _ARTICLE_REFERENCE_RE.finditer(_normalize_for_match(query))
+    }
+
+
+def _metadata_match_score(row: object, *, query: str) -> tuple[int, int, int]:
+    """Return soft metadata evidence for a candidate interpretation.
+
+    Keywords are independently curated document phrases, so lexical agreement
+    with the user's own terms is useful even when the same terms occur only in
+    a factual section outside the winning chunk.  A legal-provision score is
+    intentionally zero unless the user explicitly cites an article.  Neither
+    signal filters candidates; both only affect ordering among candidates
+    already recalled from the document text.
+    """
+    keyword_text = " ".join(_row_json_strings(row, "keywords_json"))
+    normalized_keywords = _normalize_for_match(keyword_text)
+    keyword_anchors = [
+        anchor
+        for anchor in _query_recall_anchors(query)
+        if len(anchor) >= 4 and not _is_tax_intent_anchor(anchor)
+    ]
+    keyword_coverage = sum(anchor in normalized_keywords for anchor in keyword_anchors)
+    keyword_pairs = sum(
+        left in normalized_keywords and right in normalized_keywords
+        for left, right in _build_generic_probe_pairs(query)
+    )
+
+    requested_articles = _query_article_references(query)
+    provision_matches = 0
+    if requested_articles:
+        provision_text = _normalize_for_match(" ".join(_row_json_strings(row, "legal_provisions_json"))).replace("-", " ")
+        available_articles = _query_article_references(provision_text)
+        for article, unit in requested_articles:
+            if (article, unit) in available_articles:
+                provision_matches += 2 if unit else 1
+            elif unit is None and any(candidate_article == article for candidate_article, _ in available_articles):
+                provision_matches += 1
+
+    return keyword_pairs, keyword_coverage, provision_matches
+
+
 def _dedupe_and_filter_relevant_chunks(
     chunks: list[july7_rag.RagChunk],
     *,
@@ -277,10 +466,15 @@ def _dedupe_and_filter_relevant_chunks(
     # documents are ranked by lexical coverage first and the generic candidate
     # score second.  This avoids rejecting a close interpretation merely
     # because one fact appears under a synonymous expression.
-    covered = [chunk for chunk in selected if _query_coverage(chunk, query)[4] > 0]
+    covered = [
+        chunk
+        for chunk in selected
+        if _query_coverage(chunk, query)[4] > 0 or _query_coverage(chunk, query)[5] > 0
+    ]
     return sorted(
         covered,
         key=lambda chunk: (
+            _query_subject_pair_matches(chunk, query),
             _query_pair_matches(chunk, query),
             _query_coverage(chunk, query)[1],
             _query_coverage(chunk, query)[0],
@@ -445,7 +639,7 @@ def _generic_candidate_score(
     *,
     query: str,
     source_rank: int,
-) -> tuple[int, int, int, int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int, int, int, int]:
     """Score a candidate solely from lexical overlap and FTS rank."""
     (
         distinctive_document,
@@ -459,7 +653,9 @@ def _generic_candidate_score(
         query,
     )
     pair_matches = _query_pair_matches(chunk, query)
+    subject_pair_matches = _query_subject_pair_matches(chunk, query)
     return (
+        subject_pair_matches,
         pair_matches,
         tax_document,
         distinctive_document,
@@ -480,24 +676,36 @@ def _rank_historical_candidates(
     """Rank the July 7 candidate pool without topic or source-specific boosts."""
     if not rows:
         return []
-    ranked: list[tuple[tuple[int, int, int, int, int, int, int, int], july7_rag.RagChunk]] = []
+    ranked: list[tuple[tuple[int, int, int, int, int, int, int, int, int, int, int, int], july7_rag.RagChunk]] = []
     for source_rank, row in enumerate(rows, start=1):
         chunk = july7_rag.row_to_rag_chunk(row, score=0.0)
         if chunk.source_type != "interpretation":
             continue
-        score = _generic_candidate_score(
+        generic_score = _generic_candidate_score(
             chunk,
             query=query,
             source_rank=source_rank,
         )
+        keyword_pairs, keyword_coverage, provision_matches = _metadata_match_score(row, query=query)
+        # Metadata only breaks ties between lexical neighbours: a document
+        # must still have reached this pool through text search, and the score
+        # below continues to include all body/subject overlap signals.
+        score = (
+            generic_score[0],
+            generic_score[1],
+            provision_matches,
+            keyword_pairs,
+            keyword_coverage,
+            *generic_score[2:],
+        )
         numeric_score = (
-            score[0] * 10_000
-            + score[1] * 1_000
-            + score[2] * 100
-            + score[3] * 10
-            + score[4]
-            + score[5] * 0.1
-            + score[6] * 0.01
+            generic_score[0] * 100_000
+            + generic_score[1] * 10_000
+            + generic_score[2] * 1_000
+            + generic_score[3] * 100
+            + provision_matches * 10
+            + keyword_pairs
+            + keyword_coverage * 0.1
         )
         ranked.append((score, replace(chunk, score=numeric_score)))
 
@@ -552,7 +760,13 @@ def search_tax_interpretations(query: str, *, limit: int | None = None) -> list[
     # The ranker sees a broader generic lexical pool; only the final output is
     # constrained to six documents.  This prevents one broad tax phrase from
     # deciding the whole result set before the full-document overlap check.
-    candidate_limit = min(12, max(effective_limit * 2, 12))
+    # Select a materially wider document window than the six displayed
+    # results.  A candidate is only a matching chunk; several documents can
+    # share the same broad tax wording, while the decisive factual phrase may
+    # live elsewhere in their full text and become visible only after
+    # hydration.  This remains bounded to keep the retrieval-only request
+    # predictable.
+    candidate_limit = min(30, max(effective_limit * 3, 18))
     active_query_token = _active_user_query.set(query)
     try:
         if july7_mysql_rag.is_mysql_rag_configured():

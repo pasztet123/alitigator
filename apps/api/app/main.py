@@ -85,6 +85,7 @@ from app.legal_rag_v2.pipeline import PIPELINE_VERSION as LEGAL_RAG_PIPELINE_VER
 from app.legacy_interpretations import (
     JULY7_RETRIEVAL_COMMIT,
     JULY7_RETRIEVAL_DATE,
+    get_july7_interpretation_corpus_health,
     get_july7_interpretation_backend,
     search_tax_interpretations,
 )
@@ -130,7 +131,7 @@ from app.supabase_client import get_supabase_service_client, is_supabase_configu
 load_dotenv()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.71"
+API_VERSION = "2.0.72"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -608,6 +609,7 @@ class HealthResponse(BaseModel):
     auth_configured: bool
     stripe_configured: bool
     legal_pipeline: dict[str, object]
+    july7_interpretation_corpus: dict[str, object]
 
 
 class ChatThreadSummary(BaseModel):
@@ -3113,6 +3115,7 @@ def health() -> HealthResponse:
         auth_configured=is_supabase_configured(),
         stripe_configured=is_stripe_configured(),
         legal_pipeline=legal_runtime_debug(),
+        july7_interpretation_corpus=get_july7_interpretation_corpus_health(),
     )
 
 

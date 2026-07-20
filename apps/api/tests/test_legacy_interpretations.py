@@ -38,7 +38,7 @@ def test_july7_interpretation_search_forces_snapshot_sqlite_without_tax_domain(m
     result = legacy_interpretations.search_tax_interpretations("implanty zębowe", limit=3)
 
     assert result == [interpretation]
-    assert calls == [{"query": "implanty zębowe", "limit": 12}]
+    assert calls == [{"query": "implanty zębowe", "limit": 18}]
 
 
 def test_july7_interpretation_search_uses_vendored_mysql_without_tax_domain(monkeypatch) -> None:
@@ -59,7 +59,7 @@ def test_july7_interpretation_search_uses_vendored_mysql_without_tax_domain(monk
     assert legacy_interpretations.search_tax_interpretations("implanty zębowe", limit=3) == [interpretation]
     assert calls == [{
         "query": "implanty zębowe",
-        "limit": 12,
+        "limit": 18,
     }]
 
 
@@ -140,10 +140,63 @@ def test_generic_query_planner_keeps_late_distinctive_concept(monkeypatch) -> No
         "Czy wydatek udokumentowany fakturą wystawioną poza KSeF może być kosztem uzyskania przychodu?"
     )
 
-    assert len(queries) == 1
-    assert "ksef*" in queries[0]
-    assert "faktur*" in queries[0]
+    assert any("ksef*" in query for query in queries)
+    assert any("faktur*" in query for query in queries)
+    assert any(query.startswith("+") for query in queries)
     assert all("implant" not in query for query in queries)
+
+
+def test_metadata_boost_rewards_matching_keywords_and_explicit_provision() -> None:
+    row = {
+        "keywords_json": '["wynajem mieszkania", "koszty eksploatacyjne"]',
+        "legal_provisions_json": '["[PIT] art. 22-ust. 1"]',
+    }
+    query = "Czy wynajem mieszkania może być kosztem na podstawie art. 22 ust. 1 ustawy PIT?"
+
+    keyword_pairs, keyword_coverage, provision_matches = legacy_interpretations._metadata_match_score(
+        row,
+        query=query,
+    )
+
+    assert keyword_pairs >= 1
+    assert keyword_coverage >= 2
+    assert provision_matches == 2
+
+
+def test_metadata_provisions_do_not_boost_question_without_explicit_article() -> None:
+    row = {
+        "keywords_json": "[]",
+        "legal_provisions_json": '["[PIT] art. 22-ust. 1"]',
+    }
+
+    assert legacy_interpretations._metadata_match_score(
+        row,
+        query="Czy wydatek może być kosztem uzyskania przychodu?",
+    )[2] == 0
+
+
+def test_subject_cooccurrence_outweighs_unrelated_full_text_overlap() -> None:
+    query = "Czy wynajem mieszkania może być kosztem uzyskania przychodu?"
+    exact_subject = make_chunk(
+        document_id="exact-subject",
+        score=1.0,
+        subject="Koszty uzyskania przychodów - wynajem mieszkania",
+        text="Treść interpretacji.",
+    )
+    broad_full_text = make_chunk(
+        document_id="broad-full-text",
+        score=99.0,
+        subject="Ulga na powrót",
+        text="W uzasadnieniu mimochodem opisano wynajem oraz mieszkanie i przychód.",
+    )
+
+    ranked = legacy_interpretations._dedupe_and_filter_relevant_chunks(
+        [broad_full_text, exact_subject],
+        query=query,
+        limit=6,
+    )
+
+    assert ranked == [exact_subject, broad_full_text]
 
 
 def test_search_filters_against_full_document_not_the_winning_chunk(monkeypatch) -> None:

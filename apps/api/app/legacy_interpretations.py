@@ -152,23 +152,29 @@ _HISTORICAL_QUERY_STOPWORDS = frozenset(
         "jej", "której", "lub", "nie", "przy", "kiedy", "która", "który", "mają", "może", "oraz",
         "podlega", "podstawę", "przez", "sprzedaż", "tego", "tych", "ustawy", "wtedy",
         "wyniku", "został", "została", "zostało", "zostały", "zostać", "powinien",
-        "powinna", "powinno", "powinny", "zaliczyć", "stanowi", "stanowić", "wydatek",
-        "wydatki", "wydatków", "podatkowy", "podatkowe", "podatnik", "przedsiębiorca",
+        "powinna", "powinno", "powinny", "zaliczyć", "stanowi", "stanowić",
+        "podatkowy", "podatkowe",
         "firma", "firmę", "firmy", "spółka", "spółki", "możliwy", "możliwość", "moga",
         "interpretacji", "interpretacje", "interpretację", "dotyczących", "dotyczące",
-        "poszukaj", "pokaż", "znajdź", "proszę",
+        "poszukaj", "pokaż", "znajdź", "proszę", "tam", "innym", "innego", "wyłącznie",
+        "związku", "realizacji", "realizacją", "klient", "klienta",
     }
 )
 
 
 _CONTEXTUAL_ANCHOR_PREFIXES = (
-    "dzialaln", "gospodarcz", "przedsiebiorc", "podatni", "wydatek", "wydatk",
+    "dzialaln", "gospodarcz",
     "podczas", "wiel", "godzin", "pracuj", "uzywan", "prowadz", "ponies",
     "zalicz", "stanow", "moz", "moga", "formaln", "osobn", "calkowic",
     "jednoczes", "charakter", "wynik", "podstaw", "podatkow", "firm", "musi", "polsk",
 )
 
 _TAX_INTENT_PREFIXES = ("koszt", "uzysk", "przychod", "podat", "vat", "pit", "cit", "pcc", "wht")
+_MAX_HISTORICAL_COOCURRENCE_TERMS = 8
+_MAX_HISTORICAL_PAIR_PROBES = 24
+_GROUP_PRIMARY_CONTEXTUAL_PREFIXES = (
+    "przedsiebiorc", "podatni", "wydatek", "wydatk", "dzialaln", "gospodarcz",
+)
 
 
 def _prefix_stem(value: str) -> str:
@@ -227,12 +233,12 @@ def _is_tax_intent_anchor(anchor: str) -> bool:
 def _build_generic_probe_pairs(query: str) -> list[tuple[str, str]]:
     """Choose a small, lexical set of co-occurrence probes from the question.
 
-    Each probe is derived only from the words present in the question.  The
-    first and last adjacent pairs retain natural-language phrases, while the
-    bridge pairs make sure that both the concrete object and the tax outcome
-    can enter the candidate pool.  An identifier-shaped term (for example an
-    acronym or a number) receives one extra bridge because it is often the
-    most precise word in an otherwise long question.
+    Each probe is derived only from the words present in the question.  In a
+    natural-language list (for example ``zakup, karma i leczenie psa``), the
+    leading action has to be compared with *each* listed object, not only with
+    the first item.  Adjacent pairs retain local phrases as a second signal.
+    This is a generic lexical rule; it does not encode tax topics or document
+    types.
     """
     anchor_entries = _query_anchor_entries(_active_user_query.get() or query)
     if not anchor_entries:
@@ -242,13 +248,29 @@ def _build_generic_probe_pairs(query: str) -> list[tuple[str, str]]:
     tax_entries = [item for item in anchor_entries if _is_tax_intent_anchor(item[0])]
     adjacent_content_pairs = list(zip(content_entries, content_entries[1:]))
     pairs: list[tuple[str, str]] = []
-    if adjacent_content_pairs:
+    if len(content_entries) >= 2:
+        first_content = content_entries[0]
         pairs.extend(
-            [
-                (adjacent_content_pairs[0][0][0], adjacent_content_pairs[0][1][0]),
-                (adjacent_content_pairs[-1][0][0], adjacent_content_pairs[-1][1][0]),
-            ]
+            (first_content[0], entry[0])
+            for entry in content_entries[1 : 1 + _MAX_HISTORICAL_COOCURRENCE_TERMS]
         )
+        # Introductory words such as "przedsiębiorca" or "wydatek" still
+        # matter to the ranker, but the first concrete object/action is a
+        # better bridge across an enumerated fact list.
+        concrete_primary = next(
+            (
+                entry
+                for entry in content_entries
+                if not entry[0].startswith(_GROUP_PRIMARY_CONTEXTUAL_PREFIXES)
+            ),
+            first_content,
+        )
+        pairs.extend(
+            (concrete_primary[0], entry[0])
+            for entry in content_entries
+            if entry[0] != concrete_primary[0]
+        )
+        pairs.extend((left[0], right[0]) for left, right in adjacent_content_pairs)
 
     if content_entries and tax_entries:
         longest_tax = max(tax_entries, key=lambda item: min(len(item[0]), 12))
@@ -267,7 +289,7 @@ def _build_generic_probe_pairs(query: str) -> list[tuple[str, str]]:
 
     if not pairs and len(anchor_entries) == 1:
         pairs.append((anchor_entries[0][0], anchor_entries[0][0]))
-    return list(dict.fromkeys(pair for pair in pairs if all(pair)))
+    return list(dict.fromkeys(pair for pair in pairs if all(pair)))[:_MAX_HISTORICAL_PAIR_PROBES]
 
 
 def _query_recall_anchors(query: str) -> list[str]:
@@ -275,6 +297,45 @@ def _query_recall_anchors(query: str) -> list[str]:
     anchors = _query_anchor_stems(_active_user_query.get() or query)
     distinctive = [anchor for anchor in anchors if not _is_tax_intent_anchor(anchor)]
     return distinctive or anchors
+
+
+def _build_historical_cooccurrence_groups(query: str) -> list[tuple[str, tuple[str, ...]]]:
+    """Return bounded generic ``anchor + any listed fact`` lexical groups.
+
+    The first concrete word keeps an enumerated fact pattern together.  A
+    second group uses the shortest remaining concrete term: this preserves
+    precise short nouns and identifiers (for example ``NIP``, ``KSeF`` or a
+    named object) without a query-per-pair fan-out.
+    """
+    anchors = _query_recall_anchors(query)
+    if len(anchors) < 2:
+        return []
+    concrete_anchors = [
+        anchor
+        for anchor in anchors
+        if not anchor.startswith(_GROUP_PRIMARY_CONTEXTUAL_PREFIXES)
+    ]
+    primary = concrete_anchors[0] if concrete_anchors else anchors[0]
+    primary_alternatives = tuple(
+        anchor for anchor in anchors if anchor != primary
+    )[:_MAX_HISTORICAL_COOCURRENCE_TERMS]
+    groups = [(primary, primary_alternatives)] if primary_alternatives else []
+
+    secondary_candidates = [anchor for anchor in concrete_anchors if anchor != primary]
+    if secondary_candidates:
+        secondary = min(secondary_candidates, key=lambda anchor: (len(anchor), anchor))
+        secondary_alternatives = tuple(
+            anchor for anchor in anchors if anchor != secondary
+        )[:_MAX_HISTORICAL_COOCURRENCE_TERMS]
+        if secondary_alternatives:
+            groups.append((secondary, secondary_alternatives))
+    return groups
+
+
+def _query_precision_anchor(query: str) -> str | None:
+    """Return the secondary, short concrete anchor when a query has one."""
+    groups = _build_historical_cooccurrence_groups(query)
+    return groups[1][0] if len(groups) > 1 else None
 
 
 def _build_bounded_historical_match_queries(query: str, *, config=None) -> list[str]:
@@ -299,30 +360,28 @@ def _build_bounded_historical_mysql_queries(query: str) -> list[str]:
     ``mieście`` and hit the database limit before relevant documents were even
     candidates.  Pair probes are derived solely from neighbouring and bridge
     words present in the user's question; they are not a taxonomy or a set of
-    hard-coded legal cases.  The final broad probe remains as a recall safety
-    net, but cannot crowd out the pair-based pools.
+    hard-coded legal cases.
     """
-    anchors = _query_recall_anchors(query)
-    pair_queries = [
-        f"+{left}* +{right}*"
-        for left, right in _build_generic_probe_pairs(query)
-        if len(left) >= 4 and len(right) >= 4
+    grouped_queries = [
+        f"+{primary}* +({' '.join(f'{anchor}*' for anchor in alternatives)})"
+        for primary, alternatives in _build_historical_cooccurrence_groups(query)
     ]
-    broad_query = " ".join(f"{anchor}*" for anchor in anchors) if anchors else None
-    queries = [*pair_queries, broad_query]
+    # Two selective groups are enough to keep both the leading fact and a
+    # short precise object in recall.  A broad OR fallback admitted arbitrary
+    # one-word neighbours before the ranker could compare the actual facts.
+    queries = grouped_queries
     return list(dict.fromkeys(candidate for candidate in queries if candidate)) or july7_mysql_rag._build_mysql_candidate_queries(query)
 
 
 def _build_bounded_historical_sqlite_queries(query: str, *, config=None) -> list[str]:
     """SQLite equivalent of the generic MySQL co-occurrence probes."""
-    anchors = _query_recall_anchors(query)
-    pair_queries = [
-        f'"{left}"* AND "{right}"*'
-        for left, right in _build_generic_probe_pairs(query)
-        if len(left) >= 4 and len(right) >= 4
+    grouped_queries = [
+        f'"{primary}"* AND (' + " OR ".join(
+            f'"{anchor}"*' for anchor in alternatives
+        ) + ")"
+        for primary, alternatives in _build_historical_cooccurrence_groups(query)
     ]
-    broad_query = " OR ".join(f'"{anchor}"*' for anchor in anchors) if anchors else None
-    queries = [*pair_queries, broad_query]
+    queries = grouped_queries
     return list(dict.fromkeys(candidate for candidate in queries if candidate)) or july7_rag._build_candidate_match_queries(query, config=config)
 
 
@@ -375,6 +434,15 @@ def _query_subject_pair_matches(chunk: july7_rag.RagChunk, query: str) -> int:
         left in subject and right in subject
         for left, right in _build_generic_probe_pairs(query)
     )
+
+
+def _query_precision_anchor_matches(chunk: july7_rag.RagChunk, query: str, *, subject_only: bool) -> int:
+    """Check the secondary short query term in a subject or matching chunk."""
+    anchor = _query_precision_anchor(query)
+    if not anchor:
+        return 0
+    text = chunk.subject or "" if subject_only else " ".join((chunk.subject or "", chunk.chunk_text or ""))
+    return int(anchor in _normalize_for_match(text))
 
 
 _ARTICLE_REFERENCE_RE = re.compile(
@@ -462,19 +530,20 @@ def _dedupe_and_filter_relevant_chunks(
             continue
         seen_documents.add(chunk.document_id)
         selected.append(chunk)
-    # Keep all candidates with at least one query concept; the six returned
-    # documents are ranked by lexical coverage first and the generic candidate
-    # score second.  This avoids rejecting a close interpretation merely
-    # because one fact appears under a synonymous expression.
-    covered = [
-        chunk
-        for chunk in selected
-        if _query_coverage(chunk, query)[4] > 0 or _query_coverage(chunk, query)[5] > 0
-    ]
+    # Hydration is a presentation step, not another retrieval pass.  A full
+    # interpretation contains statutory boilerplate that can mention many
+    # unrelated words and otherwise push a strong candidate below a loose
+    # neighbour.  Preserve the candidate rank (which used the matching chunk,
+    # subject, keywords and explicit provisions), while keeping the full-text
+    # overlap only as a late tie-breaker.  We deliberately retain up to six
+    # candidates whenever the corpus supplied them.
     return sorted(
-        covered,
+        selected,
         key=lambda chunk: (
+            _query_precision_anchor_matches(chunk, query, subject_only=True),
             _query_subject_pair_matches(chunk, query),
+            _query_precision_anchor_matches(chunk, query, subject_only=False),
+            chunk.score,
             _query_pair_matches(chunk, query),
             _query_coverage(chunk, query)[1],
             _query_coverage(chunk, query)[0],
@@ -482,7 +551,6 @@ def _dedupe_and_filter_relevant_chunks(
             _query_coverage(chunk, query)[2],
             _query_coverage(chunk, query)[4],
             _query_coverage(chunk, query)[5],
-            chunk.score,
         ),
         reverse=True,
     )[:limit]
@@ -639,7 +707,7 @@ def _generic_candidate_score(
     *,
     query: str,
     source_rank: int,
-) -> tuple[int, int, int, int, int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int, int, int, int, int, int]:
     """Score a candidate solely from lexical overlap and FTS rank."""
     (
         distinctive_document,
@@ -654,8 +722,12 @@ def _generic_candidate_score(
     )
     pair_matches = _query_pair_matches(chunk, query)
     subject_pair_matches = _query_subject_pair_matches(chunk, query)
+    precision_subject_matches = _query_precision_anchor_matches(chunk, query, subject_only=True)
+    precision_document_matches = _query_precision_anchor_matches(chunk, query, subject_only=False)
     return (
+        precision_subject_matches,
         subject_pair_matches,
+        precision_document_matches,
         pair_matches,
         tax_document,
         distinctive_document,
@@ -676,7 +748,7 @@ def _rank_historical_candidates(
     """Rank the July 7 candidate pool without topic or source-specific boosts."""
     if not rows:
         return []
-    ranked: list[tuple[tuple[int, int, int, int, int, int, int, int, int, int, int, int], july7_rag.RagChunk]] = []
+    ranked: list[tuple[tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int], july7_rag.RagChunk]] = []
     for source_rank, row in enumerate(rows, start=1):
         chunk = july7_rag.row_to_rag_chunk(row, score=0.0)
         if chunk.source_type != "interpretation":
@@ -693,19 +765,22 @@ def _rank_historical_candidates(
         score = (
             generic_score[0],
             generic_score[1],
+            generic_score[2],
             provision_matches,
             keyword_pairs,
             keyword_coverage,
-            *generic_score[2:],
+            *generic_score[3:],
         )
         numeric_score = (
-            generic_score[0] * 100_000
-            + generic_score[1] * 10_000
-            + generic_score[2] * 1_000
-            + generic_score[3] * 100
-            + provision_matches * 10
-            + keyword_pairs
-            + keyword_coverage * 0.1
+            generic_score[0] * 1_000_000
+            + generic_score[1] * 100_000
+            + generic_score[2] * 10_000
+            + generic_score[3] * 1_000
+            + provision_matches * 100
+            + keyword_pairs * 10
+            + keyword_coverage
+            + generic_score[4] * 0.1
+            + generic_score[5] * 0.01
         )
         ranked.append((score, replace(chunk, score=numeric_score)))
 

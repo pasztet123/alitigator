@@ -146,6 +146,23 @@ def test_generic_query_planner_keeps_late_distinctive_concept(monkeypatch) -> No
     assert all("implant" not in query for query in queries)
 
 
+def test_generic_query_planner_keeps_listed_object_with_the_leading_action() -> None:
+    query = (
+        "Czy przedsiębiorca może zaliczyć do kosztów uzyskania przychodu wydatki na "
+        "zakup, szkolenie, karmę i leczenie psa wykorzystywanego do ochrony siedziby firmy?"
+    )
+
+    pairs = legacy_interpretations._build_generic_probe_pairs(query)
+    queries = legacy_interpretations._build_bounded_historical_mysql_queries(query)
+
+    assert ("zakup", "psa") in pairs
+    assert ("lecze", "psa") in pairs
+    assert any(
+        candidate.startswith("+zakup* +(") and "psa*" in candidate
+        for candidate in queries
+    )
+
+
 def test_metadata_boost_rewards_matching_keywords_and_explicit_provision() -> None:
     row = {
         "keywords_json": '["wynajem mieszkania", "koszty eksploatacyjne"]',
@@ -242,3 +259,27 @@ def test_coverage_ranking_prefers_document_covering_more_query_concepts() -> Non
     )
 
     assert ranked == [ksef_invoice, generic_invoice]
+
+
+def test_final_document_order_keeps_stronger_candidate_rank_after_hydration() -> None:
+    query = "Czy zakup psa może być kosztem uzyskania przychodu?"
+    strong_candidate = make_chunk(
+        document_id="strong",
+        score=100_000.0,
+        subject="Zakup psa jako koszt uzyskania przychodu",
+        text="Pełna interpretacja zawiera dodatkowe, nieistotne wątki.",
+    )
+    broad_neighbour = make_chunk(
+        document_id="broad",
+        score=1.0,
+        subject="Koszty szkoleń pracowników",
+        text="Zakup, koszt oraz przychód występują wielokrotnie w treści.",
+    )
+
+    ranked = legacy_interpretations._dedupe_and_filter_relevant_chunks(
+        [broad_neighbour, strong_candidate],
+        query=query,
+        limit=6,
+    )
+
+    assert ranked == [strong_candidate, broad_neighbour]

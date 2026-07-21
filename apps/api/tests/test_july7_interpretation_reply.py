@@ -1,4 +1,5 @@
 from app.main import build_july7_interpretations_reply
+from app.legal_rag_v2.document_validation import DocumentCard
 from app.legacy_july7.rag import RagChunk
 from app.legacy_interpretations import TaxResearchDocument, TaxResearchSearchResult
 from app.tax_research import CandidateAssessment, ResearchUnderstanding
@@ -63,3 +64,31 @@ def test_july7_interpretation_reply_separates_wrong_legal_mechanisms() -> None:
     assert "## Bezpośrednio relewantne" in reply
     assert "## Inny mechanizm podatkowy" in reply
     assert reply.index("DIRECT") < reply.index("RETURN-RELIEF")
+
+
+def test_july7_renderer_uses_document_card_mechanism_not_question_assessment() -> None:
+    chunk = RagChunk(
+        chunk_id="rehab:0", document_id="rehab", chunk_index=0, score=1.0,
+        chunk_text="Ulga rehabilitacyjna na używanie samochodu.", subject="Ulga rehabilitacyjna",
+        signature="0115-KDIT2.4011.79.2026.2.MD", published_date=None, source_url=None,
+        category="Interpretacja indywidualna",
+    )
+    stale_assessment = CandidateAssessment(
+        relation="direct", reject=False, reason="stary mechanizm pytania",
+        document_mechanism="withholding_tax", material_differences=(), score=1.0, components={},
+    )
+    document_card = DocumentCard(
+        document_id="rehab",
+        signature="0115-KDIT2.4011.79.2026.2.MD",
+        detected_mechanisms=("rehabilitation_relief",),
+    )
+    result = TaxResearchSearchResult(
+        question="WHT", understanding=ResearchUnderstanding(), database_queries=(), candidate_counts={},
+        candidates_before_rerank=(), candidate_document_ids=(), reranker_scores=(), validation_results=(),
+        documents=(TaxResearchDocument(chunk, stale_assessment, document_card),),
+    )
+
+    reply = build_july7_interpretations_reply(result)
+
+    assert "**Mechanizm w dokumencie:** rehabilitation_relief" in reply
+    assert "**Mechanizm w dokumencie:** withholding_tax" not in reply

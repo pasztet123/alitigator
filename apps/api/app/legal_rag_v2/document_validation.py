@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -14,6 +15,7 @@ from app.legal_institutions.normalizer import normalize_polish, phrase_present
 
 DOCUMENT_CARD_VERSION = "deterministic_document_card_v2"
 _ARTICLE_RE = re.compile(r"\bart\.\s*(\d+[a-z]*)", re.IGNORECASE)
+_ACT_RE = re.compile(r"\b(CIT|PIT|VAT|ORDYNACJA|AKCYZA)\b", re.IGNORECASE)
 _PROVISION_RE = re.compile(r"\b(?:CIT|PIT|VAT)?\s*art\.\s*\d+[a-z]*(?:\s+ust\.\s*\d+[a-z]*)?(?:\s+pkt\s*\d+)?", re.IGNORECASE)
 _HEADINGS_RE = re.compile(
     r"(?im)^\s*(Pytanie|Stanowisko wnioskodawcy|Ocena stanowiska|"
@@ -37,8 +39,20 @@ def _article(value: str) -> str:
     return match.group(1) if match else ""
 
 
+def _act(value: str) -> str:
+    match = _ACT_RE.search(str(value or ""))
+    return match.group(1).upper() if match else ""
+
+
 def _unique(values: list[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(value for value in values if value))
+
+
+def _fold(value: str) -> str:
+    """Accent-insensitive text for deterministic, non-dictionary rules."""
+
+    decomposed = unicodedata.normalize("NFD", str(value or "")).replace("ł", "l").replace("Ł", "L")
+    return "".join(character for character in decomposed if unicodedata.category(character) != "Mn").casefold()
 
 
 @dataclass(frozen=True)
@@ -135,7 +149,7 @@ class DocumentValidation:
 
 
 def build_question_card(*, question: str, issue: Any) -> QuestionCard:
-    normalized = normalize_polish(question).normalized
+    normalized = _fold(normalize_polish(question).normalized)
     is_wht = "podatek u zrodla" in normalized or "wht" in normalized
     is_saas = "saas" in normalized
     is_eula = "eula" in normalized
@@ -207,6 +221,41 @@ def _evidence(institution_id: str, evidence_type: str, value: str, source: str, 
     )
 
 
+def _has_strong_withholding_tax_evidence(
+    *,
+    title: str,
+    scope: str,
+    question_section: str,
+    provisions: tuple[str, ...],
+) -> bool:
+    """Reject incidental WHT citations in otherwise unrelated documents.
+
+    A long interpretation can quote art. 26 CIT or mention WHT in background.
+    For document mode this is weaker than the query-mode lock: it needs either
+    an editorial WHT subject or a payment-to-foreign-recipient context.
+    """
+
+    normalized_title = _fold(normalize_polish(title).normalized)
+    normalized_scope = _fold(normalize_polish(scope).normalized)
+    normalized_question = _fold(normalize_polish(question_section).normalized)
+    title_wht = "podatek u zrodla" in normalized_title
+    question_wht = "podatek u zrodla" in normalized_question
+    section_wht = "podatek u zrodla" in normalized_scope
+    has_foreign = any(term in normalized_scope for term in ("nierezydent", "zagraniczn", "upo"))
+    has_payment = any(term in normalized_scope for term in ("odsetk", "naleznosci licencyjn", "wynagrodzen", "wyplac", "oplata", "uslug niematerialn"))
+    has_payer = "platnik" in normalized_scope
+    cited_articles = {_article(value) for value in provisions}
+    has_core_provision = bool(cited_articles.intersection({"21", "22"}))
+    has_payer_provision = "26" in cited_articles
+    return (
+        title_wht
+        or question_wht
+        or (section_wht and has_foreign and has_payment)
+        or (has_core_provision and has_foreign and has_payment)
+        or (has_payer_provision and has_payer and has_foreign)
+    )
+
+
 def build_document_card(candidate: Any, *, matcher: InstitutionMatcher) -> DocumentCard:
     """Classify solely from candidate document text and metadata, never a question."""
 
@@ -233,7 +282,6 @@ def build_document_card(candidate: Any, *, matcher: InstitutionMatcher) -> Docum
     evidence: list[DocumentEvidence] = []
     institutions: list[str] = []
     mechanisms: list[str] = []
-    provision_articles = {_article(value) for value in provisions}
     for definition in matcher.dictionary.institutions:
         if definition.status != "active":
             continue
@@ -250,11 +298,32 @@ def build_document_card(candidate: Any, *, matcher: InstitutionMatcher) -> Docum
                 found.append(_evidence(definition.institution_id, "phrase", phrase, "relevant_sections", scope))
         for hint in definition.provision_hints:
             article = _article(hint)
-            if phrase_present(hint, normalized_full) or (
-                article and article in provision_articles
+            hint_act = _act(hint)
+            matching_provision = any(
+                article
+                and article == _article(provision)
+                and (
+                    not hint_act
+                    or _act(provision) == hint_act
+                    or (not _act(provision) and hint_act in domains)
+                )
+                for provision in provisions
+            )
+            exact_hint_act_present = not hint_act or bool(
+                re.search(rf"\b{re.escape(hint_act)}\b", " ".join((title, body, *provisions)), re.IGNORECASE)
+            )
+            if (phrase_present(hint, normalized_full) and exact_hint_act_present) or (
+                matching_provision
                 and (not definition.tax_domains or set(domains).intersection(definition.tax_domains))
             ):
                 found.append(_evidence(definition.institution_id, "provision", hint, "cited_provisions", " ".join(provisions)))
+        if definition.institution_id == "withholding_tax" and not _has_strong_withholding_tax_evidence(
+            title=title,
+            scope=scope,
+            question_section=sections.question_section,
+            provisions=provisions,
+        ):
+            found = []
         if found:
             institutions.append(definition.institution_id)
             mechanisms.extend(definition.legal_mechanisms or (definition.institution_id,))
@@ -269,7 +338,7 @@ def build_document_card(candidate: Any, *, matcher: InstitutionMatcher) -> Docum
     if re.search(r"leasing.{0,60}(samoch|pojazd)|samochod.{0,60}leasing", normalized_full.normalized):
         mechanisms.append("vehicle_lease_cost")
 
-    flat = normalized_full.normalized
+    flat = _fold(normalized_full.normalized)
     payment_types = tuple(value for value in ("saas_access_fee", "interest", "royalty") if (
         (value == "saas_access_fee" and "saas" in flat)
         or (value == "interest" and "odsetk" in flat)

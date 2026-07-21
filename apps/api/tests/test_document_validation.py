@@ -104,6 +104,22 @@ def test_other_wht_transaction_is_context_not_direct_for_saas_eula() -> None:
     assert result.matched_institutions == ("withholding_tax",)
 
 
+def test_incidental_cit_article_26_does_not_label_br_document_as_wht() -> None:
+    card = build_document_card(
+        _candidate(
+            title="Możliwość skorzystania z ulgi badawczo-rozwojowej",
+            text="Dokument dotyczy odliczenia kosztów działalności badawczo-rozwojowej.",
+            provisions=["CIT art. 18d", "CIT art. 26"],
+            domains=("CIT",),
+            document_id="br-incidental-art-26",
+        ),
+        matcher=InstitutionMatcher(),
+    )
+
+    assert "withholding_tax" not in card.detected_institutions
+    assert "research_and_development_relief" in card.detected_mechanisms
+
+
 def test_saas_wht_document_requires_its_own_evidence() -> None:
     card = build_document_card(
         _candidate(
@@ -216,8 +232,8 @@ def test_locked_authority_query_preserves_user_distinguishing_terms() -> None:
 def test_document_card_uses_relevant_sections_and_caches_by_document_content() -> None:
     document = _candidate(
         title="Interpretacja podatkowa",
-        text=(
-            "Pytanie\nCzy płatnik ma pobrać podatek?\n\n"
+            text=(
+                "Pytanie\nCzy płatnik ma pobrać podatek u źródła?\n\n"
             "Ocena stanowiska\nAnalizowane są należności licencyjne.\n\n"
             "Reasumując\nPodatek u źródła wynika z art. 21 CIT."
         ),

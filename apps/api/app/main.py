@@ -137,7 +137,7 @@ load_dotenv()
 validate_required_active_institutions()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.80"
+API_VERSION = "2.0.81"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -975,6 +975,14 @@ def _research_excerpt(value: str, *, limit: int = 1_200) -> str:
 def _render_research_document(document: object) -> str:
     chunk = document.chunk
     assessment = document.assessment
+    document_card = getattr(document, "document_card", None)
+    mechanisms = tuple(getattr(document_card, "detected_mechanisms", ()) or ())
+    mechanism = mechanisms[0] if mechanisms else assessment.document_mechanism
+    evidence = tuple(getattr(document_card, "evidence", ()) or ())
+    evidence_text = "; ".join(
+        f"{item.evidence_type}: {item.value}"
+        for item in evidence[:4]
+    )
     metadata = " · ".join(
         value for value in (str(chunk.published_date or "").strip(), str(chunk.category or "").strip()) if value
     )
@@ -985,8 +993,8 @@ def _render_research_document(document: object) -> str:
         + (f" ({metadata})" if metadata else "")
         + f"\n\n**Tytuł:** {chunk.subject}"
         + f"\n\n**Relacja do pytania:** {assessment.relation}"
-        + f"\n\n**Mechanizm w dokumencie:** {assessment.document_mechanism}"
-        + f"\n\n**Dlaczego:** {assessment.reason}"
+        + f"\n\n**Mechanizm w dokumencie:** {mechanism}"
+        + f"\n\n**Dlaczego:** {evidence_text or assessment.reason}"
         + f"\n\n**Istotne różnice:** {differences}"
         + f"\n\n**Najważniejszy fragment:** {_research_excerpt(chunk.chunk_text)}{source}"
     )
@@ -3647,6 +3655,11 @@ async def chat(
             analysis_trace={
                 "pipeline": "interpretations_july7",
                 "retrieval_only": True,
+                "runtime": legal_runtime_debug(),
+                "api_version": API_VERSION,
+                "pipeline_version": "interpretations_july7_document_card_gate_v1",
+                "git_commit": _git_commit(),
+                "cache_hit": False,
                 "snapshot_commit": JULY7_RETRIEVAL_COMMIT,
                 "snapshot_date": JULY7_RETRIEVAL_DATE,
                 "retrieval_backend": get_july7_interpretation_backend(),

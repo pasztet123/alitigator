@@ -279,6 +279,51 @@ def test_explicit_named_institution_rejects_generic_developer_cost_neighbour(mon
     assert result.institution_filter_rejections == 1
 
 
+def test_july7_wht_snapshot_uses_document_cards_not_question_mechanism(monkeypatch) -> None:
+    question = (
+        "Czy polska spółka musi pobrać podatek u źródła od opłaty za dostęp "
+        "do zagranicznego SaaS, jeżeli umowa to EULA?"
+    )
+    candidates = [
+        make_chunk(
+            document_id="0111-KDIB2-1.4010.117.2026.2.BJ",
+            subject="Podatek u źródła od odsetek i konwersji długu na kapitał",
+            text="Indonezyjski podatek u źródła od odsetek i konwersji długu na kapitał.",
+            legal_provisions=["CIT art. 20"],
+        ),
+        make_chunk(
+            document_id="0115-KDIT1.4011.321.2026.1.MK",
+            subject="Ulga mieszkaniowa",
+            text="Sprzedaż nieruchomości i zwolnienie mieszkaniowe w PIT.",
+            legal_provisions=["PIT art. 21 ust. 1 pkt 131"],
+        ),
+        make_chunk(
+            document_id="0115-KDIT2.4011.79.2026.2.MD",
+            subject="Ulga rehabilitacyjna na samochód",
+            text="Odliczenie wydatków rehabilitacyjnych z tytułu używania samochodu.",
+            legal_provisions=["PIT art. 26 ust. 7a"],
+        ),
+        make_chunk(
+            document_id="WHT-SAAS",
+            subject="Podatek u źródła od opłat za dostęp do oprogramowania SaaS",
+            text="Polski płatnik płaci za dostęp do SaaS zagranicznemu usługodawcy na podstawie EULA.",
+            legal_provisions=["CIT art. 21", "CIT art. 26"],
+        ),
+    ]
+    monkeypatch.setattr(legacy_interpretations.july7_mysql_rag, "is_mysql_rag_configured", lambda: True)
+    monkeypatch.setattr(legacy_interpretations, "_search_historical_mysql", lambda *args, **kwargs: candidates)
+    monkeypatch.setattr(legacy_interpretations, "hydrate_tax_interpretation_documents", lambda chunks: chunks)
+
+    result = legacy_interpretations.search_tax_interpretations_with_trace(question, limit=6)
+
+    assert [item.chunk.document_id for item in result.documents] == ["WHT-SAAS"]
+    validation = {item["signature"]: item for item in result.validation_results}
+    assert validation["0115-KDIT2.4011.79.2026.2.MD"]["relation"] == "irrelevant"
+    assert validation["0115-KDIT2.4011.79.2026.2.MD"]["document_detected_mechanisms"] == ["rehabilitation_relief"]
+    assert validation["0111-KDIB2-1.4010.117.2026.2.BJ"]["relation"] == "context_only"
+    assert validation["WHT-SAAS"]["renderer_mechanism_source"] == "document_card"
+
+
 def test_coverage_ranking_prefers_document_covering_more_query_concepts() -> None:
     query = "Czy faktura wystawiona poza KSeF może być kosztem?"
     generic_invoice = make_chunk(

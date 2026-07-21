@@ -10,10 +10,19 @@ import time
 import unicodedata
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 from app.legal_institutions import InstitutionMatcher
 from app.legal_institutions.schema import InstitutionDefinition
+from app.legal_rag_v2.document_validation import (
+    DOCUMENT_CARD_VERSION,
+    DocumentCard,
+    QuestionCard,
+    build_document_card,
+    build_question_card,
+    evaluate_document_relevance,
+)
 from app.legacy_july7 import rag as july7_rag
 from app.legacy_july7 import mysql_rag as july7_mysql_rag
 from app.tax_research import (
@@ -160,6 +169,7 @@ _candidate_diagnostics: ContextVar[dict[str, int]] = ContextVar(
 class TaxResearchDocument:
     chunk: july7_rag.RagChunk
     assessment: CandidateAssessment
+    document_card: DocumentCard | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -169,6 +179,12 @@ class TaxResearchDocument:
             "published_date": self.chunk.published_date,
             "source_url": self.chunk.source_url,
             **self.assessment.to_dict(),
+            "document_card": self.document_card.to_dict() if self.document_card else {},
+            "document_detected_institutions": list(self.document_card.detected_institutions) if self.document_card else [],
+            "document_detected_mechanisms": list(self.document_card.detected_mechanisms) if self.document_card else [],
+            "document_evidence": [item.__dict__ for item in self.document_card.evidence] if self.document_card else [],
+            "institution_gate_passed": not self.assessment.reject,
+            "renderer_mechanism_source": "document_card" if self.document_card else "legacy_assessment",
         }
 
 
@@ -186,6 +202,7 @@ class TaxResearchSearchResult:
     institution_matches: tuple[dict[str, object], ...] = ()
     locked_institution_ids: tuple[str, ...] = ()
     institution_filter_rejections: int = 0
+    question_card: QuestionCard | None = None
 
     @property
     def chunks(self) -> list[july7_rag.RagChunk]:
@@ -210,6 +227,9 @@ class TaxResearchSearchResult:
                 "locked_institution_ids": list(self.locked_institution_ids),
                 "filter_rejections": self.institution_filter_rejections,
             },
+            "question_card": self.question_card.__dict__ if self.question_card else {},
+            "document_card_extractor_version": DOCUMENT_CARD_VERSION,
+            "cache_hit": False,
             "vector_index_available": False,
         }
 
@@ -834,7 +854,10 @@ def _locked_institution_definitions(
     )
 
 
-def _institution_candidate_queries(definitions: Sequence[InstitutionDefinition]) -> tuple[str, ...]:
+def _institution_candidate_queries(
+    definitions: Sequence[InstitutionDefinition],
+    question: str,
+) -> tuple[str, ...]:
     """Use one selective, canonical FTS channel per explicit institution.
 
     The historical MariaDB adapter expands one FTS request into its own bounded
@@ -844,7 +867,19 @@ def _institution_candidate_queries(definitions: Sequence[InstitutionDefinition])
     considers aliases and verified provisions when judging a fetched document.
     """
 
-    return tuple(dict.fromkeys(definition.canonical_name for definition in definitions))
+    distinctive_terms: list[str] = []
+    for index, token in enumerate(re.findall(r"[0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", question)):
+        if index == 0 or len(token) < 2:
+            continue
+        if token.isupper() or any(character.isupper() for character in token[1:]):
+            if token.casefold() not in {item.casefold() for item in distinctive_terms}:
+                distinctive_terms.append(token)
+        if len(distinctive_terms) >= 6:
+            break
+    return tuple(dict.fromkeys((
+        *(definition.canonical_name for definition in definitions),
+        *( (" ".join(distinctive_terms),) if distinctive_terms else () ),
+    )))
 
 
 def _assess_locked_institution_candidate(
@@ -852,64 +887,83 @@ def _assess_locked_institution_candidate(
     matcher: InstitutionMatcher,
     definitions: Sequence[InstitutionDefinition],
     chunk: july7_rag.RagChunk,
-) -> CandidateAssessment:
-    """Accept only documents carrying an explicit marker of a locked institution."""
+    question_card: QuestionCard,
+) -> tuple[CandidateAssessment, DocumentCard]:
+    """Classify a July-7 document through the shared independent card gate.
 
-    for definition in definitions:
-        markers = matcher.document_markers(
-            definition,
-            text=chunk.chunk_text,
-            metadata={
-                "subject": chunk.subject,
-                "legal_provisions": chunk.legal_provisions,
-            },
-        )
-        if markers:
-            # A named phrase in the editorial subject is materially stronger
-            # than an incidental mention in the legal reasoning of a long,
-            # multi-relief interpretation.  Both remain eligible, but the
-            # former must be shown first.
-            subject_markers = matcher.document_markers(
-                definition,
-                text=chunk.subject,
-            )
-            provision_markers = matcher.document_markers(
-                definition,
-                text="",
-                metadata={"legal_provisions": chunk.legal_provisions},
-            )
-            if subject_markers:
-                score = 100.0
-                relation = "direct"
-            elif provision_markers:
-                score = 85.0
-                relation = "direct"
-            else:
-                score = 70.0
-                relation = "strong_analogy"
-            return CandidateAssessment(
-                relation=relation,
-                reject=False,
-                reason="Zgodność z rozpoznaną instytucją prawa podatkowego.",
-                document_mechanism=definition.institution_id,
-                material_differences=(),
-                score=score,
-                components={
-                    "named_institution_marker": float(len(markers)),
-                    "named_institution_subject_marker": float(len(subject_markers)),
-                    "named_institution_provision_marker": float(len(provision_markers)),
-                    "named_institution_gate": 1.0,
-                },
-            )
-    return CandidateAssessment(
-        relation="different_mechanism",
-        reject=True,
-        reason="Brak markera rozpoznanej instytucji prawa podatkowego.",
-        document_mechanism="unknown",
-        material_differences=("missing_locked_institution_markers",),
-        score=0.0,
-        components={"named_institution_gate": 0.0},
+    The historical snapshot remains only a retrieval source.  It must not
+    assign the question institution to a candidate merely because a query was
+    locked: both the mechanism and the renderer evidence come from this
+    document's own title, hydrated text and metadata.
+    """
+
+    candidate = SimpleNamespace(
+        candidate_id=chunk.chunk_id,
+        document_id=chunk.document_id,
+        text=chunk.chunk_text,
+        metadata={
+            "signature": chunk.signature,
+            "subject": chunk.subject,
+            "tax_domains": [getattr(chunk, "tax_domain", "")],
+            "legal_provisions": list(chunk.legal_provisions),
+        },
     )
+    document_card = build_document_card(candidate, matcher=matcher)
+    validation = evaluate_document_relevance(question_card, document_card)
+    evidence = document_card.evidence_for(next(iter(validation.matched_institutions), ""))
+    evidence_summary = "; ".join(
+        f"{item.evidence_type}:{item.value}"
+        for item in evidence[:4]
+    )
+    differences = tuple(
+        key for key, matched in (validation.axes or {}).items() if not matched
+    )
+    score = {
+        "direct": 100.0,
+        "strong_analogy": 70.0,
+        "context_only": 30.0,
+        "different_mechanism": 10.0,
+        "irrelevant": 0.0,
+    }.get(validation.relation, 0.0)
+    return CandidateAssessment(
+        relation=validation.relation,
+        reject=validation.reject,
+        reason=(
+            f"Dowody dokumentowe: {evidence_summary}."
+            if evidence_summary
+            else validation.reason
+        ),
+        document_mechanism=next(iter(document_card.detected_mechanisms), "unknown"),
+        material_differences=differences or (validation.reason,),
+        score=score,
+        components={
+            "named_institution_gate": 1.0 if validation.passed else 0.0,
+            **{key: float(value) for key, value in (validation.axes or {}).items()},
+        },
+    ), document_card
+
+
+def _locked_question_card(
+    query: str,
+    definitions: Sequence[InstitutionDefinition],
+) -> QuestionCard:
+    """Construct a question card without allowing it to classify a document."""
+
+    domains = list(dict.fromkeys(
+        domain for definition in definitions for domain in definition.tax_domains
+    ))
+    hints = list(dict.fromkeys(
+        hint for definition in definitions for hint in definition.provision_hints
+    ))
+    issue = SimpleNamespace(
+        issue_id="interpretations_july7",
+        tax_domains=domains,
+        locked_institution_ids=[definition.institution_id for definition in definitions],
+        legal_mechanism=(definitions[0].institution_id if definitions else "general_tax_analysis"),
+        possible_provision_concepts=hints,
+        negative_fact_constraints=[],
+    )
+    return build_question_card(question=query, issue=issue)
 
 
 def _generic_candidate_score(
@@ -956,6 +1010,7 @@ def _rank_historical_candidates(
     limit: int,
     institution_matcher: InstitutionMatcher | None = None,
     locked_definitions: Sequence[InstitutionDefinition] = (),
+    question_card: QuestionCard | None = None,
 ) -> list[july7_rag.RagChunk]:
     """Rank a document-diverse candidate pool on a bounded 0--100 scale."""
     if not rows:
@@ -967,10 +1022,11 @@ def _rank_historical_candidates(
         if chunk.source_type != "interpretation":
             continue
         if institution_matcher and locked_definitions:
-            assessment = _assess_locked_institution_candidate(
+            assessment, _ = _assess_locked_institution_candidate(
                 matcher=institution_matcher,
                 definitions=locked_definitions,
                 chunk=chunk,
+                question_card=question_card or _locked_question_card(query, locked_definitions),
             )
         else:
             assessment = score_candidate_row(row, question=query, understanding=understanding)
@@ -1023,6 +1079,7 @@ def _search_historical_sqlite(
     supplemental_queries: Sequence[str] = (),
     institution_matcher: InstitutionMatcher | None = None,
     locked_definitions: Sequence[InstitutionDefinition] = (),
+    question_card: QuestionCard | None = None,
 ) -> list[july7_rag.RagChunk]:
     """Run generic candidate retrieval and ranking against the SQLite snapshot."""
     rows: list[sqlite3.Row] = []
@@ -1048,6 +1105,7 @@ def _search_historical_sqlite(
         limit=limit,
         institution_matcher=institution_matcher,
         locked_definitions=locked_definitions,
+        question_card=question_card,
     )
 
 
@@ -1058,6 +1116,7 @@ def _search_historical_mysql(
     supplemental_queries: Sequence[str] = (),
     institution_matcher: InstitutionMatcher | None = None,
     locked_definitions: Sequence[InstitutionDefinition] = (),
+    question_card: QuestionCard | None = None,
 ) -> list[july7_rag.RagChunk]:
     """Run generic candidate retrieval and ranking against the MariaDB corpus."""
     fts_rows: list[object] = []
@@ -1130,6 +1189,7 @@ def _search_historical_mysql(
         limit=limit,
         institution_matcher=institution_matcher,
         locked_definitions=locked_definitions,
+        question_card=question_card,
     )
 
 
@@ -1160,7 +1220,8 @@ def search_tax_interpretations_with_trace(
     candidate_limit = min(candidate_limit, 160)
     understanding = understand_tax_research_question(query)
     institution_matcher, institution_matches, locked_definitions = _locked_institution_definitions(query)
-    supplemental_queries = _institution_candidate_queries(locked_definitions)
+    question_card = _locked_question_card(query, locked_definitions)
+    supplemental_queries = _institution_candidate_queries(locked_definitions, query)
     diagnostics_token = _candidate_diagnostics.set({})
     active_query_token = _active_user_query.set(query)
     try:
@@ -1172,6 +1233,7 @@ def search_tax_interpretations_with_trace(
                     supplemental_queries=supplemental_queries,
                     institution_matcher=institution_matcher,
                     locked_definitions=locked_definitions,
+                    question_card=question_card,
                 )
             else:
                 chunks = _search_historical_mysql(query, limit=candidate_limit)
@@ -1183,6 +1245,7 @@ def search_tax_interpretations_with_trace(
                     supplemental_queries=supplemental_queries,
                     institution_matcher=institution_matcher,
                     locked_definitions=locked_definitions,
+                    question_card=question_card,
                 )
             else:
                 chunks = _search_historical_sqlite(query, limit=candidate_limit)
@@ -1198,21 +1261,22 @@ def search_tax_interpretations_with_trace(
     hydrated_documents = hydrate_tax_interpretation_documents(validation_candidates)
     classified: list[TaxResearchDocument] = []
     for chunk in hydrated_documents:
-        assessment = (
-            _assess_locked_institution_candidate(
+        if locked_definitions:
+            assessment, document_card = _assess_locked_institution_candidate(
                 matcher=institution_matcher,
                 definitions=locked_definitions,
                 chunk=chunk,
+                question_card=question_card,
             )
-            if locked_definitions
-            else assess_candidate(
+        else:
+            assessment = assess_candidate(
                 understanding,
                 subject=chunk.subject,
                 text=chunk.chunk_text,
                 provisions=chunk.legal_provisions,
             )
-        )
-        classified.append(TaxResearchDocument(replace(chunk, score=assessment.score), assessment))
+            document_card = None
+        classified.append(TaxResearchDocument(replace(chunk, score=assessment.score), assessment, document_card))
     classified.sort(key=lambda item: (item.assessment.score, item.chunk.document_id), reverse=True)
     main = [item for item in classified if not item.assessment.reject and item.assessment.relation in {"direct", "strong_analogy"}]
     context = [item for item in classified if not item.assessment.reject and item.assessment.relation == "context_only"]
@@ -1273,6 +1337,7 @@ def search_tax_interpretations_with_trace(
         institution_matches=institution_matches,
         locked_institution_ids=tuple(item.institution_id for item in locked_definitions),
         institution_filter_rejections=sum(item.assessment.reject for item in classified) if locked_definitions else 0,
+        question_card=question_card,
     )
 
 

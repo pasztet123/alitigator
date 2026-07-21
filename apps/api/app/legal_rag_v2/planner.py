@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -34,7 +35,7 @@ from .schemas import (
 )
 
 
-PLANNER_PROMPT_VERSION = "legal_query_planner_v2_2"
+PLANNER_PROMPT_VERSION = "legal_query_planner_v2_3"
 DEFAULT_PLANNER_MODEL = "gpt-5.6-terra"
 
 
@@ -65,6 +66,12 @@ Ask at most three clarification questions. Ask only when an absent fact can
 change the legal result, materially change retrieval, or distinguish two close
 legal mechanisms. Otherwise continue with the fact marked missing. Confidence
 measures confidence in this research plan, not confidence in a legal answer.
+
+The input may contain deterministic named-institution locks. They come from a
+versioned dictionary before this model call. Treat them as mandatory retrieval
+constraints: do not replace them with a broad mechanism or remove them. Keep
+any independent model hypothesis in `model_inferred_institutions`; a lock is a
+retrieval signal, never a legal conclusion.
 """
 
 ISSUE_LOCATOR_SYSTEM_PROMPT = """\
@@ -530,6 +537,7 @@ class LegalQueryPlanner:
         target_date: Optional[str] = None,
         candidate_recall: Optional[float] = None,
         force_fallback: bool = False,
+        locked_institutions: Optional[list[dict[str, object]]] = None,
     ) -> PlannerOutcome:
         if not question or not question.strip():
             raise ValueError("question cannot be empty")
@@ -544,7 +552,7 @@ class LegalQueryPlanner:
         try:
             generated = await self.gateway.generate_structured(
                 response_model=LegalResearchPlan,
-                input=self._planner_input(question, target_date),
+                input=self._planner_input(question, target_date, locked_institutions),
                 system_prompt=PLANNER_SYSTEM_PROMPT,
                 model=self.model,
                 reasoning_effort=self.reasoning_effort,
@@ -709,13 +717,19 @@ class LegalQueryPlanner:
         )
 
     @staticmethod
-    def _planner_input(question: str, target_date: Optional[str]) -> str:
+    def _planner_input(
+        question: str,
+        target_date: Optional[str],
+        locked_institutions: Optional[list[dict[str, object]]] = None,
+    ) -> str:
         target = target_date or "not supplied; derive only when explicitly stated"
+        locks = json.dumps(locked_institutions or [], ensure_ascii=False, sort_keys=True)
         return (
             f"Prompt version: {PLANNER_PROMPT_VERSION}\n"
             f"Authoritative target date: {target}\n"
             "The source_span offsets refer only to the exact text between "
             "<user_question> tags, excluding the tags.\n"
+            f"<deterministic_institution_locks>{locks}</deterministic_institution_locks>\n"
             f"<user_question>{question}</user_question>"
         )
 

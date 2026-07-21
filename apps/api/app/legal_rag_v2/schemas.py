@@ -127,6 +127,13 @@ QueryFamilyName = Literal[
     "explicit_provision",
     "authority_backreference",
     "quoted_holding_language",
+    # Deterministic named-institution channels are intentionally distinct from
+    # model-created families so traces can prove the source of every query.
+    "named_institution_canonical",
+    "named_institution_alias",
+    "named_institution_provision",
+    "named_institution_statutory",
+    "named_institution_concept",
 ]
 
 
@@ -134,7 +141,7 @@ class QueryFamily(V2Schema):
     family: QueryFamilyName
     query: NonEmptyStr
     lane: Literal["primary_law", "authority", "both"] = "both"
-    origin: Literal["model", "user", "fallback"] = "model"
+    origin: Literal["model", "user", "fallback", "deterministic"] = "model"
 
 
 class MissingPrimaryRequest(V2Schema):
@@ -182,6 +189,11 @@ class LegalIssue(V2Schema):
         default_factory=lambda: ["statute", "interpretation", "judgment"]
     )
     query_families: list[QueryFamily] = Field(default_factory=list)
+    # Populated only by the deterministic named-institution merger after the
+    # model has produced its plan.  They remain separate from the planner's
+    # own hypotheses and are immutable retrieval constraints for this run.
+    locked_institution_ids: list[NonEmptyStr] = Field(default_factory=list)
+    model_inferred_institution_ids: list[NonEmptyStr] = Field(default_factory=list)
     priority: Literal["high", "medium", "low"] = "medium"
 
 
@@ -200,6 +212,33 @@ class Clarification(V2Schema):
         return self
 
 
+class DeterministicInstitutionLock(V2Schema):
+    institution_id: NonEmptyStr
+    canonical_name: NonEmptyStr
+    confidence: float = Field(ge=0.0, le=1.0)
+    match_type: Literal[
+        "exact_phrase",
+        "lemma_phrase",
+        "safe_regex",
+        "abbreviation",
+        "colloquial_alias",
+        "contextual_inference",
+    ]
+    matched_text: str = ""
+    tax_domains: list[NonEmptyStr] = Field(default_factory=list)
+    provision_hints: list[NonEmptyStr] = Field(default_factory=list)
+    material_concepts: list[NonEmptyStr] = Field(default_factory=list)
+    source_preferences: list[NonEmptyStr] = Field(default_factory=list)
+
+
+class InstitutionPlannerConflict(V2Schema):
+    institution_id: NonEmptyStr
+    model_mechanism: str = ""
+    model_inferred_institution_ids: list[str] = Field(default_factory=list)
+    reason: NonEmptyStr
+    resolution: Literal["keep_deterministic"] = "keep_deterministic"
+
+
 class LegalResearchPlan(V2Schema):
     """Planner output.  It intentionally has no legal answer or conclusion."""
 
@@ -209,6 +248,10 @@ class LegalResearchPlan(V2Schema):
     facts: list[Fact] = Field(default_factory=list)
     missing_facts: list[MissingFact] = Field(default_factory=list)
     issues: list[LegalIssue] = Field(min_length=1)
+    deterministic_institutions: list[DeterministicInstitutionLock] = Field(default_factory=list)
+    model_inferred_institutions: list[NonEmptyStr] = Field(default_factory=list)
+    institution_conflicts: list[InstitutionPlannerConflict] = Field(default_factory=list)
+    institution_dictionary_version: str = ""
     clarification: Clarification = Field(default_factory=Clarification)
     should_ask_clarification: bool = False
     clarification_questions: list[str] = Field(default_factory=list, max_length=3)

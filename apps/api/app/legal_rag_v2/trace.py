@@ -29,6 +29,11 @@ REQUIRED_ARTIFACTS: tuple[str, ...] = (
     "clarification.json",
     "fallback_trace.json",
     "planner_fallback.json",
+    "institution_matches.json",
+    "institution_planner_conflicts.json",
+    "institution_final_locks.json",
+    "institution_queries.json",
+    "institution_filter_rejections.json",
     "primary_queries.json",
     "primary_candidates.json",
     "authority_queries.json",
@@ -184,6 +189,10 @@ class TraceWriter:
         """Create parseable placeholders for all stages not written yet."""
 
         list_artifacts = {
+            "institution_planner_conflicts.json",
+            "institution_final_locks.json",
+            "institution_queries.json",
+            "institution_filter_rejections.json",
             "primary_queries.json",
             "primary_candidates.json",
             "authority_queries.json",

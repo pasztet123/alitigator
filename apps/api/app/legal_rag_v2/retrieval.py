@@ -22,6 +22,7 @@ from app.tax_research import (
     assess_candidate,
     research_understanding_from_fields,
 )
+from app.legal_institutions import InstitutionMatcher
 
 
 PRIMARY_SOURCE_TYPES = frozenset({"statute", "regulation", "tax_treaty"})
@@ -212,6 +213,9 @@ class RetrievalConfig:
 class TransparentLegalReranker:
     """Auditable metadata/fact reranker; every score has named components."""
 
+    def __init__(self, institution_matcher: InstitutionMatcher | None = None) -> None:
+        self.institution_matcher = institution_matcher or InstitutionMatcher()
+
     def score(
         self,
         issue: LegalIssue,
@@ -241,6 +245,14 @@ class TransparentLegalReranker:
                 provisions=[str(value) for value in raw_provisions],
                 tax_domain=(str((candidate.metadata.get("tax_domains") or [""])[0]) if candidate.metadata.get("tax_domains") else ""),
             )
+        locked_marker_ids: list[str] = []
+        for definition in self.institution_matcher.definitions_for(issue.locked_institution_ids):
+            if self.institution_matcher.document_markers(
+                definition,
+                text=candidate.text,
+                metadata=candidate.metadata,
+            ):
+                locked_marker_ids.append(definition.institution_id)
         components: dict[str, float] = {
             "fusion": max(0.0, candidate.score),
             "source_type": 1.0
@@ -269,6 +281,10 @@ class TransparentLegalReranker:
             "research_mechanism": (assessment.components["mechanism_match"] / 25.0) if assessment else 0.0,
             "research_transaction": (assessment.components["expense_or_transaction_match"] / 18.0) if assessment else 0.0,
             "research_wrong_neighbor": -1.0 if assessment and assessment.reject else 0.0,
+            # A named-institution marker is evidence that a document retrieved
+            # by a deterministic channel actually concerns that institution.
+            # It is a material ranking signal, not a stand-alone conclusion.
+            "locked_institution_marker": 1.0 if locked_marker_ids else 0.0,
         }
         negative_hits = [
             value for value in issue.negative_fact_constraints if _phrase_present(value, text)
@@ -291,6 +307,7 @@ class TransparentLegalReranker:
             "research_mechanism": 3.4,
             "research_transaction": 2.4,
             "research_wrong_neighbor": 8.0,
+            "locked_institution_marker": 7.5,
         }
         final_score = sum(components[name] * weights[name] for name in components)
         positive = [
@@ -306,6 +323,7 @@ class TransparentLegalReranker:
             negative.append(f"wrong_legal_mechanism:{assessment.document_mechanism}")
         if assessment and assessment.relation in {"direct", "strong_analogy"}:
             positive.append(f"research_relation:{assessment.relation}")
+        positive.extend(f"locked_institution_marker:{item}" for item in locked_marker_ids)
         return RerankScore(
             final_score=final_score,
             component_scores=components,
@@ -515,11 +533,13 @@ class _BaseLane:
         provision_graph: Optional[ProvisionGraph] = None,
         reranker: Optional[TransparentLegalReranker] = None,
         config: Optional[RetrievalConfig] = None,
+        institution_matcher: InstitutionMatcher | None = None,
     ) -> None:
         self.backend = backend
         self.embedding_index = embedding_index
         self.provision_graph = provision_graph
-        self.reranker = reranker or TransparentLegalReranker()
+        self.institution_matcher = institution_matcher or InstitutionMatcher()
+        self.reranker = reranker or TransparentLegalReranker(self.institution_matcher)
         self.config = config or RetrievalConfig()
 
     def _source_type_groups(self, issue: LegalIssue) -> tuple[frozenset[str], ...]:
@@ -711,7 +731,7 @@ class _BaseLane:
             or issue.payments
             or issue.positive_fact_constraints
             or issue.possible_provision_concepts
-        ):
+        ) and not issue.locked_institution_ids:
             unfiltered_count = len(reranked)
 
             def materially_relevant(candidate: RetrievalCandidate) -> bool:
@@ -747,6 +767,43 @@ class _BaseLane:
                     "candidate_count_after": len(reranked),
                 }
             )
+        if self.lane_name == "authority" and issue.locked_institution_ids:
+            # A candidate without any canonical, alias, provision, statutory
+            # or material-concept marker cannot be presented as a direct
+            # authority for an active deterministic institution.  Keeping it
+            # would recreate the broad-neighbour failure this dictionary is
+            # designed to prevent.
+            locked_definitions = self.institution_matcher.definitions_for(
+                issue.locked_institution_ids
+            )
+            retained: list[RetrievalCandidate] = []
+            for candidate in reranked:
+                matched = {
+                    definition.institution_id: self.institution_matcher.document_markers(
+                        definition,
+                        text=candidate.text,
+                        metadata=candidate.metadata,
+                    )
+                    for definition in locked_definitions
+                }
+                matched = {key: value for key, value in matched.items() if value}
+                if matched:
+                    retained.append(candidate)
+                    continue
+                trace.append(
+                    {
+                        "event": "institution_filter_rejection",
+                        "lane": self.lane_name,
+                        "candidate_signature": {
+                            "candidate_id": candidate.candidate_id,
+                            "document_id": candidate.document_id,
+                            "chunk_id": candidate.chunk_id,
+                        },
+                        "reason": "missing_locked_institution_markers",
+                        "institution_ids": list(issue.locked_institution_ids),
+                    }
+                )
+            reranked = retained
         if self.lane_name == "authority":
             before_document_diversity = len(reranked)
             reranked = _authority_document_diverse_candidates(reranked)
@@ -839,6 +896,7 @@ class LegalRetriever:
         config: Optional[RetrievalConfig] = None,
         primary_enabled: bool = True,
         authority_enabled: bool = True,
+        institution_matcher: InstitutionMatcher | None = None,
     ) -> None:
         self.primary_enabled = primary_enabled
         self.authority_enabled = authority_enabled
@@ -847,6 +905,7 @@ class LegalRetriever:
             "provision_graph": provision_graph,
             "reranker": reranker,
             "config": config,
+            "institution_matcher": institution_matcher,
         }
         self.primary_lane = PrimaryLawLane(backend, **common)
         self.authority_lane = AuthorityLane(backend, **common)
@@ -1435,6 +1494,11 @@ def reciprocal_rank_fusion(
     ranks: dict[str, dict[str, int]] = {}
     families: dict[str, set[str]] = {}
     for channel, family, raw_items in ranked_lists:
+        # Deterministic institution channels are additional recall, never a
+        # replacement for the model/user families.  A bounded RRF multiplier
+        # gives the explicit canonical/alias/provision evidence priority over
+        # broad lexical neighbours once both have been retrieved.
+        channel_weight = 2.5 if family.startswith("named_institution_") else 1.0
         seen_in_list: set[str] = set()
         for rank, raw in enumerate(raw_items, start=1):
             item = _coerce_candidate(raw, backend=channel, rank=rank)
@@ -1442,7 +1506,7 @@ def reciprocal_rank_fusion(
                 continue
             seen_in_list.add(item.candidate_id)
             candidates.setdefault(item.candidate_id, item)
-            scores[item.candidate_id] = scores.get(item.candidate_id, 0.0) + 1.0 / (
+            scores[item.candidate_id] = scores.get(item.candidate_id, 0.0) + channel_weight / (
                 rrf_k + rank
             )
             channel_key = f"{channel}:{family}"

@@ -27,6 +27,7 @@ from app.model_gateway import (
     create_model_gateway,
     get_model_gateway_config,
 )
+from app.legal_institutions import InstitutionMatcher, merge_locked_institutions
 
 from .backends import CorpusFtsBackend
 from .embeddings import (
@@ -77,7 +78,7 @@ from .wht import WhtPayAndRefundCalculationEngine, enrich_crossborder_wht_plan
 from app.tax_research import understand_tax_research_question
 
 
-PIPELINE_VERSION = "legal_rag_v2_2"
+PIPELINE_VERSION = "legal_rag_v2_3"
 SYNTHESIS_PROMPT_VERSION = "legal_claim_synthesis_v1"
 ANSWER_PROMPT_VERSION = "legal_answer_writer_v1"
 PRIMARY_GAP_ASSESSMENT_PROMPT_VERSION = "primary_law_gap_assessment_v1"
@@ -442,6 +443,7 @@ class LegalRagV2Pipeline:
         calculation_engine: Optional[CalculationEngine] = None,
         config: Optional[LegalRagV2Config] = None,
         trace_factory: Optional[Callable[[str], TraceWriter]] = None,
+        institution_matcher: Optional[InstitutionMatcher] = None,
     ) -> None:
         self.gateway = gateway
         self.planner = planner
@@ -449,6 +451,7 @@ class LegalRagV2Pipeline:
         self.authority_extractor = authority_extractor
         self.calculation_engine = calculation_engine or WhtPayAndRefundCalculationEngine()
         self.config = config or LegalRagV2Config.from_env()
+        self.institution_matcher = institution_matcher or InstitutionMatcher()
         self.trace_factory = trace_factory or (
             lambda run_id: TraceWriter(run_id, root=self.config.artifact_root)
         )
@@ -614,7 +617,7 @@ class LegalRagV2Pipeline:
                 "provider": get_model_gateway_config().provider,
                 "model": self.config.answer_writer_model,
                 "git_commit": _git_commit(),
-                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.0"),
+                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.76"),
                 "controlled_pipeline_used": False,
                 "fallbacks_used": [],
                 **vector_index_runtime_status(),
@@ -641,19 +644,83 @@ class LegalRagV2Pipeline:
             },
         )
 
+        # This runs before any planner call.  The model sees the locked
+        # vocabulary as a retrieval constraint but cannot create or remove a
+        # deterministic lock itself.
+        institution_matches = self.institution_matcher.match(question)
+        locked_institutions = [
+            {
+                "institution_id": item.institution_id,
+                "canonical_name": item.canonical_name,
+                "tax_domains": list(item.tax_domains),
+                "provision_hints": list(item.provision_hints),
+                "match_type": item.match_type,
+                "confidence": item.confidence,
+            }
+            for item in institution_matches.matches
+            if item.locked
+        ]
+        trace.write_json(
+            "institution_matches.json",
+            {
+                "dictionary_version": institution_matches.dictionary_version,
+                "original_question": institution_matches.original_question,
+                "normalized_question": institution_matches.normalized_question,
+                "tokens": list(institution_matches.tokens),
+                "matches": [
+                    {
+                        "institution_id": item.institution_id,
+                        "canonical_name": item.canonical_name,
+                        "confidence": item.confidence,
+                        "match_type": item.match_type,
+                        "matched_text": item.matched_text,
+                        "tax_domains": list(item.tax_domains),
+                        "locked": item.locked,
+                        "status": item.status,
+                        "context_satisfied": item.context_satisfied,
+                        "negative_context_hit": item.negative_context_hit,
+                    }
+                    for item in institution_matches.matches
+                ],
+            },
+        )
+
         stage = time.monotonic()
         planner_outcome = await self.planner.plan(
             question,
             target_date=target_date,
             force_fallback=force_planner_fallback,
+            locked_institutions=locked_institutions,
         )
         timings["planner"] = _elapsed_ms(stage)
-        plan = _enrich_research_plan(planner_outcome.plan, question)
+        plan = merge_locked_institutions(
+            _enrich_research_plan(planner_outcome.plan, question),
+            institution_matches,
+            dictionary=self.institution_matcher.dictionary,
+        )
         trace.write_json("legal_research_plan.json", plan)
         trace.write_json("research_plan.json", plan)
         trace.write_json("clarification.json", plan.clarification)
         trace.write_json("fallback_trace.json", planner_outcome.fallback_trace)
         trace.write_json("planner_fallback.json", planner_outcome.fallback_trace)
+        trace.write_json("institution_planner_conflicts.json", plan.institution_conflicts)
+        trace.write_json("institution_final_locks.json", plan.deterministic_institutions)
+        trace.write_json(
+            "institution_queries.json",
+            [
+                {
+                    "issue_id": issue.issue_id,
+                    "institution_ids": issue.locked_institution_ids,
+                    "queries": [
+                        family.model_dump(mode="json")
+                        for family in issue.query_families
+                        if family.origin == "deterministic"
+                    ],
+                }
+                for issue in plan.issues
+                if issue.locked_institution_ids
+            ],
+        )
         trace.write_json(
             "runtime.json",
             {
@@ -673,7 +740,7 @@ class LegalRagV2Pipeline:
                 "provider": get_model_gateway_config().provider,
                 "model": self.config.answer_writer_model,
                 "git_commit": _git_commit(),
-                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.0"),
+                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.76"),
                 "controlled_pipeline_used": False,
                 "fallbacks_used": ([planner_outcome.fallback_trace.fallback_reason] if planner_outcome.fallback_trace.fallback_used else []),
                 **vector_index_runtime_status(),
@@ -692,10 +759,16 @@ class LegalRagV2Pipeline:
             )
             if augmented.fallback_trace.fallback_used:
                 planner_outcome = augmented
-                plan = _enrich_research_plan(augmented.plan, question)
+                plan = merge_locked_institutions(
+                    _enrich_research_plan(augmented.plan, question),
+                    institution_matches,
+                    dictionary=self.institution_matcher.dictionary,
+                )
                 trace.write_json("legal_research_plan.json", plan)
                 trace.write_json("fallback_trace.json", augmented.fallback_trace)
                 trace.write_json("planner_fallback.json", augmented.fallback_trace)
+                trace.write_json("institution_planner_conflicts.json", plan.institution_conflicts)
+                trace.write_json("institution_final_locks.json", plan.deterministic_institutions)
                 retrieval = await self.retriever.retrieve(plan)
                 trace.write_json(
                     "runtime.json",
@@ -716,7 +789,7 @@ class LegalRagV2Pipeline:
                         "provider": get_model_gateway_config().provider,
                         "model": self.config.answer_writer_model,
                         "git_commit": _git_commit(),
-                        "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.0"),
+                        "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.76"),
                         "controlled_pipeline_used": False,
                         "fallbacks_used": [augmented.fallback_trace.fallback_reason],
                         **vector_index_runtime_status(),
@@ -738,6 +811,14 @@ class LegalRagV2Pipeline:
         timings["primary_gap_recovery"] = _elapsed_ms(primary_gap_started)
         timings["retrieval"] = _elapsed_ms(stage)
         self._write_retrieval_trace(trace, retrieval)
+        trace.write_json(
+            "institution_filter_rejections.json",
+            [
+                event
+                for event in retrieval.trace
+                if event.get("event") == "institution_filter_rejection"
+            ],
+        )
         trace.write_json(
             "backreferences.json",
             [item for item in retrieval.trace if "backreference" in str(item.get("event", "")) or "primary_to_authority" in str(item.get("event", ""))],
@@ -1570,6 +1651,7 @@ def create_default_pipeline(
 ) -> LegalRagV2Pipeline:
     config = config or LegalRagV2Config.from_env()
     gateway = gateway or create_model_gateway()
+    institution_matcher = InstitutionMatcher()
     planner = LegalQueryPlanner(
         gateway,
         model=config.planner_model,
@@ -1586,6 +1668,7 @@ def create_default_pipeline(
             ),
             require_vector_index=config.require_real_embeddings,
         ),
+        institution_matcher=institution_matcher,
     )
     authority_extractor: Optional[AuthorityExtractor] = None
     try:
@@ -1609,6 +1692,7 @@ def create_default_pipeline(
         retriever=retriever,
         authority_extractor=authority_extractor,
         config=config,
+        institution_matcher=institution_matcher,
     )
 
 

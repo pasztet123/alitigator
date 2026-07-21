@@ -188,6 +188,28 @@ class LegalRagV2RoutingTests(unittest.IsolatedAsyncioTestCase):
                             "provision_hints": ["PIT art. 26ha", "CIT art. 18ee"],
                         },
                         "institution_gate_results": [],
+                        "candidates_before_gate": [
+                            {
+                                "signature": "REHAB-1",
+                                "relation": "irrelevant",
+                                "reject": True,
+                                "document_card": {
+                                    "detected_institutions": [],
+                                    "detected_mechanisms": ["rehabilitation_relief"],
+                                },
+                            }
+                        ],
+                        "candidates_after_gate": [
+                            {
+                                "signature": "WHT-SAAS-1",
+                                "relation": "direct",
+                                "institution_gate_passed": True,
+                                "document_card": {
+                                    "detected_institutions": ["withholding_tax"],
+                                    "detected_mechanisms": ["withholding_tax"],
+                                },
+                            }
+                        ],
                         "final_results": [],
                     },
                 })
@@ -214,6 +236,10 @@ class LegalRagV2RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("csr_sponsorship_relief", trace["locked_institutions_after_merge"])
         self.assertIn("csr_sponsorship_relief", trace["authority_search_input"]["mechanisms"])
         self.assertIn("PIT art. 26ha", trace["authority_search_input"]["provision_hints"])
+        rejected = trace["candidates_before_gate"][0]
+        self.assertTrue(rejected["reject"])
+        self.assertNotIn("withholding_tax", rejected["document_card"]["detected_mechanisms"])
+        self.assertEqual("direct", trace["candidates_after_gate"][0]["relation"])
 
     async def test_recovered_claim_validation_is_served_without_a_trace_id(self) -> None:
         pipeline = FakePipeline(

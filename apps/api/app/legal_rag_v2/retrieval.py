@@ -23,6 +23,7 @@ from app.tax_research import (
     research_understanding_from_fields,
 )
 from app.legal_institutions import InstitutionMatcher
+from .document_validation import build_document_card, build_question_card, evaluate_document_relevance
 
 
 PRIMARY_SOURCE_TYPES = frozenset({"statute", "regulation", "tax_treaty"})
@@ -595,16 +596,17 @@ class _BaseLane:
         preloaded_lexical: dict[tuple[int, int], list[RetrievalCandidate]] = {}
         if named_authority_lookup:
             # Deterministic channels are independent (canonical name, aliases,
-            # provision hints and statutory wording).  Running them serially
-            # makes one named-institution question wait for every MariaDB FTS
-            # round-trip.  Keep the fan-out bounded by the small dictionary
-            # family and issue source groups, but execute it concurrently.
+            # provision hints and statutory wording).  Keep their fan-out
+            # bounded. MariaDB FULLTEXT requests use separate connections,
+            # but concurrent searches against the same corpus were observed
+            # to lose the high-specificity result under load; execute this
+            # small lookup serially and deterministically.
             requests = [
                 (family_index, group_index, family, source_group)
                 for family_index, family in enumerate(families)
                 for group_index, source_group in enumerate(source_type_groups)
             ]
-            semaphore = asyncio.Semaphore(3)
+            semaphore = asyncio.Semaphore(1)
 
             async def bounded_lookup(family: QueryFamily, source_group: frozenset[str]) -> list[RetrievalCandidate]:
                 async with semaphore:
@@ -622,13 +624,14 @@ class _BaseLane:
                                        else {}),
                                 },
                             ),
-                            timeout=4.5,
+                            timeout=9.0,
                         )
                     except asyncio.TimeoutError:
                         # One sparse provision channel must not consume the
-                        # whole interactive request.  The remaining canonical,
-                        # alias and provision channels are still fused and the
-                        # timeout is observable as a zero-result channel.
+                        # whole interactive request.  The bounded lookup is
+                        # given enough time for the remote MariaDB FTS round
+                        # trip, while a true timeout remains observable as a
+                        # zero-result channel.
                         return []
 
             responses = await asyncio.gather(
@@ -819,27 +822,28 @@ class _BaseLane:
                 }
             )
         if self.lane_name == "authority" and issue.locked_institution_ids:
-            # A candidate without any canonical, alias, provision, statutory
-            # or material-concept marker cannot be presented as a direct
-            # authority for an active deterministic institution.  Keeping it
-            # would recreate the broad-neighbour failure this dictionary is
-            # designed to prevent.
-            locked_definitions = self.institution_matcher.definitions_for(
-                issue.locked_institution_ids
-            )
+            # The candidate is classified independently from the question.
+            # In particular, the question's WHT/SaaS plan must never label a
+            # housing or rehabilitation interpretation as a WHT authority.
+            question_card = build_question_card(question=plan.user_query, issue=issue)
             retained: list[RetrievalCandidate] = []
             for candidate in reranked:
-                matched = {
-                    definition.institution_id: self.institution_matcher.document_markers(
-                        definition,
-                        text=candidate.text,
-                        metadata=candidate.metadata,
-                    )
-                    for definition in locked_definitions
-                }
-                matched = {key: value for key, value in matched.items() if value}
-                if matched:
-                    retained.append(candidate)
+                document_card = build_document_card(candidate, matcher=self.institution_matcher)
+                validation = evaluate_document_relevance(question_card, document_card)
+                if validation.passed:
+                    retained.append(replace(
+                        candidate,
+                        metadata={
+                            **dict(candidate.metadata),
+                            "document_card": document_card.to_dict(),
+                            "document_validation": {
+                                "institution_gate_passed": validation.passed,
+                                "relation": validation.relation,
+                                "rejection_reason": validation.reason,
+                                "matched_institutions": list(validation.matched_institutions),
+                            },
+                        },
+                    ))
                     continue
                 trace.append(
                     {
@@ -850,8 +854,10 @@ class _BaseLane:
                             "document_id": candidate.document_id,
                             "chunk_id": candidate.chunk_id,
                         },
-                        "reason": "missing_locked_institution_markers",
+                        "reason": validation.reason,
                         "institution_ids": list(issue.locked_institution_ids),
+                        "document_card": document_card.to_dict(),
+                        "relation": validation.relation,
                     }
                 )
             reranked = retained
@@ -1588,7 +1594,25 @@ def _families_for_lane(
         # planner's broad natural-language family (often "business expense")
         # must not enter either authority or primary-law retrieval once a
         # deterministic institution has supplied its own query contract.
+        model_fact_families = [
+            family for family in families
+            if family.family == "fact_signature"
+        ]
         families = [family for family in families if family.origin == "deterministic"]
+        if lane == "authority":
+            # Preserve a bounded fact-only channel beside the deterministic
+            # institution channels.  It recalls documents whose own text
+            # contains the user's distinguishing terminology, while the
+            # document card below remains the independent relevance gate.
+            families.extend(model_fact_families)
+            distinctive_terms = _distinctive_user_terms(plan.user_query)
+            if distinctive_terms:
+                families.append(QueryFamily(
+                    family="user_terminology",
+                    query=distinctive_terms,
+                    lane="authority",
+                    origin="user",
+                ))
         if lane == "primary":
             provision_families = [
                 family for family in families
@@ -1615,6 +1639,27 @@ def _families_for_lane(
             seen.add(key)
             result.append(family)
     return tuple(result)
+
+
+def _distinctive_user_terms(question: str) -> str:
+    """Keep user-supplied acronyms and mixed-case terms as a narrow FTS cue.
+
+    This is lexical preservation, not a topic expansion: no taxonomy or
+    answer knowledge is added.  Acronyms such as product, contract or form
+    names are often the only tokens separating two documents that share one
+    tax institution.
+    """
+
+    terms: list[str] = []
+    for index, token in enumerate(_WORD_RE.findall(question)):
+        if index == 0 or len(token) < 2:
+            continue
+        if token.isupper() or any(character.isupper() for character in token[1:]):
+            if token.casefold() not in {item.casefold() for item in terms}:
+                terms.append(token)
+        if len(terms) >= 6:
+            break
+    return " ".join(terms)
 
 
 async def _call_backend(

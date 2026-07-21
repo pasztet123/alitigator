@@ -47,6 +47,7 @@ from .retrieval import (
     RetrievalCandidate,
     RetrievalConfig,
 )
+from .document_validation import build_question_card
 from .schemas import (
     AnswerPlan,
     AnswerSection,
@@ -617,7 +618,7 @@ class LegalRagV2Pipeline:
                 "provider": get_model_gateway_config().provider,
                 "model": self.config.answer_writer_model,
                 "git_commit": _git_commit(),
-                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.78"),
+                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.79"),
                 "controlled_pipeline_used": False,
                 "fallbacks_used": [],
                 **vector_index_runtime_status(),
@@ -740,7 +741,7 @@ class LegalRagV2Pipeline:
                 "provider": get_model_gateway_config().provider,
                 "model": self.config.answer_writer_model,
                 "git_commit": _git_commit(),
-                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.78"),
+                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.79"),
                 "controlled_pipeline_used": False,
                 "fallbacks_used": ([planner_outcome.fallback_trace.fallback_reason] if planner_outcome.fallback_trace.fallback_used else []),
                 **vector_index_runtime_status(),
@@ -789,7 +790,7 @@ class LegalRagV2Pipeline:
                         "provider": get_model_gateway_config().provider,
                         "model": self.config.answer_writer_model,
                         "git_commit": _git_commit(),
-                        "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.78"),
+                        "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.79"),
                         "controlled_pipeline_used": False,
                         "fallbacks_used": [augmented.fallback_trace.fallback_reason],
                         **vector_index_runtime_status(),
@@ -1094,32 +1095,31 @@ class LegalRagV2Pipeline:
 
         def candidate_trace_item(
             candidate: RetrievalCandidate,
-            *,
-            mechanism: str,
-            gate_passed: bool,
         ) -> dict[str, object]:
             metadata = dict(candidate.metadata)
+            document_card = dict(metadata.get("document_card") or {})
+            validation = dict(metadata.get("document_validation") or {})
             provisions = metadata.get("legal_provisions") or metadata.get("provisions") or []
             if isinstance(provisions, str):
                 provisions = [provisions]
             return {
                 "signature": str(metadata.get("signature") or candidate.document_id),
                 "title": str(metadata.get("subject") or metadata.get("title") or ""),
-                "mechanism": mechanism,
-                "provisions": [str(item) for item in provisions][:8],
+                # This is deliberately read only from the candidate's
+                # independently built card, never from the research issue.
+                "mechanism": next(iter(document_card.get("detected_mechanisms") or ()), ""),
+                "provisions": list(document_card.get("cited_provisions") or provisions)[:8],
                 "score": candidate.score,
-                "relation": "direct" if gate_passed else "irrelevant",
-                "institution_gate_passed": gate_passed,
+                "relation": str(validation.get("relation") or "unverified"),
+                "institution_gate_passed": bool(validation.get("institution_gate_passed")),
+                "matched_institutions": list(validation.get("matched_institutions") or []),
+                "document_card": document_card,
+                "document_evidence": list(document_card.get("evidence") or []),
             }
 
-        authority_issues = {
-            issue.issue_id: issue for issue in plan.issues
-        }
         final_authorities = [
             candidate_trace_item(
                 candidate,
-                mechanism=authority_issues[lane.issue_id].legal_mechanism,
-                gate_passed=bool(authority_issues[lane.issue_id].locked_institution_ids),
             )
             for lane in retrieval.authorities
             for candidate in lane.candidates
@@ -1132,6 +1132,7 @@ class LegalRagV2Pipeline:
                 "reject": True,
                 "reason": str(event.get("reason") or "missing_locked_institution_markers"),
                 "signature": str((event.get("candidate_signature") or {}).get("document_id") or ""),
+                "document_card": dict(event.get("document_card") or {}),
             }
             for event in retrieval.trace
             if event.get("event") == "institution_filter_rejection"
@@ -1174,6 +1175,10 @@ class LegalRagV2Pipeline:
             "planner_conflicts": [item.model_dump(mode="json") for item in plan.institution_conflicts],
             "locked_institutions_after_merge": [item.institution_id for item in plan.deterministic_institutions],
             "authority_search_input": authority_search_input,
+            "question_card": [
+                build_question_card(question=question, issue=issue).__dict__
+                for issue in plan.issues
+            ],
             "institution_queries": [
                 family for family in authority_search_input["query_families"]
                 if family.get("origin") == "deterministic"
@@ -1191,20 +1196,42 @@ class LegalRagV2Pipeline:
                 "authority_before_rerank": sum(lane.candidate_count_before_rerank for lane in retrieval.authorities),
                 "authority_after_gate": sum(len(lane.candidates) for lane in retrieval.authorities),
             }),
-            "candidates_before_gate": [],
+            "candidates_before_gate": [
+                *[
+                    {
+                        "signature": item["signature"],
+                        "document_card": item["document_card"],
+                        "relation": item["relation"],
+                        "reject": False,
+                    }
+                    for item in final_authorities
+                ],
+                *[
+                    {
+                        "signature": str((event.get("candidate_signature") or {}).get("document_id") or ""),
+                        "document_card": dict(event.get("document_card") or {}),
+                        "relation": str(event.get("relation") or "irrelevant"),
+                        "reject": True,
+                    }
+                    for event in retrieval.trace
+                    if event.get("event") == "institution_filter_rejection"
+                ],
+            ],
             "institution_gate_results": [
                 *gate_rejections,
                 *[
                     {
-                        "institution_id": item["mechanism"],
+                        "institution_id": institution_id,
                         "matches": True,
                         "relation": item["relation"],
                         "reject": False,
-                        "reason": "locked_institution_markers_present",
+                        "reason": "document_institution_evidence_present",
                         "signature": item["signature"],
+                        "document_card": item["document_card"],
                     }
                     for item in final_authorities
                     if item["institution_gate_passed"]
+                    for institution_id in item["matched_institutions"]
                 ],
             ],
             "candidates_after_gate": final_authorities,

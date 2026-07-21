@@ -262,7 +262,7 @@ def test_direct_authority_gate_rejects_documents_without_locked_markers() -> Non
     candidates = result.authorities[0].candidates
     assert [item.candidate_id for item in candidates] == ["direct"]
     rejections = [item for item in result.trace if item.get("event") == "institution_filter_rejection"]
-    assert rejections and rejections[0]["reason"] == "missing_locked_institution_markers"
+    assert rejections and rejections[0]["reason"] == "missing_document_institution_evidence"
     assert rejections[0]["institution_ids"] == ["ip_box"]
 
 

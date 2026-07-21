@@ -82,3 +82,9 @@ class InstitutionMatchResultRecord:
     normalized_question: str
     tokens: tuple[str, ...]
     matches: tuple[InstitutionMatchRecord, ...] = field(default_factory=tuple)
+
+    def has_locked(self, institution_id: str) -> bool:
+        return any(
+            item.institution_id == institution_id and item.locked
+            for item in self.matches
+        )

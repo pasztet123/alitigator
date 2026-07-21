@@ -171,6 +171,50 @@ class LegalRagV2RoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("retrieval_iterations", response.analysis_trace)
         self.assertEqual(response.reply.splitlines()[0], "Teza")
 
+    async def test_chat_entrypoint_exposes_institution_diagnostic_trace(self) -> None:
+        class TracePipeline(FakePipeline):
+            async def run(self, question, **kwargs):
+                result = await super().run(question, **kwargs)
+                return result.model_copy(update={
+                    "diagnostic_trace": {
+                        "dictionary_loaded": True,
+                        "dictionary_version": "test-v2",
+                        "institution_matches": [
+                            {"id": "csr_sponsorship_relief", "locked": True}
+                        ],
+                        "locked_institutions_after_merge": ["csr_sponsorship_relief"],
+                        "authority_search_input": {
+                            "mechanisms": ["csr_sponsorship_relief"],
+                            "provision_hints": ["PIT art. 26ha", "CIT art. 18ee"],
+                        },
+                        "institution_gate_results": [],
+                        "final_results": [],
+                    },
+                })
+
+        pipeline = TracePipeline()
+        request = ChatRequest(
+            messages=[ChatMessage(role="user", content="Poszukaj interpretacji związanych z ulgą sponsoringową")],
+            retrieval_profile="current_legal_rag",
+            debug_trace=True,
+            disable_cache=True,
+        )
+        user = AuthenticatedUser(id="user", email=None, full_name=None)
+        with (
+            patch.dict(os.environ, {"LEGAL_PIPELINE_MODE": "legal_rag_v2"}),
+            patch("app.main.ensure_profile"),
+            patch("app.main.is_chat_storage_available", return_value=False),
+            patch("app.main.is_model_gateway_configured", return_value=False),
+            patch("app.main.get_legal_rag_v2_pipeline", return_value=pipeline),
+        ):
+            response = await chat(request, current_user=user)
+
+        trace = response.analysis_trace["institution_trace"]
+        self.assertTrue(trace["dictionary_loaded"])
+        self.assertIn("csr_sponsorship_relief", trace["locked_institutions_after_merge"])
+        self.assertIn("csr_sponsorship_relief", trace["authority_search_input"]["mechanisms"])
+        self.assertIn("PIT art. 26ha", trace["authority_search_input"]["provision_hints"])
+
     async def test_recovered_claim_validation_is_served_without_a_trace_id(self) -> None:
         pipeline = FakePipeline(
             validation_passed=False,

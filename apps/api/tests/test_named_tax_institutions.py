@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from app.legal_institutions import InstitutionMatcher, merge_locked_institutions
-from app.legal_institutions.dictionary import load_default_dictionary
+from app.legal_institutions.dictionary import load_default_dictionary, validate_required_active_institutions
 from app.legal_institutions.evaluate import evaluate_dictionary_cases
 from app.legal_rag_v2.retrieval import (
     LegalRetriever,
@@ -35,10 +37,16 @@ def _plan() -> LegalResearchPlan:
 
 def test_dictionary_is_versioned_large_and_has_stage_a_activation() -> None:
     dictionary = load_default_dictionary()
-    assert dictionary.version == "pl_tax_institutions_v1"
+    assert dictionary.version == "pl_tax_institutions_v2"
     assert len(dictionary.institutions) >= 120
     assert sum(item.status == "active" for item in dictionary.institutions) >= 50
     assert all(item.canonical_name for item in dictionary.institutions)
+
+
+def test_runtime_dictionary_validation_requires_the_two_mvp_institutions() -> None:
+    dictionary = validate_required_active_institutions()
+    assert dictionary.contains_active("csr_sponsorship_relief")
+    assert dictionary.contains_active("expansion_relief")
 
 
 def test_metrics_report_covers_required_deterministic_quality_signals() -> None:
@@ -79,7 +87,7 @@ def test_required_aliases_are_deterministic_and_shadow_entries_do_not_lock() -> 
         "WIT": ("binding_tariff_information", True),
         "PE podatkowy": ("permanent_establishment", True),
         "FE w VAT": ("fixed_establishment", True),
-        "ulga CSR": ("csr_sponsorship_relief", False),
+        "ulga CSR": ("csr_sponsorship_relief", True),
         "CFC": ("cfc_taxation", False),
         "WIS": ("binding_rate_information", True),
         "GAAR": ("ga_ar", True),
@@ -87,6 +95,58 @@ def test_required_aliases_are_deterministic_and_shadow_entries_do_not_lock() -> 
     for phrase, (institution_id, locked) in cases.items():
         match = next(item for item in matcher.match(f"Czy stosuje się {phrase}?").matches if item.institution_id == institution_id)
         assert match.locked is locked
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Poszukaj interpretacji związanych z ulgą sponsoringową",
+        "Czy mogę skorzystać z ulgi sponsoringowej?",
+        "Jak rozlicza się wydatki w uldze sponsoringowej?",
+        "Czy spółce przysługuje ulga na sponsoring?",
+        "Jak działa ulga CSR?",
+        "Czy rozliczę wydatki ulgą sponsoringową?",
+    ],
+)
+def test_sponsorship_relief_flexion(question: str) -> None:
+    assert InstitutionMatcher().match(question).has_locked("csr_sponsorship_relief")
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Czy mogę skorzystać z ulgi na ekspansję?",
+        "Czy wydatki mieszczą się w uldze na ekspansję?",
+        "Czy deweloperowi przysługuje ulga prowzrostowa?",
+        "Jakie koszty odliczę ulgą na wzrost przychodów?",
+    ],
+)
+def test_expansion_relief_flexion(question: str) -> None:
+    assert InstitutionMatcher().match(question).has_locked("expansion_relief")
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Firma sponsoruje lokalną drużynę.",
+        "Umowa sponsoringowa jako koszt działalności.",
+        "Sponsoring wydarzenia marketingowego.",
+    ],
+)
+def test_sponsorship_word_without_relief_does_not_lock(question: str) -> None:
+    assert not InstitutionMatcher().match(question).has_locked("csr_sponsorship_relief")
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Firma planuje ekspansję do Niemiec.",
+        "Wzrost przychodów nastąpił w 2026 roku.",
+        "Deweloper zwiększa sprzedaż mieszkań.",
+    ],
+)
+def test_business_expansion_does_not_lock_relief(question: str) -> None:
+    assert not InstitutionMatcher().match(question).has_locked("expansion_relief")
 
 
 def test_collision_suite_does_not_create_false_locks() -> None:
@@ -136,6 +196,36 @@ def test_conflicting_model_hypothesis_cannot_replace_deterministic_lock() -> Non
     assert {item.resolution for item in merged.institution_conflicts} == {"keep_deterministic"}
 
 
+@pytest.mark.parametrize(
+    ("question", "institution_id", "provisions"),
+    [
+        (
+            "Poszukaj mi interpretacji związanych z ulgą sponsoringową",
+            "csr_sponsorship_relief",
+            {"PIT art. 26ha", "CIT art. 18ee"},
+        ),
+        (
+            "Czy deweloper mieszkaniowy może skorzystać z ulgi na ekspansję?",
+            "expansion_relief",
+            {"PIT art. 26gb", "CIT art. 18eb"},
+        ),
+    ],
+)
+def test_locked_institution_is_the_authority_search_mechanism(
+    question: str,
+    institution_id: str,
+    provisions: set[str],
+) -> None:
+    matcher = InstitutionMatcher()
+    merged = merge_locked_institutions(
+        _plan(), matcher.match(question), dictionary=matcher.dictionary
+    )
+    issue = next(item for item in merged.issues if institution_id in item.locked_institution_ids)
+    assert issue.legal_mechanism == institution_id
+    assert provisions.issubset(set(issue.possible_provision_concepts))
+    assert any(item.family == "named_institution_canonical" for item in issue.query_families)
+
+
 class _MarkerBackend:
     async def search(self, query, *, limit, source_types, metadata_filters):
         return [
@@ -174,6 +264,56 @@ def test_direct_authority_gate_rejects_documents_without_locked_markers() -> Non
     rejections = [item for item in result.trace if item.get("event") == "institution_filter_rejection"]
     assert rejections and rejections[0]["reason"] == "missing_locked_institution_markers"
     assert rejections[0]["institution_ids"] == ["ip_box"]
+
+
+class _SponsorshipBackend:
+    async def search(self, query, *, limit, source_types, metadata_filters):
+        if "interpretation" not in source_types:
+            return []
+        return [
+            RetrievalCandidate(
+                candidate_id="wrong",
+                document_id="wrong-doc",
+                text="Prop trading oraz kryptowaluty jako koszty działalności.",
+                source_type="interpretation",
+                metadata={"subject": "Prop trading", "tax_domains": ["PIT"]},
+            ),
+            RetrievalCandidate(
+                candidate_id="direct",
+                document_id="direct-doc",
+                text="Ulga sponsoringowa: dodatkowe odliczenie na podstawie art. 26ha.",
+                source_type="interpretation",
+                metadata={
+                    "subject": "Ulga sponsoringowa",
+                    "tax_domains": ["PIT"],
+                    "legal_provisions": ["PIT art. 26ha"],
+                },
+            ),
+        ]
+
+
+def test_sponsorship_lock_reaches_authority_search_and_filters_wrong_neighbour() -> None:
+    matcher = InstitutionMatcher()
+    plan = merge_locked_institutions(
+        _plan(),
+        matcher.match("Poszukaj mi interpretacji związanych z ulgą sponsoringową"),
+        dictionary=matcher.dictionary,
+    )
+    issue = plan.issues[0]
+    retrieval = asyncio.run(
+        LegalRetriever(
+            _SponsorshipBackend(),
+            primary_enabled=False,
+            config=RetrievalConfig(selected_limit_per_issue=6),
+            institution_matcher=matcher,
+        ).retrieve(plan)
+    )
+    authority = retrieval.authorities[0]
+    assert issue.legal_mechanism == "csr_sponsorship_relief"
+    assert {"PIT art. 26ha", "CIT art. 18ee"}.issubset(issue.possible_provision_concepts)
+    assert {item.query for item in authority.query_families} >= {"ulga sponsoringowa", "PIT art. 26ha", "CIT art. 18ee"}
+    assert [item.document_id for item in authority.candidates] == ["direct-doc"]
+    assert any(item.get("event") == "institution_filter_rejection" for item in retrieval.trace)
 
 
 def test_named_institution_channels_have_bounded_higher_rrf_priority() -> None:

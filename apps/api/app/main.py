@@ -85,6 +85,7 @@ from app.legal_rag_v2.pipeline import (
     PIPELINE_VERSION as LEGAL_RAG_PIPELINE_VERSION,
     vector_index_runtime_status,
 )
+from app.legal_institutions import validate_required_active_institutions
 from app.legacy_interpretations import (
     JULY7_RETRIEVAL_COMMIT,
     JULY7_RETRIEVAL_DATE,
@@ -133,9 +134,10 @@ from app.rag_runtime import resolve_rag_runtime
 from app.supabase_client import get_supabase_service_client, is_supabase_configured
 
 load_dotenv()
+validate_required_active_institutions()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.77"
+API_VERSION = "2.0.78"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -519,6 +521,8 @@ class ChatRequest(BaseModel):
     intent_hints: list["IntentHintAnswer"] = Field(default_factory=list, max_length=12)
     retrieval_preferences: Optional["RetrievalPreferences"] = None
     retrieval_profile: Literal["current_legal_rag", "interpretations_july7"] = "current_legal_rag"
+    debug_trace: bool = False
+    disable_cache: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -3772,6 +3776,7 @@ async def chat(
                 ],
                 "retrieval_iterations": list(v2_result.retrieval_trace),
                 "retrieval_lanes": dict(v2_result.retrieval_summary),
+                "institution_trace": dict(v2_result.diagnostic_trace),
                 "timings_ms": v2_result.timings_ms,
             },
             chat_id=chat_id if chat_storage_available else None,

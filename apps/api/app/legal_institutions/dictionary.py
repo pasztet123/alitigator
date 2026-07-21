@@ -37,6 +37,10 @@ class InstitutionDictionary:
         if sum(item.status == "active" for item in institutions) < 50:
             raise ValueError("named-institution dictionary must activate at least 50 institutions")
 
+    def contains_active(self, institution_id: str) -> bool:
+        item = self.by_id.get(institution_id)
+        return item is not None and item.status == "active"
+
     @classmethod
     def from_path(cls, path: Path) -> "InstitutionDictionary":
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -60,11 +64,19 @@ class InstitutionDictionary:
                 })
 
         entries: list[InstitutionDefinition] = []
+        active_ids: set[str] = set()
         for raw_entry in source_entries:
             identifier = str(raw_entry["id"])
             status = str(raw_entry.get("status", "shadow"))
             if status not in {"active", "shadow", "draft", "disabled"}:
                 raise ValueError(f"invalid status for {identifier}: {status}")
+            # A hand-authored active entry can promote one catalogue member
+            # without activating its whole shadow group.  Retain the active
+            # definition and ignore the older shadow catalogue placeholder.
+            if identifier in active_ids and status == "shadow":
+                continue
+            if any(item.institution_id == identifier for item in entries):
+                raise ValueError(f"named-institution dictionary contains duplicate id: {identifier}")
             entries.append(
                 InstitutionDefinition(
                     institution_id=identifier,
@@ -89,9 +101,25 @@ class InstitutionDictionary:
                     legal_mechanisms=_as_tuple(raw_entry.get("legal_mechanisms")),
                 )
             )
+            if status == "active":
+                active_ids.add(identifier)
         return cls(version=version, institutions=tuple(entries))
 
 
 @lru_cache(maxsize=1)
 def load_default_dictionary() -> InstitutionDictionary:
     return InstitutionDictionary.from_path(_DATA_PATH)
+
+
+def validate_required_active_institutions() -> InstitutionDictionary:
+    """Fail fast when an image lacks the MVP's active institution entries."""
+
+    dictionary = load_default_dictionary()
+    required = ("csr_sponsorship_relief", "expansion_relief")
+    missing = [item for item in required if not dictionary.contains_active(item)]
+    if missing:
+        raise RuntimeError(
+            "Named-institution dictionary is unavailable or missing active MVP entries: "
+            + ", ".join(missing)
+        )
+    return dictionary

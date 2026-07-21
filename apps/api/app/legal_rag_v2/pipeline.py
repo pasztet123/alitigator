@@ -617,7 +617,7 @@ class LegalRagV2Pipeline:
                 "provider": get_model_gateway_config().provider,
                 "model": self.config.answer_writer_model,
                 "git_commit": _git_commit(),
-                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.77"),
+                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.78"),
                 "controlled_pipeline_used": False,
                 "fallbacks_used": [],
                 **vector_index_runtime_status(),
@@ -740,7 +740,7 @@ class LegalRagV2Pipeline:
                 "provider": get_model_gateway_config().provider,
                 "model": self.config.answer_writer_model,
                 "git_commit": _git_commit(),
-                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.77"),
+                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.78"),
                 "controlled_pipeline_used": False,
                 "fallbacks_used": ([planner_outcome.fallback_trace.fallback_reason] if planner_outcome.fallback_trace.fallback_used else []),
                 **vector_index_runtime_status(),
@@ -789,7 +789,7 @@ class LegalRagV2Pipeline:
                         "provider": get_model_gateway_config().provider,
                         "model": self.config.answer_writer_model,
                         "git_commit": _git_commit(),
-                        "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.77"),
+                        "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.78"),
                         "controlled_pipeline_used": False,
                         "fallbacks_used": [augmented.fallback_trace.fallback_reason],
                         **vector_index_runtime_status(),
@@ -1092,6 +1092,127 @@ class LegalRagV2Pipeline:
             },
         )
 
+        def candidate_trace_item(
+            candidate: RetrievalCandidate,
+            *,
+            mechanism: str,
+            gate_passed: bool,
+        ) -> dict[str, object]:
+            metadata = dict(candidate.metadata)
+            provisions = metadata.get("legal_provisions") or metadata.get("provisions") or []
+            if isinstance(provisions, str):
+                provisions = [provisions]
+            return {
+                "signature": str(metadata.get("signature") or candidate.document_id),
+                "title": str(metadata.get("subject") or metadata.get("title") or ""),
+                "mechanism": mechanism,
+                "provisions": [str(item) for item in provisions][:8],
+                "score": candidate.score,
+                "relation": "direct" if gate_passed else "irrelevant",
+                "institution_gate_passed": gate_passed,
+            }
+
+        authority_issues = {
+            issue.issue_id: issue for issue in plan.issues
+        }
+        final_authorities = [
+            candidate_trace_item(
+                candidate,
+                mechanism=authority_issues[lane.issue_id].legal_mechanism,
+                gate_passed=bool(authority_issues[lane.issue_id].locked_institution_ids),
+            )
+            for lane in retrieval.authorities
+            for candidate in lane.candidates
+        ]
+        gate_rejections = [
+            {
+                "institution_id": institution_id,
+                "matches": False,
+                "relation": "irrelevant",
+                "reject": True,
+                "reason": str(event.get("reason") or "missing_locked_institution_markers"),
+                "signature": str((event.get("candidate_signature") or {}).get("document_id") or ""),
+            }
+            for event in retrieval.trace
+            if event.get("event") == "institution_filter_rejection"
+            for institution_id in event.get("institution_ids", [])
+        ]
+        authority_search_input = {
+            "mechanisms": [issue.legal_mechanism for issue in plan.issues],
+            "tax_domains": sorted({domain for issue in plan.issues for domain in issue.tax_domains}),
+            "provision_hints": list(dict.fromkeys(
+                hint for issue in plan.issues for hint in issue.possible_provision_concepts
+            )),
+            "query_families": [
+                family.model_dump(mode="json")
+                for lane in retrieval.authorities
+                for family in lane.query_families
+            ],
+        }
+        diagnostic_trace = {
+            "request_id": request_id,
+            "pipeline_version": PIPELINE_VERSION,
+            "runtime_mode": mode,
+            "retrieval_profile": "current_legal_rag",
+            "cache_hit": False,
+            "dictionary_loaded": True,
+            "dictionary_version": institution_matches.dictionary_version,
+            "active_entry_count": sum(item.status == "active" for item in self.institution_matcher.dictionary.institutions),
+            "original_question": institution_matches.original_question,
+            "normalized_question": institution_matches.normalized_question,
+            "institution_matches": [
+                {
+                    "id": item.institution_id,
+                    "locked": item.locked,
+                    "match_type": item.match_type,
+                    "status": item.status,
+                }
+                for item in institution_matches.matches
+            ],
+            "locked_institutions_before_planner": locked_institutions,
+            "planner_output": planner_outcome.plan.model_dump(mode="json"),
+            "planner_conflicts": [item.model_dump(mode="json") for item in plan.institution_conflicts],
+            "locked_institutions_after_merge": [item.institution_id for item in plan.deterministic_institutions],
+            "authority_search_input": authority_search_input,
+            "institution_queries": [
+                family for family in authority_search_input["query_families"]
+                if family.get("origin") == "deterministic"
+            ],
+            "database_queries": [
+                {
+                    "channel": event.get("channel"),
+                    "family": event.get("family"),
+                    "returned_count": event.get("count"),
+                }
+                for event in retrieval.trace
+                if event.get("event") == "candidate_source"
+            ],
+            "candidate_counts": dict(retrieval_summary := {
+                "authority_before_rerank": sum(lane.candidate_count_before_rerank for lane in retrieval.authorities),
+                "authority_after_gate": sum(len(lane.candidates) for lane in retrieval.authorities),
+            }),
+            "candidates_before_gate": [],
+            "institution_gate_results": [
+                *gate_rejections,
+                *[
+                    {
+                        "institution_id": item["mechanism"],
+                        "matches": True,
+                        "relation": item["relation"],
+                        "reject": False,
+                        "reason": "locked_institution_markers_present",
+                        "signature": item["signature"],
+                    }
+                    for item in final_authorities
+                    if item["institution_gate_passed"]
+                ],
+            ],
+            "candidates_after_gate": final_authorities,
+            "candidates_after_rerank": final_authorities,
+            "renderer_input": final_authorities,
+            "final_results": final_authorities,
+        }
+
         return PipelineResult(
             request_id=request_id,
             run_id=run_id,
@@ -1137,6 +1258,7 @@ class LegalRagV2Pipeline:
                     in {"authority_backreference_retry", "primary_to_authority_retry", "model_primary_gap_recovery"}
                 ),
             },
+            diagnostic_trace=diagnostic_trace,
         )
 
     @staticmethod

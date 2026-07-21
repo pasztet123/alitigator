@@ -81,16 +81,12 @@ def institution_query_families(definition: InstitutionDefinition) -> list[QueryF
             ))
 
     add("named_institution_canonical", definition.canonical_name)
-    for alias in definition.exact_aliases[:5]:
+    for alias in definition.exact_aliases[:4]:
         add("named_institution_alias", alias)
-    for hint in definition.provision_hints[:4]:
+    for hint in definition.provision_hints[:2]:
         add("named_institution_provision", hint)
-    for phrase in definition.statutory_phrases[:3]:
+    for phrase in definition.statutory_phrases[:1]:
         add("named_institution_statutory", phrase)
-    for concept in definition.material_concepts[:3]:
-        add("named_institution_concept", concept)
-    for template in definition.query_templates[:2]:
-        add("named_institution_concept", template.format(canonical_name=definition.canonical_name))
     return families
 
 
@@ -149,13 +145,21 @@ def merge_locked_institutions(
                 reason="model_institution_hypothesis_conflicts_with_deterministic_lock",
             ))
         mechanism = issue.legal_mechanism
-        if current_mechanism in _GENERIC_MECHANISMS:
+        if current_mechanism != match.institution_id:
+            # A deterministic lock is the primary retrieval mechanism for
+            # this issue.  Leaving an unrelated or merely generic model label
+            # in place would send the authority lane back to broad cost
+            # searches even though the lock remains listed alongside it.
             mechanism = match.institution_id
             conflicts.append(InstitutionPlannerConflict(
                 institution_id=match.institution_id,
                 model_mechanism=issue.legal_mechanism,
                 model_inferred_institution_ids=sorted(model_level_ids),
-                reason="generic_model_mechanism_cannot_replace_deterministic_lock",
+                reason=(
+                    "generic_model_mechanism_cannot_replace_deterministic_lock"
+                    if current_mechanism in _GENERIC_MECHANISMS
+                    else "model_mechanism_cannot_replace_deterministic_lock"
+                ),
             ))
         families = [*issue.query_families, *institution_query_families(definition)]
         issues[target_index] = issue.model_copy(update={

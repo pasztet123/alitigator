@@ -5,7 +5,7 @@ versioned dictionary into traceable, bounded research inputs; it never answers
 a legal question or decides whether a document is legally correct.
 """
 
-from .dictionary import InstitutionDictionary, load_default_dictionary
+from .dictionary import InstitutionDictionary, load_default_dictionary, validate_required_active_institutions
 from .matcher import InstitutionMatcher, InstitutionMatch, InstitutionMatchResult
 from .merger import merge_locked_institutions
 
@@ -15,5 +15,6 @@ __all__ = [
     "InstitutionMatcher",
     "InstitutionMatchResult",
     "load_default_dictionary",
+    "validate_required_active_institutions",
     "merge_locked_institutions",
 ]

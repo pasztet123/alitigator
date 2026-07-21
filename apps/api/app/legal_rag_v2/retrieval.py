@@ -591,8 +591,55 @@ class _BaseLane:
         vector_source_types = frozenset(
             value for group in source_type_groups for value in group
         )
+        named_authority_lookup = bool(issue.locked_institution_ids)
+        preloaded_lexical: dict[tuple[int, int], list[RetrievalCandidate]] = {}
+        if named_authority_lookup:
+            # Deterministic channels are independent (canonical name, aliases,
+            # provision hints and statutory wording).  Running them serially
+            # makes one named-institution question wait for every MariaDB FTS
+            # round-trip.  Keep the fan-out bounded by the small dictionary
+            # family and issue source groups, but execute it concurrently.
+            requests = [
+                (family_index, group_index, family, source_group)
+                for family_index, family in enumerate(families)
+                for group_index, source_group in enumerate(source_type_groups)
+            ]
+            semaphore = asyncio.Semaphore(3)
 
-        for family in families:
+            async def bounded_lookup(family: QueryFamily, source_group: frozenset[str]) -> list[RetrievalCandidate]:
+                async with semaphore:
+                    try:
+                        return await asyncio.wait_for(
+                            _call_backend(
+                                self.backend,
+                                family.query,
+                                limit=min(self.config.lexical_limit_per_query, 8),
+                                source_types=source_group,
+                                metadata_filters={
+                                    **metadata_filters,
+                                    **({"tax_domains": [_explicit_family_target(family)[0]]}
+                                       if _explicit_family_target(family) and _explicit_family_target(family)[0]
+                                       else {}),
+                                },
+                            ),
+                            timeout=4.5,
+                        )
+                    except asyncio.TimeoutError:
+                        # One sparse provision channel must not consume the
+                        # whole interactive request.  The remaining canonical,
+                        # alias and provision channels are still fused and the
+                        # timeout is observable as a zero-result channel.
+                        return []
+
+            responses = await asyncio.gather(
+                *(bounded_lookup(family, source_group) for _, _, family, source_group in requests)
+            )
+            preloaded_lexical = {
+                (family_index, group_index): result
+                for (family_index, group_index, _, _), result in zip(requests, responses)
+            }
+
+        for family_index, family in enumerate(families):
             family_filters = dict(metadata_filters)
             explicit_target = _explicit_family_target(family)
             if explicit_target and explicit_target[0]:
@@ -601,16 +648,20 @@ class _BaseLane:
             # them concurrently. Combined with the lower lane concurrency,
             # this keeps the effective database fan-out bounded while halving
             # single-issue wall time on remote MySQL.
-            lexical_groups = await asyncio.gather(
-                *(
-                    _call_backend(
-                        self.backend,
-                        family.query,
-                        limit=self.config.lexical_limit_per_query,
-                        source_types=source_group,
-                        metadata_filters=family_filters,
+            lexical_groups = (
+                [preloaded_lexical[(family_index, group_index)] for group_index in range(len(source_type_groups))]
+                if named_authority_lookup
+                else await asyncio.gather(
+                    *(
+                        _call_backend(
+                            self.backend,
+                            family.query,
+                            limit=self.config.lexical_limit_per_query,
+                            source_types=source_group,
+                            metadata_filters=family_filters,
+                        )
+                        for source_group in source_type_groups
                     )
-                    for source_group in source_type_groups
                 )
             )
             for source_group, lexical in zip(source_type_groups, lexical_groups):
@@ -1532,6 +1583,18 @@ def _families_for_lane(
         for family in issue.query_families
         if family.lane in {lane, "both"}
     ]
+    if issue.locked_institution_ids:
+        # An explicit institution has its own bounded recall contract.  The
+        # planner's broad natural-language family (often "business expense")
+        # must not enter either authority or primary-law retrieval once a
+        # deterministic institution has supplied its own query contract.
+        families = [family for family in families if family.origin == "deterministic"]
+        if lane == "primary":
+            provision_families = [
+                family for family in families
+                if family.family == "named_institution_provision"
+            ]
+            families = provision_families or families[:1]
     if not families:
         # This fallback is still sourced solely from immutable plan fields. It
         # performs no domain detection or static legal query expansion.

@@ -210,7 +210,7 @@ const HINT_DEBOUNCE_MS = 900
 const MIN_DRAFT_LENGTH_FOR_HINTS = 24
 const ACTIVE_HINT_COUNT = 3
 const MAX_HINT_QUESTION_COUNT = 5
-const APP_VERSION = '2.0.76'
+const APP_VERSION = '2.0.77'
 const ASSISTANT_SECTION_TITLES = [
   'Teza',
   'Analiza',
@@ -1585,6 +1585,13 @@ async function fetchPromptHints({
       }
 
       const data = await response.json() as ChatResponse
+      const responsePipeline = data.analysis_trace?.pipeline
+      if (typeof responsePipeline === 'string' && responsePipeline.trim()) {
+        // Health reports the server default.  The response trace is the only
+        // authoritative source when the user selected the isolated July 7
+        // interpretations profile for this particular request.
+        setBackendPipeline(responsePipeline)
+      }
       const assistantMessage = {
         id: data.assistant_message_id ?? crypto.randomUUID(),
         role: 'assistant' as const,

@@ -10,8 +10,10 @@ import time
 import unicodedata
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
+from app.legal_institutions import InstitutionMatcher
+from app.legal_institutions.schema import InstitutionDefinition
 from app.legacy_july7 import rag as july7_rag
 from app.legacy_july7 import mysql_rag as july7_mysql_rag
 from app.tax_research import (
@@ -144,6 +146,10 @@ july7_rag.get_rag_config = _get_bounded_july7_rag_config
 july7_mysql_rag.get_rag_config = _get_bounded_july7_rag_config
 
 _active_user_query: ContextVar[str | None] = ContextVar("active_july7_user_query", default=None)
+_active_named_institution_query: ContextVar[bool] = ContextVar(
+    "active_july7_named_institution_query",
+    default=False,
+)
 _candidate_diagnostics: ContextVar[dict[str, int]] = ContextVar(
     "july7_candidate_diagnostics",
     default={},
@@ -177,6 +183,9 @@ class TaxResearchSearchResult:
     reranker_scores: tuple[dict[str, object], ...]
     validation_results: tuple[dict[str, object], ...]
     documents: tuple[TaxResearchDocument, ...]
+    institution_matches: tuple[dict[str, object], ...] = ()
+    locked_institution_ids: tuple[str, ...] = ()
+    institution_filter_rejections: int = 0
 
     @property
     def chunks(self) -> list[july7_rag.RagChunk]:
@@ -196,6 +205,11 @@ class TaxResearchSearchResult:
             "validation_results": list(self.validation_results),
             "candidates_after_rerank": [item.to_dict() for item in self.documents],
             "final_results": [item.to_dict() for item in self.documents],
+            "named_institutions": {
+                "matches": list(self.institution_matches),
+                "locked_institution_ids": list(self.locked_institution_ids),
+                "filter_rejections": self.institution_filter_rejections,
+            },
             "vector_index_available": False,
         }
 
@@ -429,6 +443,12 @@ def _build_bounded_historical_mysql_queries(query: str) -> list[str]:
     become the sole required term.  The legal hypothesis is generated from the
     question, never from a target document or a signature.
     """
+    # A named-institution channel is already a bounded, editorially verified
+    # phrase or statutory hint.  Do not append the generic planner's broad
+    # fallbacks (for example ``PIT art. 22``) to it: that would turn a precise
+    # expansion-relief lookup back into a high-volume business-cost search.
+    if _active_named_institution_query.get():
+        return july7_mysql_rag._build_mysql_candidate_queries(query)
     understanding = understand_tax_research_question(_active_user_query.get() or query)
     queries = candidate_boolean_queries(understanding)
     return queries or july7_mysql_rag._build_mysql_candidate_queries(query)
@@ -781,6 +801,117 @@ def score_candidate_row(
     )
 
 
+def _institution_trace_match(match: object) -> dict[str, object]:
+    """Serialize only the auditable recognition facts for the July 7 trace."""
+
+    return {
+        "institution_id": getattr(match, "institution_id", ""),
+        "canonical_name": getattr(match, "canonical_name", ""),
+        "match_type": getattr(match, "match_type", ""),
+        "confidence": getattr(match, "confidence", 0.0),
+        "matched_text": getattr(match, "matched_text", ""),
+        "locked": bool(getattr(match, "locked", False)),
+    }
+
+
+def _locked_institution_definitions(
+    query: str,
+) -> tuple[InstitutionMatcher, tuple[dict[str, object], ...], tuple[InstitutionDefinition, ...]]:
+    """Recognise named institutions before the historical generic ranker.
+
+    The July 7 profile intentionally retains its own retrieval implementation.
+    Recognition is nevertheless shared with V2: an explicit active institution
+    is a hard relevance constraint, never just another lexical boost.
+    """
+
+    matcher = InstitutionMatcher()
+    match_result = matcher.match(query)
+    locked_ids = tuple(item.institution_id for item in match_result.matches if item.locked)
+    return (
+        matcher,
+        tuple(_institution_trace_match(item) for item in match_result.matches),
+        matcher.definitions_for(locked_ids),
+    )
+
+
+def _institution_candidate_queries(definitions: Sequence[InstitutionDefinition]) -> tuple[str, ...]:
+    """Use one selective, canonical FTS channel per explicit institution.
+
+    The historical MariaDB adapter expands one FTS request into its own bounded
+    lexical variants.  Sending aliases and provisions as separate requests
+    multiplies the read cost and can exhaust the interactive timeout without
+    improving the authority gate.  The full-document marker check below still
+    considers aliases and verified provisions when judging a fetched document.
+    """
+
+    return tuple(dict.fromkeys(definition.canonical_name for definition in definitions))
+
+
+def _assess_locked_institution_candidate(
+    *,
+    matcher: InstitutionMatcher,
+    definitions: Sequence[InstitutionDefinition],
+    chunk: july7_rag.RagChunk,
+) -> CandidateAssessment:
+    """Accept only documents carrying an explicit marker of a locked institution."""
+
+    for definition in definitions:
+        markers = matcher.document_markers(
+            definition,
+            text=chunk.chunk_text,
+            metadata={
+                "subject": chunk.subject,
+                "legal_provisions": chunk.legal_provisions,
+            },
+        )
+        if markers:
+            # A named phrase in the editorial subject is materially stronger
+            # than an incidental mention in the legal reasoning of a long,
+            # multi-relief interpretation.  Both remain eligible, but the
+            # former must be shown first.
+            subject_markers = matcher.document_markers(
+                definition,
+                text=chunk.subject,
+            )
+            provision_markers = matcher.document_markers(
+                definition,
+                text="",
+                metadata={"legal_provisions": chunk.legal_provisions},
+            )
+            if subject_markers:
+                score = 100.0
+                relation = "direct"
+            elif provision_markers:
+                score = 85.0
+                relation = "direct"
+            else:
+                score = 70.0
+                relation = "strong_analogy"
+            return CandidateAssessment(
+                relation=relation,
+                reject=False,
+                reason="Zgodność z rozpoznaną instytucją prawa podatkowego.",
+                document_mechanism=definition.institution_id,
+                material_differences=(),
+                score=score,
+                components={
+                    "named_institution_marker": float(len(markers)),
+                    "named_institution_subject_marker": float(len(subject_markers)),
+                    "named_institution_provision_marker": float(len(provision_markers)),
+                    "named_institution_gate": 1.0,
+                },
+            )
+    return CandidateAssessment(
+        relation="different_mechanism",
+        reject=True,
+        reason="Brak markera rozpoznanej instytucji prawa podatkowego.",
+        document_mechanism="unknown",
+        material_differences=("missing_locked_institution_markers",),
+        score=0.0,
+        components={"named_institution_gate": 0.0},
+    )
+
+
 def _generic_candidate_score(
     chunk: july7_rag.RagChunk,
     *,
@@ -823,6 +954,8 @@ def _rank_historical_candidates(
     *,
     query: str,
     limit: int,
+    institution_matcher: InstitutionMatcher | None = None,
+    locked_definitions: Sequence[InstitutionDefinition] = (),
 ) -> list[july7_rag.RagChunk]:
     """Rank a document-diverse candidate pool on a bounded 0--100 scale."""
     if not rows:
@@ -833,7 +966,14 @@ def _rank_historical_candidates(
         chunk = july7_rag.row_to_rag_chunk(row, score=0.0)
         if chunk.source_type != "interpretation":
             continue
-        assessment = score_candidate_row(row, question=query, understanding=understanding)
+        if institution_matcher and locked_definitions:
+            assessment = _assess_locked_institution_candidate(
+                matcher=institution_matcher,
+                definitions=locked_definitions,
+                chunk=chunk,
+            )
+        else:
+            assessment = score_candidate_row(row, question=query, understanding=understanding)
         # Database rank only breaks ties.  A title prefix never receives a
         # separate, unbounded privilege over the legal/factual match.
         ranked.append(
@@ -876,61 +1016,121 @@ def _candidate_provision_articles(understanding: ResearchUnderstanding) -> list[
     ))
 
 
-def _search_historical_sqlite(query: str, *, limit: int) -> list[july7_rag.RagChunk]:
+def _search_historical_sqlite(
+    query: str,
+    *,
+    limit: int,
+    supplemental_queries: Sequence[str] = (),
+    institution_matcher: InstitutionMatcher | None = None,
+    locked_definitions: Sequence[InstitutionDefinition] = (),
+) -> list[july7_rag.RagChunk]:
     """Run generic candidate retrieval and ranking against the SQLite snapshot."""
-    rows = _fetch_historical_sqlite_candidate_rows(query, limit=limit)
+    rows: list[sqlite3.Row] = []
+    seen_chunks: set[str] = set()
+    retrieval_queries = supplemental_queries if locked_definitions and supplemental_queries else (query,)
+    for retrieval_query in dict.fromkeys(retrieval_queries):
+        query_token = _active_user_query.set(retrieval_query)
+        named_query_token = _active_named_institution_query.set(retrieval_query != query)
+        try:
+            candidate_rows = _fetch_historical_sqlite_candidate_rows(retrieval_query, limit=limit)
+        finally:
+            _active_named_institution_query.reset(named_query_token)
+            _active_user_query.reset(query_token)
+        for row in candidate_rows:
+            chunk_id = str(row["chunk_id"])
+            if chunk_id not in seen_chunks:
+                rows.append(row)
+                seen_chunks.add(chunk_id)
     _candidate_diagnostics.set({"raw": len(rows), "deduplicated": len({str(row["document_id"]) for row in rows})})
     return _rank_historical_candidates(
         rows,
         query=query,
         limit=limit,
+        institution_matcher=institution_matcher,
+        locked_definitions=locked_definitions,
     )
 
 
-def _search_historical_mysql(query: str, *, limit: int) -> list[july7_rag.RagChunk]:
+def _search_historical_mysql(
+    query: str,
+    *,
+    limit: int,
+    supplemental_queries: Sequence[str] = (),
+    institution_matcher: InstitutionMatcher | None = None,
+    locked_definitions: Sequence[InstitutionDefinition] = (),
+) -> list[july7_rag.RagChunk]:
     """Run generic candidate retrieval and ranking against the MariaDB corpus."""
-    _, rows = july7_mysql_rag.fetch_candidate_rows_mysql(
-        query,
-        # The MySQL adapter itself retains a bounded 120-row recall window.
-        # Keep its fetch limit independent of the requested final top-k so
-        # candidate generation can always provide a 100-document pool.
-        effective_limit=min(limit, 6),
-        source_types={"interpretation"},
-        enforce_query_domain=False,
-        tax_domains=None,
-        detection_query=query,
-    )
+    fts_rows: list[object] = []
+    # Once an explicit named institution is locked, its deterministic channels
+    # are the recall contract.  Running the broad natural-language probe too
+    # would reintroduce generic "business expense" neighbours and needlessly
+    # scan a much larger FTS result set.
+    retrieval_queries = supplemental_queries if locked_definitions and supplemental_queries else (query,)
+    for retrieval_query in dict.fromkeys(retrieval_queries):
+        # The vendored July adapter reads the ContextVar when it builds its
+        # Boolean probes.  Set it per deterministic query so that a canonical
+        # name such as "ulga na ekspansję" genuinely reaches MariaDB instead
+        # of being silently replaced by the broad natural-language question.
+        query_token = _active_user_query.set(retrieval_query)
+        try:
+            _, rows = july7_mysql_rag.fetch_candidate_rows_mysql(
+                retrieval_query,
+                # The adapter retains its own bounded recall window.  We merge
+                # those rows before document-level validation, never return a
+                # supplemental probe directly to the user.
+                effective_limit=min(limit, 6),
+                source_types={"interpretation"},
+                enforce_query_domain=False,
+                tax_domains=None,
+                detection_query=retrieval_query,
+            )
+        finally:
+            _active_user_query.reset(query_token)
+        fts_rows.extend(rows)
     understanding = understand_tax_research_question(query)
     # Metadata is a distinct candidate-generation channel, not a score
     # override.  It makes concise editorial subjects and curated keywords
     # available to the same generic reranker as the FTS snippets.
-    metadata_pairs = _metadata_candidate_pairs(understanding)
-    title_rows = july7_mysql_rag.fetch_subject_candidate_rows_mysql(
-        metadata_pairs,
-        source_type="interpretation",
-        limit_per_pair=80,
-    )
-    provision_rows = july7_mysql_rag.fetch_provision_candidate_rows_mysql(
-        tax_domain=understanding.tax_domain,
-        articles=_candidate_provision_articles(understanding),
-        source_type="interpretation",
-    )
+    if locked_definitions:
+        # The canonical named-institution FTS probe is the retrieval contract.
+        # Generic title/provision probes would reintroduce unrelated documents
+        # and create additional MariaDB scans before the marker gate runs.
+        title_rows: list[object] = []
+        provision_rows: list[object] = []
+    else:
+        metadata_pairs = _metadata_candidate_pairs(understanding)
+        title_rows = july7_mysql_rag.fetch_subject_candidate_rows_mysql(
+            metadata_pairs,
+            source_type="interpretation",
+            limit_per_pair=80,
+        )
+        provision_rows = july7_mysql_rag.fetch_provision_candidate_rows_mysql(
+            tax_domain=understanding.tax_domain,
+            articles=_candidate_provision_articles(understanding),
+            source_type="interpretation",
+        )
     seen_chunks: set[str] = set()
     merged_rows: list[object] = []
-    for row in [*rows, *title_rows, *provision_rows]:
+    for row in [*fts_rows, *title_rows, *provision_rows]:
         chunk_id = str(_row_value(row, "chunk_id") or "")
         if not chunk_id or chunk_id in seen_chunks:
             continue
         seen_chunks.add(chunk_id)
         merged_rows.append(row)
     _candidate_diagnostics.set({
-        "raw": len(rows) + len(title_rows) + len(provision_rows),
+        "raw": len(fts_rows) + len(title_rows) + len(provision_rows),
         "deduplicated": len({str(_row_value(row, "document_id") or "") for row in merged_rows}),
-        "fts": len(rows),
+        "fts": len(fts_rows),
         "title_metadata": len(title_rows),
         "provision_metadata": len(provision_rows),
     })
-    return _rank_historical_candidates(merged_rows, query=query, limit=limit)
+    return _rank_historical_candidates(
+        merged_rows,
+        query=query,
+        limit=limit,
+        institution_matcher=institution_matcher,
+        locked_definitions=locked_definitions,
+    )
 
 
 def search_tax_interpretations(query: str, *, limit: int | None = None) -> list[july7_rag.RagChunk]:
@@ -959,13 +1159,33 @@ def search_tax_interpretations_with_trace(
     candidate_limit = max(100, int(os.getenv("TAX_RESEARCH_CANDIDATE_POOL_LIMIT", "120")))
     candidate_limit = min(candidate_limit, 160)
     understanding = understand_tax_research_question(query)
+    institution_matcher, institution_matches, locked_definitions = _locked_institution_definitions(query)
+    supplemental_queries = _institution_candidate_queries(locked_definitions)
     diagnostics_token = _candidate_diagnostics.set({})
     active_query_token = _active_user_query.set(query)
     try:
         if july7_mysql_rag.is_mysql_rag_configured():
-            chunks = _search_historical_mysql(query, limit=candidate_limit)
+            if locked_definitions:
+                chunks = _search_historical_mysql(
+                    query,
+                    limit=candidate_limit,
+                    supplemental_queries=supplemental_queries,
+                    institution_matcher=institution_matcher,
+                    locked_definitions=locked_definitions,
+                )
+            else:
+                chunks = _search_historical_mysql(query, limit=candidate_limit)
         else:
-            chunks = _search_historical_sqlite(query, limit=candidate_limit)
+            if locked_definitions:
+                chunks = _search_historical_sqlite(
+                    query,
+                    limit=candidate_limit,
+                    supplemental_queries=supplemental_queries,
+                    institution_matcher=institution_matcher,
+                    locked_definitions=locked_definitions,
+                )
+            else:
+                chunks = _search_historical_sqlite(query, limit=candidate_limit)
     finally:
         _active_user_query.reset(active_query_token)
     candidate_diagnostics = _candidate_diagnostics.get()
@@ -978,26 +1198,47 @@ def search_tax_interpretations_with_trace(
     hydrated_documents = hydrate_tax_interpretation_documents(validation_candidates)
     classified: list[TaxResearchDocument] = []
     for chunk in hydrated_documents:
-        assessment = assess_candidate(
-            understanding,
-            subject=chunk.subject,
-            text=chunk.chunk_text,
-            provisions=chunk.legal_provisions,
+        assessment = (
+            _assess_locked_institution_candidate(
+                matcher=institution_matcher,
+                definitions=locked_definitions,
+                chunk=chunk,
+            )
+            if locked_definitions
+            else assess_candidate(
+                understanding,
+                subject=chunk.subject,
+                text=chunk.chunk_text,
+                provisions=chunk.legal_provisions,
+            )
         )
         classified.append(TaxResearchDocument(replace(chunk, score=assessment.score), assessment))
     classified.sort(key=lambda item: (item.assessment.score, item.chunk.document_id), reverse=True)
     main = [item for item in classified if not item.assessment.reject and item.assessment.relation in {"direct", "strong_analogy"}]
     context = [item for item in classified if not item.assessment.reject and item.assessment.relation == "context_only"]
     secondary = [item for item in classified if item.assessment.relation == "different_mechanism"]
-    documents = tuple([*main[:effective_limit], *context[: max(0, effective_limit - len(main))], *secondary[: max(0, effective_limit - len(main) - len(context))]])
-    return TaxResearchSearchResult(
-        question=query,
-        understanding=understanding,
-        database_queries=tuple([
+    documents = tuple(
+        main[:effective_limit]
+        if locked_definitions
+        else [
+            *main[:effective_limit],
+            *context[: max(0, effective_limit - len(main))],
+            *secondary[: max(0, effective_limit - len(main) - len(context))],
+        ]
+    )
+    database_queries = (
+        tuple(f"named_institution_canonical:{item}" for item in supplemental_queries)
+        if locked_definitions
+        else tuple([
             *_build_bounded_historical_mysql_queries(query),
             *(f"title_metadata:{left}+{right}" for left, right in _metadata_candidate_pairs(understanding)),
             *(f"provision_metadata:{understanding.tax_domain}:art.{article}" for article in _candidate_provision_articles(understanding)),
-        ]),
+        ])
+    )
+    return TaxResearchSearchResult(
+        question=query,
+        understanding=understanding,
+        database_queries=database_queries,
         candidate_counts={
             "raw": int(candidate_diagnostics.get("raw", len(chunks))),
             "deduplicated": int(candidate_diagnostics.get("deduplicated", len(document_candidates))),
@@ -1006,6 +1247,7 @@ def search_tax_interpretations_with_trace(
             "provision_metadata": int(candidate_diagnostics.get("provision_metadata", 0)),
             "validated": len(hydrated_documents),
             "after_rerank": len(classified),
+            "named_institution_filtered": sum(item.assessment.reject for item in classified) if locked_definitions else 0,
         },
         candidates_before_rerank=tuple(
             {
@@ -1028,6 +1270,9 @@ def search_tax_interpretations_with_trace(
         ),
         validation_results=tuple(item.to_dict() for item in classified[:50]),
         documents=documents,
+        institution_matches=institution_matches,
+        locked_institution_ids=tuple(item.institution_id for item in locked_definitions),
+        institution_filter_rejections=sum(item.assessment.reject for item in classified) if locked_definitions else 0,
     )
 
 

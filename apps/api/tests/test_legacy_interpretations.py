@@ -2,7 +2,14 @@ from app import legacy_interpretations
 from app.legacy_july7.rag import RagChunk
 
 
-def make_chunk(*, document_id: str = "interpretation-1", score: float = 99.0, subject: str, text: str) -> RagChunk:
+def make_chunk(
+    *,
+    document_id: str = "interpretation-1",
+    score: float = 99.0,
+    subject: str,
+    text: str,
+    legal_provisions=None,
+) -> RagChunk:
     return RagChunk(
         chunk_id=f"{document_id}:0",
         document_id=document_id,
@@ -14,6 +21,7 @@ def make_chunk(*, document_id: str = "interpretation-1", score: float = 99.0, su
         published_date=None,
         source_url=None,
         category="Interpretacja indywidualna",
+        legal_provisions=legal_provisions or [],
     )
 
 
@@ -235,6 +243,40 @@ def test_search_filters_against_full_document_not_the_winning_chunk(monkeypatch)
 
     assert [item.document_id for item in result] == [hydrated.document_id]
     assert result[0].score > 0
+
+
+def test_explicit_named_institution_rejects_generic_developer_cost_neighbour(monkeypatch) -> None:
+    """A generic business-cost document must not survive an expansion-relief lock."""
+
+    wrong_neighbour = make_chunk(
+        document_id="developer-cost",
+        subject="Cesja umowy deweloperskiej - koszty uzyskania przychodu",
+        text="Wydatki dewelopera mieszkaniowego jako koszty uzyskania przychodów.",
+        legal_provisions=["PIT art. 22 ust. 1"],
+    )
+    direct = make_chunk(
+        document_id="expansion-relief",
+        subject="Ulga na ekspansję - zwiększenie przychodów ze sprzedaży produktów",
+        text="Wnioskodawca analizuje ulgę na ekspansję oraz koszty zwiększenia przychodów ze sprzedaży produktów.",
+        legal_provisions=["CIT art. 18eb"],
+    )
+    monkeypatch.setattr(legacy_interpretations.july7_mysql_rag, "is_mysql_rag_configured", lambda: True)
+    monkeypatch.setattr(
+        legacy_interpretations,
+        "_search_historical_mysql",
+        lambda *args, **kwargs: [wrong_neighbour, direct],
+    )
+    monkeypatch.setattr(legacy_interpretations, "hydrate_tax_interpretation_documents", lambda chunks: chunks)
+
+    result = legacy_interpretations.search_tax_interpretations_with_trace(
+        "Czy deweloper mieszkaniowy może skorzystać z ulgi na ekspansję?",
+        limit=6,
+    )
+
+    assert result.locked_institution_ids == ("expansion_relief",)
+    assert [item.chunk.document_id for item in result.documents] == ["expansion-relief"]
+    assert result.documents[0].assessment.document_mechanism == "expansion_relief"
+    assert result.institution_filter_rejections == 1
 
 
 def test_coverage_ranking_prefers_document_covering_more_query_concepts() -> None:

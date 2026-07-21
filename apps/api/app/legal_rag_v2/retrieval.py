@@ -826,6 +826,40 @@ class _BaseLane:
             # In particular, the question's WHT/SaaS plan must never label a
             # housing or rehabilitation interpretation as a WHT authority.
             question_card = build_question_card(question=plan.user_query, issue=issue)
+            hydrate_document = getattr(self.backend, "hydrate_document", None)
+
+            async def source_for_validation(candidate: RetrievalCandidate) -> RetrievalCandidate:
+                """Use complete source text for the bounded validation pool.
+
+                Retrieval remains chunk-oriented, but a direct authority must
+                not be classified from an arbitrary first chunk when the
+                backend can cheaply hydrate its source document.
+                """
+
+                if hydrate_document is None:
+                    return candidate
+                try:
+                    hydrated = await asyncio.wait_for(hydrate_document(candidate), timeout=8.0)
+                except Exception:
+                    return candidate
+                if not isinstance(hydrated, RetrievalCandidate):
+                    return candidate
+                return replace(
+                    hydrated,
+                    metadata={
+                        **dict(hydrated.metadata),
+                        "document_validation_hydrated": len(hydrated.text) > len(candidate.text),
+                    },
+                )
+
+            # This is deliberately bounded: the card cache makes repeat
+            # requests cheap and a sparse query cannot trigger a whole-corpus
+            # expansion before validation.
+            hydration_limit = max(12, self.config.selected_limit_per_issue * 2)
+            hydrated_prefix = await asyncio.gather(
+                *(source_for_validation(candidate) for candidate in reranked[:hydration_limit])
+            )
+            reranked = [*hydrated_prefix, *reranked[hydration_limit:]]
             retained: list[RetrievalCandidate] = []
             for candidate in reranked:
                 document_card = build_document_card(candidate, matcher=self.institution_matcher)
@@ -836,13 +870,15 @@ class _BaseLane:
                         metadata={
                             **dict(candidate.metadata),
                             "document_card": document_card.to_dict(),
-                            "document_validation": {
+                                "document_validation": {
                                 "institution_gate_passed": validation.passed,
                                 "relation": validation.relation,
                                 "rejection_reason": validation.reason,
                                 "matched_institutions": list(validation.matched_institutions),
+                                    "axes": dict(validation.axes or {}),
+                                },
+                                "question_locked_institutions": list(question_card.locked_institutions),
                             },
-                        },
                     ))
                     continue
                 trace.append(
@@ -858,6 +894,7 @@ class _BaseLane:
                         "institution_ids": list(issue.locked_institution_ids),
                         "document_card": document_card.to_dict(),
                         "relation": validation.relation,
+                        "axes": dict(validation.axes or {}),
                     }
                 )
             reranked = retained

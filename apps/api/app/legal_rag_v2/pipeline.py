@@ -618,7 +618,7 @@ class LegalRagV2Pipeline:
                 "provider": get_model_gateway_config().provider,
                 "model": self.config.answer_writer_model,
                 "git_commit": _git_commit(),
-                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.79"),
+                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.80"),
                 "controlled_pipeline_used": False,
                 "fallbacks_used": [],
                 **vector_index_runtime_status(),
@@ -741,7 +741,7 @@ class LegalRagV2Pipeline:
                 "provider": get_model_gateway_config().provider,
                 "model": self.config.answer_writer_model,
                 "git_commit": _git_commit(),
-                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.79"),
+                "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.80"),
                 "controlled_pipeline_used": False,
                 "fallbacks_used": ([planner_outcome.fallback_trace.fallback_reason] if planner_outcome.fallback_trace.fallback_used else []),
                 **vector_index_runtime_status(),
@@ -790,7 +790,7 @@ class LegalRagV2Pipeline:
                         "provider": get_model_gateway_config().provider,
                         "model": self.config.answer_writer_model,
                         "git_commit": _git_commit(),
-                        "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.79"),
+                        "api_version": os.getenv("ALITIGATOR_API_VERSION", "2.0.80"),
                         "controlled_pipeline_used": False,
                         "fallbacks_used": [augmented.fallback_trace.fallback_reason],
                         **vector_index_runtime_status(),
@@ -1110,9 +1110,11 @@ class LegalRagV2Pipeline:
                 "mechanism": next(iter(document_card.get("detected_mechanisms") or ()), ""),
                 "provisions": list(document_card.get("cited_provisions") or provisions)[:8],
                 "score": candidate.score,
+                "question_institutions": list(metadata.get("question_locked_institutions") or []),
                 "relation": str(validation.get("relation") or "unverified"),
                 "institution_gate_passed": bool(validation.get("institution_gate_passed")),
                 "matched_institutions": list(validation.get("matched_institutions") or []),
+                "comparison_axes": dict(validation.get("axes") or {}),
                 "document_card": document_card,
                 "document_evidence": list(document_card.get("evidence") or []),
             }
@@ -1133,6 +1135,8 @@ class LegalRagV2Pipeline:
                 "reason": str(event.get("reason") or "missing_locked_institution_markers"),
                 "signature": str((event.get("candidate_signature") or {}).get("document_id") or ""),
                 "document_card": dict(event.get("document_card") or {}),
+                "comparison_axes": dict(event.get("axes") or {}),
+                "question_institutions": list(event.get("institution_ids") or []),
             }
             for event in retrieval.trace
             if event.get("event") == "institution_filter_rejection"
@@ -1201,6 +1205,7 @@ class LegalRagV2Pipeline:
                     {
                         "signature": item["signature"],
                         "document_card": item["document_card"],
+                        "comparison_axes": item["comparison_axes"],
                         "relation": item["relation"],
                         "reject": False,
                     }
@@ -1210,6 +1215,7 @@ class LegalRagV2Pipeline:
                     {
                         "signature": str((event.get("candidate_signature") or {}).get("document_id") or ""),
                         "document_card": dict(event.get("document_card") or {}),
+                        "comparison_axes": dict(event.get("axes") or {}),
                         "relation": str(event.get("relation") or "irrelevant"),
                         "reject": True,
                     }
@@ -1228,6 +1234,7 @@ class LegalRagV2Pipeline:
                         "reason": "document_institution_evidence_present",
                         "signature": item["signature"],
                         "document_card": item["document_card"],
+                        "comparison_axes": item["comparison_axes"],
                     }
                     for item in final_authorities
                     if item["institution_gate_passed"]

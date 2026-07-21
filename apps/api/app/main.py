@@ -137,7 +137,7 @@ load_dotenv()
 validate_required_active_institutions()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.79"
+API_VERSION = "2.0.80"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(

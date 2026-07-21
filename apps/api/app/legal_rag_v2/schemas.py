@@ -134,6 +134,25 @@ QueryFamilyName = Literal[
     "named_institution_provision",
     "named_institution_statutory",
     "named_institution_concept",
+    # Query-understanding families are deterministic retrieval probes.  They
+    # remain separate in traces from planner-generated natural-language work.
+    "exact_user_phrase",
+    "named_institution",
+    "provision",
+    "legal_synonyms",
+    "factual_synonyms",
+    "role_and_direction",
+    "material_rights",
+    "negative_control",
+    "locked_institution",
+    "verified_provision",
+    "product_or_service",
+    "contract_type",
+    "material_facts",
+    "model_soft_expansion",
+    "semantic_query",
+    "legal_concepts",
+    "statutory_language",
 ]
 
 

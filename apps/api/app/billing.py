@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from functools import lru_cache
+from threading import Lock
 from typing import Any, Optional
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -53,6 +55,9 @@ DEFAULT_CREDIT_PACKS = [
     },
 ]
 DEFAULT_CREDIT_COST_PER_QUERY = 1
+_PROFILE_CACHE_SECONDS = 15.0
+_profile_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_profile_cache_lock = Lock()
 DEFAULT_CREDIT_UNIT_PRICE_GROSS = 200
 DEFAULT_CREDIT_CURRENCY = "pln"
 
@@ -250,19 +255,40 @@ def _raise_supabase_http_error(exc: APIError) -> None:
 
 
 def ensure_profile(user: AuthenticatedUser) -> dict[str, Any]:
+    now = time.monotonic()
+    with _profile_cache_lock:
+        cached = _profile_cache.get(user.id)
+        if cached and now - cached[0] < _PROFILE_CACHE_SECONDS:
+            return dict(cached[1])
     client = require_supabase_client()
     payload = {
         "id": user.id,
         "email": user.email,
         "full_name": user.full_name,
     }
-    try:
-        response = client.table("profiles").upsert(payload).execute()
-    except APIError as exc:
-        _raise_supabase_http_error(exc)
+    response = None
+    transport_error: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            response = client.table("profiles").upsert(payload).execute()
+            break
+        except APIError as exc:
+            _raise_supabase_http_error(exc)
+        except httpx.HTTPError as exc:
+            transport_error = exc
+            if attempt == 0:
+                time.sleep(0.15)
+    if response is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Usługa profilu jest chwilowo niedostępna. Spróbuj ponownie za moment.",
+        ) from transport_error
     rows = response.data or []
     if rows:
-        return rows[0]
+        profile = dict(rows[0])
+        with _profile_cache_lock:
+            _profile_cache[user.id] = (time.monotonic(), profile)
+        return profile
 
     try:
         fallback = client.table("profiles").select("*").eq("id", user.id).limit(1).execute()
@@ -271,7 +297,10 @@ def ensure_profile(user: AuthenticatedUser) -> dict[str, Any]:
     fallback_rows = fallback.data or []
     if not fallback_rows:
         raise HTTPException(status_code=500, detail="Nie udalo sie przygotowac profilu uzytkownika.")
-    return fallback_rows[0]
+    profile = dict(fallback_rows[0])
+    with _profile_cache_lock:
+        _profile_cache[user.id] = (time.monotonic(), profile)
+    return profile
 
 
 def get_profile(user_id: str) -> dict[str, Any]:

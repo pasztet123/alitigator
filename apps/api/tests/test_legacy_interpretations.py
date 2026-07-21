@@ -289,7 +289,7 @@ def test_july7_wht_snapshot_uses_document_cards_not_question_mechanism(monkeypat
             document_id="0111-KDIB2-1.4010.117.2026.2.BJ",
             subject="Podatek u źródła od odsetek i konwersji długu na kapitał",
             text="Indonezyjski podatek u źródła od odsetek i konwersji długu na kapitał.",
-            legal_provisions=["CIT art. 20"],
+            legal_provisions=["CIT art. 21"],
         ),
         make_chunk(
             document_id="0115-KDIT1.4011.321.2026.1.MK",
@@ -322,6 +322,22 @@ def test_july7_wht_snapshot_uses_document_cards_not_question_mechanism(monkeypat
     assert validation["0115-KDIT2.4011.79.2026.2.MD"]["document_detected_mechanisms"] == ["rehabilitation_relief"]
     assert validation["0111-KDIB2-1.4010.117.2026.2.BJ"]["relation"] == "context_only"
     assert validation["WHT-SAAS"]["renderer_mechanism_source"] == "document_card"
+
+
+def test_locked_institution_query_pivots_keep_product_and_contract_terms_separate() -> None:
+    question = (
+        "Czy polska spółka musi pobrać podatek u źródła od opłaty za dostęp "
+        "do zagranicznego SaaS, jeżeli umowa to EULA?"
+    )
+    _, _, definitions = legacy_interpretations._locked_institution_definitions(question)
+
+    pivots = legacy_interpretations._institution_candidate_queries(definitions, question)
+
+    assert "podatek u źródła" in pivots
+    assert "CIT art. 21" in pivots
+    assert "podatek u źródła oprogramowanie jako usługa" in pivots
+    assert "należności licencyjne oprogramowanie jako usługa" in pivots
+    assert "SAAS EULA" not in pivots
 
 
 def test_coverage_ranking_prefers_document_covering_more_query_concepts() -> None:

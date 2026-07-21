@@ -109,3 +109,13 @@ alter table legal_provisions add column if not exists tax_domain varchar(64) not
 alter table legal_provisions add column if not exists taxpayer_role varchar(64) not null default '';
 alter table legal_provisions add column if not exists legal_mechanism varchar(128) not null default '';
 alter table legal_provisions add column if not exists entailed_result_codes_json longtext not null default ('[]');
+
+create table if not exists legal_document_cards (
+    document_id varchar(191) not null,
+    extractor_version varchar(96) not null,
+    dictionary_version varchar(96) not null,
+    content_sha256 varchar(64) not null,
+    card_json longtext not null,
+    created_at timestamp not null default current_timestamp,
+    primary key (document_id, extractor_version, dictionary_version, content_sha256)
+) engine=InnoDB default charset=utf8mb4 collate=utf8mb4_unicode_ci;

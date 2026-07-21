@@ -79,11 +79,11 @@ class FakePipeline:
 class LegalRagV2RoutingTests(unittest.IsolatedAsyncioTestCase):
     async def test_v2_is_the_default_when_no_routing_variable_is_set(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(get_legal_pipeline_mode(), "model_rag_model")
+            self.assertEqual(get_legal_pipeline_mode(), "legal_rag_v2")
 
     async def test_health_exposes_the_pipeline_that_will_serve_chat(self) -> None:
         with (
-            patch.dict(os.environ, {"LEGAL_RAG_MODE": "model_rag_model"}),
+            patch.dict(os.environ, {"LEGAL_RAG_MODE": "legacy"}),
             patch("app.main.index_exists", return_value=True),
             patch("app.main.is_model_gateway_configured", return_value=True),
             patch("app.main.is_supabase_configured", return_value=False),
@@ -94,7 +94,7 @@ class LegalRagV2RoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.legal_pipeline["served_by"], "legal_rag_v2")
         self.assertEqual(
-            response.legal_pipeline["pipeline_mode"], "model_rag_model"
+            response.legal_pipeline["pipeline_mode"], "legal_rag_v2"
         )
         self.assertIn("pipeline_version", response.legal_pipeline)
 
@@ -113,8 +113,18 @@ class LegalRagV2RoutingTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
 
-    async def test_public_rag_mode_flag_maps_rag_v2_without_changing_legacy_alias(self) -> None:
+    async def test_deprecated_rag_mode_cannot_override_the_active_architecture(self) -> None:
         with patch.dict(os.environ, {"LEGAL_RAG_MODE": "rag_v2", "LEGAL_PIPELINE_MODE": "legacy"}):
+            self.assertEqual(get_legal_pipeline_mode(), "legal_rag_v2")
+        with patch.dict(os.environ, {"LEGAL_RAG_MODE": "legacy", "LEGAL_PIPELINE_MODE": "legacy"}):
+            self.assertEqual(get_legal_pipeline_mode(), "legal_rag_v2")
+
+    async def test_only_explicit_architecture_values_enable_rollback_or_shadow(self) -> None:
+        with patch.dict(os.environ, {"LEGAL_QUERY_ARCHITECTURE": "v1"}):
+            self.assertEqual(get_legal_pipeline_mode(), "legacy")
+        with patch.dict(os.environ, {"LEGAL_QUERY_ARCHITECTURE": "v2_shadow"}):
+            self.assertEqual(get_legal_pipeline_mode(), "shadow")
+        with patch.dict(os.environ, {"LEGAL_QUERY_ARCHITECTURE": "typo"}):
             self.assertEqual(get_legal_pipeline_mode(), "legal_rag_v2")
 
     async def test_failed_deterministic_validation_blocks_user_response(self) -> None:

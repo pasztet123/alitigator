@@ -77,6 +77,13 @@ from .transfer_pricing import enrich_transfer_pricing_plan, question_targets_tra
 from .vat import enrich_input_vat_deduction_plan, enrich_mixed_use_vehicle_vat_plan
 from .wht import WhtPayAndRefundCalculationEngine, enrich_crossborder_wht_plan
 from app.tax_research import understand_tax_research_question
+from app.query_understanding import build_query_families
+from app.query_understanding.deterministic_extractor import build_question_card as build_generic_question_card
+from app.query_understanding.merger import merge_query_plan
+from app.query_understanding.model_analyzer import QUERY_ANALYZER_VERSION, analyze_with_model
+from app.legal_concepts import ConceptMatcher
+from app.observability import RETRIEVAL_TRACE_VERSION, build_cache_identity
+from app.query_generation import QUERY_BUILDER_VERSION
 
 
 PIPELINE_VERSION = "legal_rag_v2_3"
@@ -165,6 +172,42 @@ def _enrich_authority_research_inputs(plan: LegalResearchPlan, question: str) ->
             "query_families": families,
         }))
     return plan.model_copy(update={"issues": enriched})
+
+
+async def _apply_query_understanding(plan: LegalResearchPlan, question: str, *, gateway: ModelGateway, model: str) -> tuple[LegalResearchPlan, dict[str, Any]]:
+    """Attach bounded deterministic expansion families without weakening gates.
+
+    This is intentionally after the named-institution merger: the analyzer may
+    observe locks but never creates a way to remove or relax them.
+    """
+    card, concept_matches = build_generic_question_card(question, matcher=ConceptMatcher())
+    locked = [item.institution_id for item in plan.deterministic_institutions]
+    card.locked_institutions = list(dict.fromkeys([*card.locked_institutions, *locked]))
+    expansion, expansion_raw = await analyze_with_model(gateway, card, concept_matches, ConceptMatcher().dictionary.summary(), model=model)
+    query_plan = merge_query_plan(card, concept_matches, expansion)
+    specs = build_query_families(query_plan)
+    issues: list[LegalIssue] = []
+    generic_locks = list(query_plan.locked_institutions)
+    for index, issue in enumerate(plan.issues):
+        target_locks = list(dict.fromkeys([*issue.locked_institution_ids, *generic_locks]))
+        if not target_locks and index > 0:
+            issues.append(issue)
+            continue
+        known = {(family.family, " ".join(family.query.casefold().split())) for family in issue.query_families}
+        added = [
+            QueryFamily(family=spec.type, query=spec.query, lane="authority", origin="deterministic")
+            for spec in specs
+            if (spec.type, " ".join(spec.query.casefold().split())) not in known
+        ]
+        issues.append(issue.model_copy(update={
+            "legal_mechanism": target_locks[0] if target_locks else issue.legal_mechanism,
+            "tax_domains": list(dict.fromkeys([*issue.tax_domains, *query_plan.question_card.tax_domains])),
+            "locked_institution_ids": target_locks,
+            "query_families": [*issue.query_families, *added],
+        }))
+    trace = query_plan.to_dict()
+    trace.update({"query_analyzer_version": QUERY_ANALYZER_VERSION, "concept_matches": [item.__dict__ for item in concept_matches.matches], "model_query_expansion": expansion_raw, "dictionary_version": concept_matches.dictionary_version})
+    return plan.model_copy(update={"issues": issues}), trace
 
 
 class SynthesisPayloadTooLargeError(ModelGatewayError):
@@ -699,6 +742,9 @@ class LegalRagV2Pipeline:
             institution_matches,
             dictionary=self.institution_matcher.dictionary,
         )
+        plan, query_understanding_trace = await _apply_query_understanding(plan, question, gateway=self.gateway, model=self.config.planner_model)
+        trace.write_json("query_understanding.json", query_understanding_trace)
+        trace.write_json("query_families.json", query_understanding_trace.get("query_families", []))
         trace.write_json("legal_research_plan.json", plan)
         trace.write_json("research_plan.json", plan)
         trace.write_json("clarification.json", plan.clarification)
@@ -765,6 +811,9 @@ class LegalRagV2Pipeline:
                     institution_matches,
                     dictionary=self.institution_matcher.dictionary,
                 )
+                plan, query_understanding_trace = await _apply_query_understanding(plan, question, gateway=self.gateway, model=self.config.planner_model)
+                trace.write_json("query_understanding.json", query_understanding_trace)
+                trace.write_json("query_families.json", query_understanding_trace.get("query_families", []))
                 trace.write_json("legal_research_plan.json", plan)
                 trace.write_json("fallback_trace.json", augmented.fallback_trace)
                 trace.write_json("planner_fallback.json", augmented.fallback_trace)
@@ -1154,12 +1203,46 @@ class LegalRagV2Pipeline:
                 for family in lane.query_families
             ],
         }
+        family_results = [
+            {
+                "family_id": spec["id"],
+                "type": spec["type"],
+                "query": spec["query"],
+                "returned_chunks": sum(
+                    1 for lane in retrieval.authorities for candidate in lane.candidates
+                    if spec["type"] in candidate.query_families
+                ),
+                "returned_documents": len({
+                    candidate.document_id or candidate.candidate_id
+                    for lane in retrieval.authorities for candidate in lane.candidates
+                    if spec["type"] in candidate.query_families
+                }),
+            }
+            for spec in query_understanding_trace.get("query_families", [])
+        ]
+        raw_authorities = [candidate for lane in retrieval.authorities for candidate in lane.candidates]
+        unique_authorities = {candidate.document_id or candidate.candidate_id for candidate in raw_authorities}
+        expanded_candidates = [
+            candidate for candidate in raw_authorities
+            if any(name in candidate.query_families for name in {
+                "locked_institution", "verified_provision", "statutory_language", "legal_concepts",
+                "product_or_service", "contract_type", "material_facts", "model_soft_expansion",
+            })
+        ]
         diagnostic_trace = {
             "request_id": request_id,
             "pipeline_version": PIPELINE_VERSION,
             "runtime_mode": mode,
             "retrieval_profile": "current_legal_rag",
             "cache_hit": False,
+            "cache_identity": build_cache_identity(
+                normalized_question=str((query_understanding_trace.get("question_card") or {}).get("normalized_question") or ""),
+                retrieval_profile="current_legal_rag", pipeline_version=PIPELINE_VERSION,
+                dictionary_version=str(query_understanding_trace.get("dictionary_version") or ""),
+                query_analyzer_version=QUERY_ANALYZER_VERSION, document_extractor_version="document_card_v3",
+                validator_version="relevance_validator_v2", query_builder_version=QUERY_BUILDER_VERSION,
+            ),
+            "retrieval_trace_version": RETRIEVAL_TRACE_VERSION,
             "dictionary_loaded": True,
             "dictionary_version": institution_matches.dictionary_version,
             "active_entry_count": sum(item.status == "active" for item in self.institution_matcher.dictionary.institutions),
@@ -1178,6 +1261,19 @@ class LegalRagV2Pipeline:
             "planner_output": planner_outcome.plan.model_dump(mode="json"),
             "planner_conflicts": [item.model_dump(mode="json") for item in plan.institution_conflicts],
             "locked_institutions_after_merge": [item.institution_id for item in plan.deterministic_institutions],
+            "query_analyzer_version": QUERY_ANALYZER_VERSION,
+            "dictionary_version": query_understanding_trace.get("dictionary_version", ""),
+            "document_extractor_version": "document_card_v3",
+            "validator_version": "relevance_validator_v2",
+            "deterministic_query_fields": query_understanding_trace,
+            # The existing planner remains the model expansion provider.  It
+            # is kept raw here for audit, while only the deterministic merger
+            # may create immutable institution constraints.
+            "model_expansion_raw": query_understanding_trace.get("model_query_expansion", {}),
+            "query_plan": query_understanding_trace,
+            "query_plan_conflicts": [item.model_dump(mode="json") for item in plan.institution_conflicts],
+            "query_families": query_understanding_trace.get("query_families", []),
+            "query_family_results": family_results,
             "authority_search_input": authority_search_input,
             "question_card": [
                 build_question_card(question=question, issue=issue).__dict__
@@ -1197,9 +1293,27 @@ class LegalRagV2Pipeline:
                 if event.get("event") == "candidate_source"
             ],
             "candidate_counts": dict(retrieval_summary := {
+                "raw": len(raw_authorities),
+                "raw_chunks": sum(lane.candidate_count_before_rerank for lane in retrieval.authorities),
+                "raw_documents": len(unique_authorities),
+                "deduplicated": len(unique_authorities),
+                "with_locked_institution": len(expanded_candidates) if (query_understanding_trace.get("locked_institutions") or (query_understanding_trace.get("question_card") or {}).get("locked_institutions")) else len(raw_authorities),
+                "expanded_concept_candidates": len(expanded_candidates),
                 "authority_before_rerank": sum(lane.candidate_count_before_rerank for lane in retrieval.authorities),
                 "authority_after_gate": sum(len(lane.candidates) for lane in retrieval.authorities),
+                "after_document_gate": sum(len(lane.candidates) for lane in retrieval.authorities),
+                "after_institution_gate": sum(len(lane.candidates) for lane in retrieval.authorities),
+                "after_relevance_validation": sum(len(lane.candidates) for lane in retrieval.authorities),
             }),
+            "document_cards": [item["document_card"] for item in final_authorities],
+            "relevance_results": [
+                {"signature": item["signature"], "relation": item["relation"], "axes": item["comparison_axes"], "passed": item["institution_gate_passed"]}
+                for item in final_authorities
+            ],
+            "reranking": [
+                {"signature": item["signature"], "score": item["score"], "relation": item["relation"]}
+                for item in final_authorities
+            ],
             "candidates_before_gate": [
                 *[
                     {
@@ -1246,6 +1360,10 @@ class LegalRagV2Pipeline:
             "renderer_input": final_authorities,
             "final_results": final_authorities,
         }
+        trace.write_json("query_family_results.json", family_results)
+        trace.write_json("document_cards.json", diagnostic_trace["document_cards"])
+        trace.write_json("institution_gate_results.json", diagnostic_trace["institution_gate_results"])
+        trace.write_json("relevance_results.json", diagnostic_trace["relevance_results"])
 
         return PipelineResult(
             request_id=request_id,

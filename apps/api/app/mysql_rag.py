@@ -241,6 +241,19 @@ def ensure_schema(connection: pymysql.connections.Connection) -> None:
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """
         )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS legal_document_cards (
+                document_id varchar(191) NOT NULL,
+                extractor_version varchar(96) NOT NULL,
+                dictionary_version varchar(96) NOT NULL,
+                content_sha256 varchar(64) NOT NULL,
+                card_json LONGTEXT NOT NULL,
+                created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (document_id, extractor_version, dictionary_version, content_sha256)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+        )
     ensure_chunk_fulltext_index(connection)
     connection.commit()
 

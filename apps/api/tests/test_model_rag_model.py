@@ -20,11 +20,11 @@ from app.main import get_legal_pipeline_mode
 
 
 class ModelRagModelContractTests(unittest.TestCase):
-    def test_public_mode_is_available_without_changing_legacy(self) -> None:
+    def test_deprecated_mode_cannot_override_the_canonical_runtime(self) -> None:
         with patch.dict(os.environ, {"LEGAL_RAG_MODE": "model_rag_model"}):
-            self.assertEqual(get_legal_pipeline_mode(), "model_rag_model")
+            self.assertEqual(get_legal_pipeline_mode(), "legal_rag_v2")
         with patch.dict(os.environ, {"LEGAL_RAG_MODE": "legacy"}):
-            self.assertEqual(get_legal_pipeline_mode(), "legacy")
+            self.assertEqual(get_legal_pipeline_mode(), "legal_rag_v2")
 
     def test_explicit_fact_requires_exact_source_lineage(self) -> None:
         with self.assertRaises(ValueError):

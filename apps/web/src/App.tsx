@@ -19,6 +19,7 @@ type Message = {
   feedback_comment?: string | null
   feedback_created_at?: string | null
   structured_reply?: StructuredReply
+  analysis_trace?: Record<string, unknown>
 }
 
 type StructuredReplySection = {
@@ -210,7 +211,7 @@ const HINT_DEBOUNCE_MS = 900
 const MIN_DRAFT_LENGTH_FOR_HINTS = 24
 const ACTIVE_HINT_COUNT = 3
 const MAX_HINT_QUESTION_COUNT = 5
-const APP_VERSION = '2.0.81'
+const APP_VERSION = '2.0.96'
 const ASSISTANT_SECTION_TITLES = [
   'Teza',
   'Analiza',
@@ -463,6 +464,39 @@ function AssistantMessageBody({
   )
 }
 
+function RetrievalLog({ trace }: { trace?: Record<string, unknown> }) {
+  const institutionTrace = trace?.institution_trace as Record<string, unknown> | undefined
+  if (!institutionTrace) return null
+  const matches = Array.isArray(institutionTrace.institution_matches) ? institutionTrace.institution_matches as Record<string, unknown>[] : []
+  const families = Array.isArray(institutionTrace.query_family_results) ? institutionTrace.query_family_results as Record<string, unknown>[] : []
+  const counts = institutionTrace.candidate_counts as Record<string, unknown> | undefined
+  const queryPlan = institutionTrace.query_plan as Record<string, unknown> | undefined
+  const cards = Array.isArray(institutionTrace.document_cards) ? institutionTrace.document_cards as Record<string, unknown>[] : []
+  return (
+    <details className="retrieval-log">
+      <summary>Log retrievalu i analizy zapytania</summary>
+      <div className="retrieval-log-content">
+        <p><strong>Wykryte instytucje:</strong> {matches.length ? matches.map((item) => String(item.id)).join(', ') : 'brak'}</p>
+        {queryPlan ? <p><strong>Mechanizm:</strong> {String(queryPlan.primary_issue || queryPlan.primary_mechanism || 'nieokreślony')} · <strong>kierunek:</strong> {String((queryPlan.question_card as Record<string, unknown> | undefined)?.payment_direction || queryPlan.payment_direction || '—')}</p> : null}
+        {counts ? <p><strong>Kandydaci:</strong> raw {String(counts.raw ?? 0)} · po deduplikacji {String(counts.deduplicated ?? 0)} · po gate {String(counts.after_document_gate ?? counts.authority_after_gate ?? 0)}</p> : null}
+        {families.length ? (
+          <ul>
+            {families.map((family, index) => <li key={`${String(family.family_id)}-${index}`}><code>{String(family.type)}</code>: {String(family.query)} — dokumenty: {String(family.returned_documents ?? 0)}</li>)}
+          </ul>
+        ) : null}
+        {cards.length ? (
+          <details className="retrieval-log-documents">
+            <summary>Dokumenty po walidacji ({cards.length})</summary>
+            <ul>
+              {cards.map((card, index) => <li key={`${String(card.signature || card.title)}-${index}`}><strong>{String(card.signature || 'bez sygnatury')}</strong> · {String(card.relation || 'brak relacji')} · mechanizm: {String(card.mechanism || 'nieustalony')}</li>)}
+            </ul>
+          </details>
+        ) : null}
+      </div>
+    </details>
+  )
+}
+
 function createOptimisticThread(initialMessage: string): ThreadSummary {
   const now = new Date().toISOString()
 
@@ -671,6 +705,7 @@ function App() {
   const [archivedThreads, setArchivedThreads] = useState<ThreadSummary[]>([])
   const [selectedChatId, setSelectedChatId] = useState<string | null>(null)
   const [showArchived, setShowArchived] = useState(false)
+  const [showThreadHistory, setShowThreadHistory] = useState(false)
   const [localThreadMessages, setLocalThreadMessages] = useState<LocalThreadMessages>({})
   const [availableModels, setAvailableModels] = useState<string[]>(['gpt-5.6-terra'])
   const [selectedModel, setSelectedModel] = useState('gpt-5.6-terra')
@@ -1600,6 +1635,7 @@ async function fetchPromptHints({
         feedback_rating: null,
         feedback_comment: null,
         feedback_created_at: null,
+        analysis_trace: data.analysis_trace,
       }
       const resolvedChatId = data.chat_id ?? pendingChatId
       const now = new Date().toISOString()
@@ -1840,43 +1876,53 @@ async function fetchPromptHints({
           <div className="thread-section-header">
             <span>Wątki</span>
             <span className="thread-count">{activeThreads.length}</span>
+            <button
+              type="button"
+              className="thread-history-toggle"
+              onClick={() => setShowThreadHistory((current) => !current)}
+              aria-expanded={showThreadHistory}
+              aria-controls="thread-history"
+            >
+              {showThreadHistory ? 'Ukryj historię' : 'Pokaż historię'}
+            </button>
           </div>
 
-          <div className="thread-list" role="list" aria-label="Aktywne wątki">
-            {activeThreads.map((thread) => (
-              <button
-                key={thread.id}
-                type="button"
-                className={`thread-item ${selectedChatId === thread.id ? 'thread-item-active' : ''}`}
-                onClick={() => setSelectedChatId(thread.id)}
-              >
-                <div className="thread-item-copy">
-                  <strong>{thread.title}</strong>
-                  <p>{thread.last_message_preview || 'Pusty wątek'}</p>
-                </div>
-                <span
-                  className="thread-item-action"
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    void handleArchive(thread.id, true)
-                  }}
+          <div id="thread-history" className={`thread-history-content ${showThreadHistory ? 'thread-history-open' : ''}`}>
+            <div className="thread-list" role="list" aria-label="Aktywne wątki">
+              {activeThreads.map((thread) => (
+                <button
+                  key={thread.id}
+                  type="button"
+                  className={`thread-item ${selectedChatId === thread.id ? 'thread-item-active' : ''}`}
+                  onClick={() => setSelectedChatId(thread.id)}
                 >
-                  <SidebarActionIcon kind="archive" />
-                </span>
-                <div className="thread-item-meta">
-                  <span>{formatThreadTimestamp(thread.updated_at)}</span>
+                  <div className="thread-item-copy">
+                    <strong>{thread.title}</strong>
+                    <p>{thread.last_message_preview || 'Pusty wątek'}</p>
+                  </div>
+                  <span
+                    className="thread-item-action"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      void handleArchive(thread.id, true)
+                    }}
+                  >
+                    <SidebarActionIcon kind="archive" />
+                  </span>
+                  <div className="thread-item-meta">
+                    <span>{formatThreadTimestamp(thread.updated_at)}</span>
+                  </div>
+                </button>
+              ))}
+
+              {!isBootstrapping && activeThreads.length === 0 ? (
+                <div className="thread-empty-state">
+                  <p>Tu będą Twoje bieżące rozmowy.</p>
                 </div>
-              </button>
-            ))}
+              ) : null}
+            </div>
 
-            {!isBootstrapping && activeThreads.length === 0 ? (
-              <div className="thread-empty-state">
-                <p>Tu będą Twoje bieżące rozmowy.</p>
-              </div>
-            ) : null}
-          </div>
-
-          <div className="thread-archive-shell">
+            <div className="thread-archive-shell">
             <button
               type="button"
               className="thread-archive-toggle"
@@ -1915,6 +1961,7 @@ async function fetchPromptHints({
                 ))}
               </div>
             ) : null}
+            </div>
           </div>
         </div>
 
@@ -1991,6 +2038,7 @@ async function fetchPromptHints({
                         content={message.content}
                         structuredReply={message.structured_reply}
                       />
+                      <RetrievalLog trace={message.analysis_trace} />
                       {message.feedback_rating ? (
                         <div className="message-feedback-card">
                           <p className="message-feedback-label">

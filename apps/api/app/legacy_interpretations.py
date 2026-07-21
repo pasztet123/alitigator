@@ -15,6 +15,7 @@ from typing import Any, Mapping, Sequence
 
 from app.legal_institutions import InstitutionMatcher
 from app.legal_institutions.schema import InstitutionDefinition
+from app.legal_concepts import ConceptMatcher
 from app.legal_rag_v2.document_validation import (
     DOCUMENT_CARD_VERSION,
     DocumentCard,
@@ -858,28 +859,62 @@ def _institution_candidate_queries(
     definitions: Sequence[InstitutionDefinition],
     question: str,
 ) -> tuple[str, ...]:
-    """Use one selective, canonical FTS channel per explicit institution.
+    """Build bounded dictionary pivots for the legacy interpretation corpus.
 
-    The historical MariaDB adapter expands one FTS request into its own bounded
-    lexical variants.  Sending aliases and provisions as separate requests
-    multiplies the read cost and can exhaust the interactive timeout without
-    improving the authority gate.  The full-document marker check below still
-    considers aliases and verified provisions when judging a fetched document.
+    The corpus adapter accepts one FTS phrase per channel.  A combined acronym
+    probe (for example two independent contract/product terms) has poor recall,
+    so each directly detected material concept gets its own bounded pivot.
     """
+    pivots: list[str] = []
+    for definition in definitions:
+        pivots.append(definition.canonical_name)
+        pivots.extend(definition.provision_hints[:2])
+        pivots.extend(definition.statutory_phrases[:1])
 
-    distinctive_terms: list[str] = []
-    for index, token in enumerate(re.findall(r"[0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", question)):
-        if index == 0 or len(token) < 2:
+    material_types = {"product_or_service", "contract_type", "transaction_type", "payment_type"}
+    concept_matcher = ConceptMatcher()
+    dictionary_match = concept_matcher.match(question)
+    material_by_type: dict[str, list[str]] = {}
+    for match in dictionary_match.matches:
+        if match.match_type == "related_concept" or match.concept_type not in material_types:
             continue
-        if token.isupper() or any(character.isupper() for character in token[1:]):
-            if token.casefold() not in {item.casefold() for item in distinctive_terms}:
-                distinctive_terms.append(token)
-        if len(distinctive_terms) >= 6:
-            break
-    return tuple(dict.fromkeys((
-        *(definition.canonical_name for definition in definitions),
-        *( (" ".join(distinctive_terms),) if distinctive_terms else () ),
-    )))
+        definition = concept_matcher.dictionary.by_id[match.concept_id]
+        material_by_type.setdefault(match.concept_type, []).append(definition.canonical_name)
+        pivots.append(match.matched_text)
+
+    # A legal institution alone is intentionally broad.  Pair it with every
+    # directly evidenced material concept in a separate FTS probe so the
+    # candidate generator can reach documents whose editorial wording uses the
+    # statutory institution plus a canonical product/transaction label.
+    institution_labels: list[str] = []
+    for institution in definitions:
+        generic = concept_matcher.dictionary.by_id.get(institution.institution_id)
+        if generic:
+            institution_labels.extend(
+                term
+                for term in generic.legal_terms
+                if term.casefold() != generic.canonical_name.casefold()
+            )
+        institution_labels.append(institution.canonical_name)
+    material_pivots = [
+        value
+        for concept_type in ("product_or_service", "contract_type", "transaction_type", "payment_type")
+        for value in dict.fromkeys(material_by_type.get(concept_type) or ())
+    ]
+    composites = [
+        f"{institution_label} {material}"
+        for institution_label in dict.fromkeys(institution_labels)
+        for material in dict.fromkeys(material_pivots)
+    ]
+    institution_count = sum(1 + min(2, len(item.provision_hints)) + min(1, len(item.statutory_phrases)) for item in definitions)
+    base_pivots = tuple(dict.fromkeys([
+        *pivots[:institution_count],
+    ]))
+    return tuple(dict.fromkeys([
+        *base_pivots,
+        *composites[: max(0, 8 - len(base_pivots))],
+        *pivots[institution_count:],
+    ]))[:8]
 
 
 def _assess_locked_institution_candidate(

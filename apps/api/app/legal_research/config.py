@@ -12,7 +12,7 @@ def _bool(name: str, default: bool) -> bool:
 
 @dataclass(frozen=True)
 class LegalResearchConfig:
-    mode: str = "legacy"
+    mode: str = "legal_rag_v2"
     artifact_root: Path = Path("artifacts/model_rag_model")
     planner_model: str = "gpt-5.6-terra"
     evidence_analyst_model: str = "gpt-5.6-terra"
@@ -28,8 +28,10 @@ class LegalResearchConfig:
 
     @classmethod
     def from_env(cls) -> "LegalResearchConfig":
+        architecture = os.getenv("LEGAL_QUERY_ARCHITECTURE", "v2_active").strip().lower()
+        mode = "legacy" if architecture == "v1" else "shadow" if architecture == "v2_shadow" else "legal_rag_v2"
         return cls(
-            mode=(os.getenv("LEGAL_RAG_MODE") or "model_rag_model").strip().lower(),
+            mode=mode,
             artifact_root=Path(os.getenv("MODEL_RAG_MODEL_ARTIFACT_ROOT", "artifacts/model_rag_model")),
             planner_model=os.getenv("LEGAL_PLANNER_MODEL", "gpt-5.6-terra"),
             evidence_analyst_model=os.getenv("EVIDENCE_ANALYST_MODEL", "gpt-5.6-terra"),

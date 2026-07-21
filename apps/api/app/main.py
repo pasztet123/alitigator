@@ -80,9 +80,9 @@ from app.hybrid_authority_rag import (
     to_jsonable,
     write_hybrid_trace_artifacts,
 )
-from app.legal_research.pipeline import create_default_pipeline
 from app.legal_rag_v2.pipeline import (
     PIPELINE_VERSION as LEGAL_RAG_PIPELINE_VERSION,
+    create_default_pipeline as create_canonical_legal_pipeline,
     vector_index_runtime_status,
 )
 from app.legal_institutions import validate_required_active_institutions
@@ -137,7 +137,7 @@ load_dotenv()
 validate_required_active_institutions()
 
 logger = logging.getLogger("alitigator.api")
-API_VERSION = "2.0.81"
+API_VERSION = "2.0.96"
 MODEL_GATEWAY_CONFIG = get_model_gateway_config()
 DEFAULT_MODEL = MODEL_GATEWAY_CONFIG.model
 AVAILABLE_MODELS = list(
@@ -159,7 +159,8 @@ MODEL_CHAT_TIMEOUT_SECONDS = min(
     max(30.0, MODEL_GATEWAY_CONFIG.timeout_seconds),
 )
 
-_LEGAL_PIPELINE_MODES = {"legacy", "model_rag_model", "legal_rag_v2", "shadow"}
+_LEGAL_QUERY_ARCHITECTURES = {"v1", "v2_shadow", "v2_active"}
+_CANONICAL_LEGAL_PIPELINE_MODE = "legal_rag_v2"
 _legal_rag_v2_pipeline = None
 _shadow_tasks: set[asyncio.Task] = set()
 _shadow_semaphore = asyncio.Semaphore(
@@ -168,33 +169,30 @@ _shadow_semaphore = asyncio.Semaphore(
 
 
 def get_legal_pipeline_mode() -> str:
-    # LEGAL_RAG_MODE is the public, deployment-facing switch.  Keep the old
-    # variable as a compatibility alias for existing environments and tests.
-    # V2 is the production answer path. Shadow and legacy remain explicit
-    # rollback modes; an omitted deployment flag must never silently route a
-    # user-visible answer through the retired pipeline.
-    raw = os.getenv("LEGAL_RAG_MODE") or os.getenv(
-        "LEGAL_PIPELINE_MODE", "model_rag_model"
-    )
-    mode = raw.strip().lower()
-    aliases = {
-        "rag_v2": "legal_rag_v2",
-        "legacy": "legacy",
-        "model_rag_model": "model_rag_model",
-        "shadow": "shadow",
-    }
-    mode = aliases.get(mode, mode)
-    return mode if mode in _LEGAL_PIPELINE_MODES else "legacy"
+    """Return the one user-facing answer path selected by architecture only."""
+    architecture = get_legal_query_architecture()
+    if architecture == "v1":
+        return "legacy"
+    if architecture == "v2_shadow":
+        return "shadow"
+    return _CANONICAL_LEGAL_PIPELINE_MODE
+
+
+def get_legal_query_architecture() -> str:
+    """Deployment switch for the shared concept/query/document architecture."""
+    value = os.getenv("LEGAL_QUERY_ARCHITECTURE", "v2_active").strip().lower()
+    return value if value in _LEGAL_QUERY_ARCHITECTURES else "v2_active"
 
 
 def legal_runtime_debug(*, controlled_pipeline_used: bool = False) -> dict[str, object]:
     """Stable runtime identity included in API/debug traces, never secrets."""
     mode = get_legal_pipeline_mode()
     return {
+        "query_architecture": get_legal_query_architecture(),
         "pipeline_mode": mode,
         "pipeline_version": LEGAL_RAG_PIPELINE_VERSION,
-        "served_by": "legal_rag_v2" if mode in {"model_rag_model", "legal_rag_v2"} else "legacy",
-        "retrieval_mode": "issue_scoped_bidirectional" if mode in {"model_rag_model", "legal_rag_v2"} else get_legal_retrieval_mode(),
+        "served_by": "legal_rag_v2" if mode == _CANONICAL_LEGAL_PIPELINE_MODE else "legacy",
+        "retrieval_mode": "issue_scoped_bidirectional" if mode == _CANONICAL_LEGAL_PIPELINE_MODE else get_legal_retrieval_mode(),
         "rag_backend": resolve_rag_runtime().read_backend,
         "planner_mode": "model_first" if mode in {"model_rag_model", "legal_rag_v2"} else "legacy_rules",
         "authority_extractor_mode": (
@@ -202,11 +200,11 @@ def legal_runtime_debug(*, controlled_pipeline_used: bool = False) -> dict[str, 
             if os.getenv("LEGAL_RAG_V2_MODEL_AUTHORITY_EXTRACTION", "").strip().lower()
             in {"1", "true", "yes", "on"}
             else "heuristic"
-        ) if mode in {"model_rag_model", "legal_rag_v2"} else "heuristic_or_disabled",
+        ) if mode == _CANONICAL_LEGAL_PIPELINE_MODE else "heuristic_or_disabled",
         "answer_provider": MODEL_GATEWAY_CONFIG.provider,
-        "answer_model": MODEL_GATEWAY_CONFIG.answer_writer_model if mode in {"model_rag_model", "legal_rag_v2"} else DEFAULT_MODEL,
+        "answer_model": MODEL_GATEWAY_CONFIG.answer_writer_model if mode == _CANONICAL_LEGAL_PIPELINE_MODE else DEFAULT_MODEL,
         "provider": MODEL_GATEWAY_CONFIG.provider,
-        "model": MODEL_GATEWAY_CONFIG.answer_writer_model if mode in {"model_rag_model", "legal_rag_v2"} else DEFAULT_MODEL,
+        "model": MODEL_GATEWAY_CONFIG.answer_writer_model if mode == _CANONICAL_LEGAL_PIPELINE_MODE else DEFAULT_MODEL,
         "git_commit": _git_commit(),
         "api_version": API_VERSION,
         "controlled_pipeline_used": controlled_pipeline_used,
@@ -311,7 +309,7 @@ def _git_commit() -> str:
 def get_legal_rag_v2_pipeline():
     global _legal_rag_v2_pipeline
     if _legal_rag_v2_pipeline is None:
-        _legal_rag_v2_pipeline = create_default_pipeline()
+        _legal_rag_v2_pipeline = create_canonical_legal_pipeline()
     return _legal_rag_v2_pipeline
 
 
@@ -3625,6 +3623,8 @@ async def chat(
     retrieval_preferences_context = build_retrieval_preferences_context(request.retrieval_preferences)
     effective_user_prompt = build_effective_user_prompt(latest_user_message, request.intent_hints)
 
+    # This is an explicit research-only mode selected in the UI.  The default
+    # profile remains the active v2 legal-analysis architecture.
     if request.retrieval_profile == "interpretations_july7":
         try:
             interpretation_search = await asyncio.to_thread(
@@ -3676,7 +3676,7 @@ async def chat(
     pipeline_mode = get_legal_pipeline_mode()
     if pipeline_mode == "shadow":
         schedule_legal_rag_v2_shadow(effective_user_prompt)
-    elif pipeline_mode in {"model_rag_model", "legal_rag_v2"}:
+    elif pipeline_mode == _CANONICAL_LEGAL_PIPELINE_MODE:
         run_id = uuid4().hex
         try:
             v2_result = await get_legal_rag_v2_pipeline().run(

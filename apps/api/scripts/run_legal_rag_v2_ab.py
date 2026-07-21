@@ -76,6 +76,14 @@ def recall_at(expected: Iterable[str], actual: Iterable[str], limit: int) -> Opt
     return len(expected_set & actual_set) / len(expected_set)
 
 
+def precision_at(expected: Iterable[str], actual: Iterable[str], limit: int) -> Optional[float]:
+    expected_set = {value.casefold() for value in expected if value}
+    selected = [value.casefold() for value in list(actual)[:limit] if value]
+    if not expected_set or not selected:
+        return None
+    return sum(value in expected_set for value in selected) / len(selected)
+
+
 def _provision_recall(expected: list[str], actual: list[str], limit: int) -> Optional[float]:
     if not expected:
         return None
@@ -86,6 +94,43 @@ def _provision_recall(expected: list[str], actual: list[str], limit: int) -> Opt
         if any(wanted.casefold() == value or wanted.casefold() in value for value in top)
     )
     return hits / len(expected)
+
+
+def _average(values: Iterable[Optional[float]]) -> Optional[float]:
+    available = [value for value in values if value is not None]
+    return statistics.mean(available) if available else None
+
+
+def _percentile(values: Iterable[int], percentile: float) -> Optional[int]:
+    ordered = sorted(values)
+    if not ordered:
+        return None
+    index = min(len(ordered) - 1, max(0, round((len(ordered) - 1) * percentile)))
+    return ordered[index]
+
+
+def aggregate_metrics(results: list[dict[str, Any]]) -> dict[str, dict[str, Optional[float]]]:
+    """Summarise like-for-like variants without embedding benchmark-specific rules."""
+    by_variant: dict[str, list[dict[str, Any]]] = {}
+    for case_result in results:
+        for variant in case_result["variants"]:
+            by_variant.setdefault(str(variant["variant"]), []).append(variant)
+    summary: dict[str, dict[str, Optional[float]]] = {}
+    for variant, rows in by_variant.items():
+        retrieval = [row.get("retrieval") or {} for row in rows]
+        quality = [row.get("quality") or {} for row in rows]
+        operational = [row.get("operational") or {} for row in rows]
+        summary[variant] = {
+            "recall_at_5": _average(item.get("authority_recall_at_5") for item in retrieval),
+            "precision_at_5": _average(item.get("precision_at_5") for item in retrieval),
+            "wrong_neighbor_rate_at_5": _average(item.get("wrong_neighbor_rate_at_5") for item in quality),
+            "lock_preservation_rate": _average(item.get("lock_preservation_rate") for item in quality),
+            "evidence_rate": _average(item.get("evidence_rate") for item in quality),
+            "no_result_rate": _average(item.get("no_result") for item in quality),
+            "latency_ms_p50": _percentile((int(item.get("latency_ms") or 0) for item in operational), 0.50),
+            "latency_ms_p95": _percentile((int(item.get("latency_ms") or 0) for item in operational), 0.95),
+        }
+    return summary
 
 
 def _authority_has_material_span(card: Any) -> bool:
@@ -120,7 +165,18 @@ def run_legacy(case: dict[str, Any], limit: int) -> dict[str, Any]:
             "controlling_provision_recall_at_5": _provision_recall(
                 expected_provisions, provisions, 5
             ),
+            "precision_at_5": precision_at(
+                expected_signatures or expected_documents,
+                signatures if expected_signatures else documents,
+                5,
+            ),
             "candidate_count": len(chunks),
+        },
+        "quality": {
+            "wrong_neighbor_rate_at_5": None,
+            "lock_preservation_rate": None,
+            "evidence_rate": None,
+            "no_result": 1.0 if not chunks else 0.0,
         },
         "answer": {"status": "not_run", "reason": "baseline_preserved_retrieval_only"},
         "operational": {"latency_ms": elapsed, "fallback_used": False},
@@ -165,6 +221,22 @@ async def run_v2(
     expected_signatures = _values(case.get("expected_signatures"))
     expected_documents = _values(case.get("expected_document_ids"))
     expected_provisions = _values(case.get("expected_legal_provisions"))
+    expected_locks = _values(case.get("expected_locked_concepts"))
+    diagnostic = result.diagnostic_trace or {}
+    final_rows = list(diagnostic.get("final_results") or [])
+    relevance_rows = list(diagnostic.get("relevance_results") or [])
+    actual_locks = [
+        str(item.institution_id)
+        for item in result.legal_research_plan.deterministic_institutions
+    ]
+    evidence_rows = [
+        item for item in final_rows
+        if (item.get("document_card") or {}).get("evidence")
+    ]
+    wrong_neighbours = [
+        item for item in relevance_rows[:5]
+        if item.get("relation") in {"irrelevant", "different_mechanism"}
+    ]
     validations_passed = all(item.passed for item in result.validation)
     approved = [
         item
@@ -195,12 +267,23 @@ async def run_v2(
             "controlling_provision_recall_at_5": _provision_recall(
                 expected_provisions, provisions, 5
             ),
+            "precision_at_5": precision_at(
+                expected_signatures or expected_documents,
+                signatures if expected_signatures else documents,
+                5,
+            ),
             "issue_coverage": statistics.mean(
                 item.retrieval_confidence for item in result.evidence_bundles
             )
             if result.evidence_bundles
             else 0.0,
             "candidate_recall_measured_before_rerank": True,
+        },
+        "quality": {
+            "wrong_neighbor_rate_at_5": len(wrong_neighbours) / min(5, len(relevance_rows)) if relevance_rows else 0.0,
+            "lock_preservation_rate": recall_at(expected_locks, actual_locks, len(actual_locks)) if expected_locks else 1.0,
+            "evidence_rate": len(evidence_rows) / len(final_rows) if final_rows else 0.0,
+            "no_result": 1.0 if not final_rows else 0.0,
         },
         "authority_card": {
             "taxpayer_authority_confusion": 0,
@@ -224,6 +307,7 @@ async def run_v2(
             "token_usage": None,
             "cost_usd": None,
         },
+        "trace_reference": f"{run_id}/",
         "failure_classification": failure,
     }
 
@@ -279,6 +363,7 @@ async def async_main(args: argparse.Namespace) -> dict[str, Any]:
         "case_count": len(cases),
         "variants": variants,
         "results": results,
+        "metrics_before_after": aggregate_metrics(results),
     }
     output = args.report or args.artifact_root / "comparison.json"
     output.parent.mkdir(parents=True, exist_ok=True)

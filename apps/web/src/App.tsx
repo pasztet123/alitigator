@@ -497,6 +497,13 @@ function formatTokenCount(value: number) {
   return new Intl.NumberFormat('pl-PL').format(value)
 }
 
+function formatMoney(valueInMinorUnits: number, currency: string) {
+  return new Intl.NumberFormat('pl-PL', {
+    style: 'currency',
+    currency: currency.toUpperCase(),
+  }).format(valueInMinorUnits / 100)
+}
+
 function StatusGlyph({ kind }: { kind: 'credits' | 'model' | 'shield' | 'account' }) {
   if (kind === 'credits') {
     return (
@@ -679,6 +686,8 @@ function App() {
   const [retrievalProfile, setRetrievalProfile] = useState<RetrievalProfile>('current_legal_rag')
 
   const [account, setAccount] = useState<AccountResponse | null>(null)
+  const [isBillingPanelOpen, setIsBillingPanelOpen] = useState(false)
+  const [isCheckoutStarting, setIsCheckoutStarting] = useState(false)
   const [adminGrantDraft, setAdminGrantDraft] = useState({ user_email: '', credit_amount: '1', reason: '' })
   const [isAdminGrantSubmitting, setIsAdminGrantSubmitting] = useState(false)
   const [adminGrantInfo, setAdminGrantInfo] = useState('')
@@ -797,6 +806,41 @@ async function fetchPromptHints({
       currentUrl.searchParams.delete('checkout')
       currentUrl.searchParams.delete('session_id')
       window.history.replaceState({}, document.title, `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`)
+    }
+  }
+
+  async function handleCreditPurchase(creditPack: CreditPack) {
+    if (!session || isCheckoutStarting) {
+      return
+    }
+
+    setError('')
+    setIsCheckoutStarting(true)
+    try {
+      const returnUrl = new URL(window.location.href)
+      returnUrl.searchParams.set('checkout', 'success')
+      returnUrl.searchParams.set('session_id', '{CHECKOUT_SESSION_ID}')
+      const cancelUrl = new URL(window.location.href)
+      cancelUrl.searchParams.set('checkout', 'cancel')
+
+      const response = await apiFetch('/api/billing/checkout-session', session, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          credit_pack_id: creditPack.id,
+          success_url: returnUrl.toString(),
+          cancel_url: cancelUrl.toString(),
+        }),
+      })
+      if (!response.ok) {
+        throw new Error(await readErrorResponse(response))
+      }
+
+      const payload = await response.json() as { checkout_url: string }
+      window.location.assign(payload.checkout_url)
+    } catch (checkoutError) {
+      setError(checkoutError instanceof Error ? checkoutError.message : 'Nie udało się rozpocząć płatności.')
+      setIsCheckoutStarting(false)
     }
   }
 
@@ -1912,6 +1956,13 @@ async function fetchPromptHints({
                 <small>Kredyty</small>
               </span>
             </div>
+            <button
+              type="button"
+              className="top-up-button"
+              onClick={() => setIsBillingPanelOpen(true)}
+            >
+              Doładuj
+            </button>
           </div>
         </header>
 
@@ -2264,6 +2315,45 @@ async function fetchPromptHints({
                 </form>
               </div>
             </div>
+          </section>
+        </div>
+      ) : null}
+
+      {isBillingPanelOpen ? (
+        <div className="billing-panel-overlay" role="dialog" aria-modal="true" aria-labelledby="billing-panel-title">
+          <section className="billing-panel-modal">
+            <div className="billing-panel-header">
+              <div>
+                <p className="eyebrow">Kredyty</p>
+                <h2 id="billing-panel-title">Doładuj konto</h2>
+                <p>Wybierz pakiet kredytów. Płatność bezpiecznie obsługuje Stripe.</p>
+              </div>
+              <button type="button" className="billing-close-button" onClick={() => setIsBillingPanelOpen(false)} disabled={isCheckoutStarting}>
+                Zamknij
+              </button>
+            </div>
+
+            {account?.stripe_configured ? (
+              <div className="billing-pack-list" aria-label="Pakiety kredytów">
+                {account.credit_packs.map((creditPack) => (
+                  <button
+                    key={creditPack.id}
+                    type="button"
+                    className="billing-pack"
+                    disabled={isCheckoutStarting}
+                    onClick={() => void handleCreditPurchase(creditPack)}
+                  >
+                    <span>
+                      <strong>{creditPack.name}</strong>
+                      <small>{creditPack.description}</small>
+                    </span>
+                    <strong>{isCheckoutStarting ? 'Przechodzę do płatności…' : formatMoney(creditPack.price_gross, creditPack.currency)}</strong>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <p className="billing-unavailable">Zakup kredytów jest chwilowo niedostępny. Spróbuj ponownie później.</p>
+            )}
           </section>
         </div>
       ) : null}

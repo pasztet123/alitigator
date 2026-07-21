@@ -921,9 +921,86 @@ select {
 .status-tray {
   display: flex;
   flex-wrap: nowrap;
-  gap: 0;
+  gap: 10px;
   justify-content: flex-end;
   min-width: 0;
+}
+
+.top-up-button {
+  border: 0;
+  border-radius: 16px;
+  padding: 12px 18px;
+  background: #278143;
+  color: #fff;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 8px 18px rgba(29, 104, 53, 0.22);
+  transition: transform 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+}
+
+.top-up-button:hover {
+  transform: translateY(-1px);
+  background: #1e6e37;
+  box-shadow: 0 10px 22px rgba(29, 104, 53, 0.3);
+}
+
+.billing-panel-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(18, 35, 24, 0.36);
+  backdrop-filter: blur(8px);
+}
+
+.billing-panel-modal {
+  width: min(560px, 100%);
+  max-height: min(86svh, 100%);
+  overflow: auto;
+  padding: 28px;
+  border-radius: 32px;
+  background: #f8fcf7;
+  box-shadow: rgba(18, 35, 24, 0.38) 0 34px 90px -28px;
+  display: grid;
+  gap: 22px;
+}
+
+.billing-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.billing-panel-header h2,
+.billing-panel-header p {
+  margin: 0;
+}
+
+.billing-panel-header h2 {
+  margin-top: 6px;
+  color: #173725;
+}
+
+.billing-panel-header p:last-child,
+.billing-unavailable {
+  margin-top: 10px;
+  color: #5b7364;
+  line-height: 1.5;
+}
+
+.billing-close-button {
+  border: 1px solid rgba(28, 56, 39, 0.16);
+  border-radius: 14px;
+  padding: 10px 14px;
+  background: #fff;
+  color: #173725;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
 }
 
 .message-list {
